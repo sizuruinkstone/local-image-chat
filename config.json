@@ -4,6 +4,13 @@
     "url": "http://127.0.0.1:11434",
     "model": "qwen3:1.7b",
     "think": false,
+    "temperature": 0.3,
+    "topP": 0.9,
+    "repeatPenalty": 1.18,
+    "repeatLastN": 128,
+    "numPredict": 320,
+    "numContext": 4096,
+    "maxTags": 96,
     "timeoutMs": 300000
   },
   "reforge": {
