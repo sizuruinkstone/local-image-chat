@@ -176,6 +176,8 @@ Trigger WordsはブラウザへLoRA名ごとに自動保存され、次回その
 
 Ollamaはプロンプト変換後にアンロードするため、画像生成時にVRAMを占有し続けません。
 標準設定ではQwenのThinkingとJSON構造化出力を使わず、Illustrious/NoobAI向けの軽量なタグ変換だけを行います。Ollamaを5分、ReForgeを15分でタイムアウトします。
+短い指示は最大48タグ、詳細な指示は最大96タグへ整理されます。同一タグの反復、低価値な定型句、`nude`と`detailed clothing`のような明白な矛盾は自動除去します。
+Qwenの反復抑制は`ollama.repeatPenalty`、出力上限は`ollama.numPredict`、タグ上限は`ollama.maxTags`で調整できます。
 
 WAI Illustrious v17向けの既定値は`Euler a / Automatic / 25 Steps / CFG 6 / 896x1152`です。
 img2imgは`Denoising 0.45 / 中央クロップ`です。
