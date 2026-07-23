@@ -11,7 +11,10 @@ const ONE_PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42
 test("生成キューからReForge、履歴、👍集計までAPIが往復する", async (t) => {
   const temporaryDir = await fs.mkdtemp(path.join(os.tmpdir(), "local-image-chat-api-"));
   const ollama = await startMockServer(handleOllama);
-  const reforge = await startMockServer(handleReforge);
+  const reforgeRequests = [];
+  const reforge = await startMockServer((request, response) =>
+    handleReforge(request, response, reforgeRequests)
+  );
   const appPort = await reservePort();
   const configPath = path.join(temporaryDir, "config.json");
   await fs.writeFile(configPath, JSON.stringify({
@@ -70,6 +73,71 @@ test("生成キューからReForge、履歴、👍集計までAPIが往復する
   const preferences = await (await fetch(`${baseUrl}/api/history/preferences`)).json();
   assert.equal(preferences.favoriteCount, 1);
   assert.equal(preferences.topTags[0].name, "blue hair");
+
+  const img2imgQueued = await postJson(`${baseUrl}/api/jobs`, {
+    mode: "img2img",
+    description: "衣装だけ変更",
+    prompt: "masterpiece, 1girl, red dress",
+    negativePrompt: "low quality",
+    initImage: `data:image/png;base64,${ONE_PIXEL_PNG}`,
+    loras: [],
+    settings: {
+      width: 512,
+      height: 512,
+      steps: 5,
+      candidateCount: 1,
+      img2imgDenoising: 0.45,
+      img2imgResizeMode: 2
+    }
+  });
+  const img2imgCompleted = await waitForJob(baseUrl, img2imgQueued.job.id);
+  assert.equal(img2imgCompleted.status, "done");
+  assert.equal(img2imgCompleted.result.mode, "img2img");
+  assert.match(img2imgCompleted.result.sourceImageUrl, /^\/outputs\/img2img-source_[a-f0-9]{20}\.png$/);
+
+  const img2imgRequest = reforgeRequests.find((item) => item.url === "/sdapi/v1/img2img");
+  assert.ok(img2imgRequest);
+  assert.equal(img2imgRequest.body.init_images[0], ONE_PIXEL_PNG);
+  assert.equal(img2imgRequest.body.denoising_strength, 0.45);
+  assert.equal(img2imgRequest.body.resize_mode, 2);
+
+  const img2imgImage = img2imgCompleted.result.images[0];
+  const recipeResponse = await fetch(`${baseUrl}/api/history/${img2imgImage.id}/recipe`);
+  const recipe = await recipeResponse.json();
+  assert.equal(recipe.mode, "img2img");
+  assert.equal(recipe.sourceImageUrl, img2imgCompleted.result.sourceImageUrl);
+
+  const refineQueued = await postJson(`${baseUrl}/api/jobs`, {
+    mode: "img2img",
+    description: "高解像度仕上げ",
+    prompt: "masterpiece, 1girl, red dress",
+    negativePrompt: "low quality",
+    initImageId: img2imgImage.id,
+    parentImageId: img2imgImage.id,
+    loras: [],
+    settings: {
+      width: 512,
+      height: 512,
+      steps: 5,
+      candidateCount: 1,
+      img2imgDenoising: 0.45,
+      img2imgResizeMode: 1,
+      hiresEnabled: true,
+      hiresScale: 1.5,
+      hiresSteps: 7,
+      hiresDenoising: 0.32
+    }
+  });
+  const refined = await waitForJob(baseUrl, refineQueued.job.id);
+  assert.equal(refined.status, "done");
+  assert.equal(refined.result.images[0].width, 768);
+  assert.equal(refined.result.images[0].height, 768);
+  const refineRequest = reforgeRequests.filter((item) => item.url === "/sdapi/v1/img2img").at(-1);
+  assert.equal(refineRequest.body.width, 768);
+  assert.equal(refineRequest.body.height, 768);
+  assert.equal(refineRequest.body.steps, 7);
+  assert.equal(refineRequest.body.denoising_strength, 0.32);
+  assert.equal(refineRequest.body.enable_hr, undefined);
 });
 
 function handleOllama(request, response) {
@@ -78,14 +146,15 @@ function handleOllama(request, response) {
   response.writeHead(404).end();
 }
 
-async function handleReforge(request, response) {
+async function handleReforge(request, response, requests) {
   if (request.url === "/sdapi/v1/options") return json(response, { sd_model_checkpoint: "mock.safetensors" });
   if (request.url === "/sdapi/v1/loras") return json(response, []);
   if (request.url?.startsWith("/sdapi/v1/progress")) return json(response, { progress: 0.5, eta_relative: 1 });
   if (request.url === "/sdapi/v1/upscalers") return json(response, [{ name: "Mock" }]);
   if (request.url === "/sdapi/v1/refresh-loras") return json(response, {});
-  if (request.url === "/sdapi/v1/txt2img") {
-    await readBody(request);
+  if (request.url === "/sdapi/v1/txt2img" || request.url === "/sdapi/v1/img2img") {
+    const text = await readBody(request);
+    requests.push({ url: request.url, body: JSON.parse(text) });
     return json(response, {
       images: [ONE_PIXEL_PNG],
       info: JSON.stringify({ seed: 123, all_seeds: [123] })
@@ -121,9 +190,9 @@ function json(response, body) {
 }
 
 async function readBody(request) {
-  for await (const _chunk of request) {
-    // drain
-  }
+  let text = "";
+  for await (const chunk of request) text += chunk;
+  return text;
 }
 
 async function waitForServer(url, child) {

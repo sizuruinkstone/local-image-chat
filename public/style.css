@@ -60,6 +60,25 @@ textarea:focus, input:focus, select:focus { border-color: rgba(185,255,77,.55); 
 
 .buttonRow { display: flex; gap: 10px; margin: 14px 0; }
 .compactButtons button { flex: 1; padding: 9px 11px; font-size: 11px; }
+.generationMode { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
+.modeButton { display: grid; gap: 2px; padding: 10px 12px; color: var(--muted); border: 1px solid var(--line); background: rgba(255,255,255,.035); text-align: left; }
+.modeButton span { font-size: 9px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; }
+.modeButton.active { color: var(--accent); border-color: rgba(185,255,77,.42); background: rgba(185,255,77,.09); }
+.img2imgPanel { margin-top: 10px; padding: 12px; border: 1px solid rgba(185,255,77,.2); border-radius: 13px; background: rgba(185,255,77,.035); }
+.img2imgDropZone { position: relative; min-height: 180px; overflow: hidden; display: grid; place-items: center; border: 1px dashed rgba(255,255,255,.2); border-radius: 12px; background: rgba(0,0,0,.24); transition: border-color .16s ease, background .16s ease; }
+.img2imgDropZone.dragging { border-color: var(--accent); background: rgba(185,255,77,.08); }
+.initImageEmpty { display: grid; justify-items: center; gap: 5px; padding: 20px; color: var(--muted); text-align: center; }
+.initImageEmpty strong { color: #d9dce3; font-size: 13px; }
+.initImageEmpty span { font-size: 10px; }
+.initImageEmpty button { margin-top: 7px; padding: 8px 11px; font-size: 11px; }
+#initImagePreview { display: block; width: 100%; max-height: 360px; object-fit: contain; background: #050506; }
+.img2imgSourceBar { display: flex; align-items: center; justify-content: space-between; gap: 9px; margin-top: 8px; color: var(--muted); font-size: 10px; }
+.img2imgSourceBar span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rangeField { display: grid; grid-template-columns: minmax(0, 1fr) 38px; align-items: center; gap: 8px; margin-top: 6px; }
+.rangeField input { height: 24px; margin: 0; padding: 0; accent-color: var(--accent); }
+.rangeField output { color: var(--accent); font-size: 11px; font-variant-numeric: tabular-nums; text-align: right; }
+.autoSizeChoice { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--muted); font-size: 11px; font-weight: 600; }
+.autoSizeChoice input { flex: 0 0 auto; width: 15px; height: 15px; margin: 0; accent-color: var(--accent); }
 .compositionLockStatus { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 12px 0; padding: 9px 11px; border: 1px solid rgba(185,255,77,.3); border-radius: 11px; color: var(--accent); background: rgba(185,255,77,.07); font-size: 11px; font-weight: 800; }
 .compositionLockStatus button { padding: 6px 9px; color: #ffc2ca; background: rgba(255,102,122,.09); }
 .quickCount { display: grid; grid-template-columns: auto minmax(130px, 180px) 1fr; align-items: center; gap: 10px; margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.035); }
@@ -150,6 +169,7 @@ details label { margin-top: 13px; }
 .candidateCard footer a { color: var(--accent); font-weight: 800; text-decoration: none; }
 .candidateCardActions { display: flex; align-items: center; gap: 7px; }
 .candidateCardActions button { padding: 3px 6px; color: var(--muted); background: transparent; font-size: 13px; }
+.candidateCardActions .candidateImg2ImgButton { font-size: 9px; font-weight: 800; }
 .candidateCardActions button.active { color: var(--accent); }
 .finishBar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 13px; background: rgba(255,255,255,.035); color: var(--muted); font-size: 12px; }
 .finishBar > div { display: flex; gap: 8px; }
@@ -171,7 +191,7 @@ details label { margin-top: 13px; }
 .historyCardBody { padding: 9px; }
 .historyCardBody strong { display: block; overflow: hidden; color: #d9dce3; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .historyCardBody span { display: block; margin-top: 4px; color: var(--muted); font-size: 9px; }
-.historyCardActions { display: grid; grid-template-columns: auto 1fr; gap: 6px; margin-top: 8px; }
+.historyCardActions { display: grid; grid-template-columns: auto auto 1fr; gap: 6px; margin-top: 8px; }
 .historyCardActions button { padding: 7px 8px; font-size: 10px; }
 .hidden { display: none !important; }
 

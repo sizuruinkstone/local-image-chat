@@ -12,7 +12,7 @@
         <div>
           <p class="eyebrow">LOCAL GENERATION</p>
           <h1>Local Image Chat</h1>
-          <p class="subtitle">日本語で話して、ReForgeで生成。<span id="versionText" class="version">v2.1</span></p>
+          <p class="subtitle">日本語で話して、ReForgeで生成。<span id="versionText" class="version">v2.2</span></p>
         </div>
         <div class="headerActions">
           <button id="updateStatusButton" class="ghost">最新版確認</button>
@@ -38,6 +38,63 @@
         <section class="panel controls">
           <label for="description">生成したい画像</label>
           <textarea id="description" rows="6" placeholder="例：銀髪の女の子が、黒い大きめのパーカーを着て夜の秋葉原に立っている。縦長のアニメイラスト。"></textarea>
+
+          <div class="generationMode" role="group" aria-label="生成モード">
+            <button id="txt2imgModeButton" class="modeButton active" type="button" aria-pressed="true">
+              新規生成
+              <span>txt2img</span>
+            </button>
+            <button id="img2imgModeButton" class="modeButton" type="button" aria-pressed="false">
+              元画像から生成
+              <span>img2img</span>
+            </button>
+          </div>
+
+          <section id="img2imgPanel" class="img2imgPanel hidden" aria-label="img2img参照画像">
+            <div id="img2imgDropZone" class="img2imgDropZone">
+              <input id="initImageInput" class="hidden" type="file" accept="image/png,image/jpeg,image/webp" />
+              <div id="initImageEmpty" class="initImageEmpty">
+                <strong>参照画像をドロップ</strong>
+                <span>PNG・JPEG・WebP、20MBまで</span>
+                <button id="chooseInitImageButton" class="secondary" type="button">画像を選択</button>
+              </div>
+              <img id="initImagePreview" class="hidden" alt="img2imgの参照画像" />
+            </div>
+            <div class="img2imgSourceBar">
+              <span id="initImageStatus">参照画像が未選択です</span>
+              <button id="clearInitImageButton" class="ghost smallButton" type="button" disabled>解除</button>
+            </div>
+            <div class="settingsGrid">
+              <label>変化プリセット
+                <select id="img2imgPreset">
+                  <option value="">カスタム</option>
+                  <option value="0.25">ほぼ維持</option>
+                  <option value="0.35">画風を変更</option>
+                  <option value="0.45" selected>衣装を変更</option>
+                  <option value="0.60">キャラを変更</option>
+                  <option value="0.72">大きく描き直す</option>
+                </select>
+              </label>
+              <label>Denoising
+                <div class="rangeField">
+                  <input id="img2imgDenoising" type="range" min="0.05" max="0.95" step="0.01" value="0.45" />
+                  <output id="img2imgDenoisingValue">0.45</output>
+                </div>
+              </label>
+              <label class="fullWidthField">リサイズ方法
+                <select id="img2imgResizeMode">
+                  <option value="1" selected>比率を保って中央クロップ</option>
+                  <option value="2">全体を収めて余白を追加</option>
+                  <option value="0">指定サイズへそのまま変形</option>
+                </select>
+              </label>
+              <label class="fullWidthField autoSizeChoice">
+                <input id="syncInitImageSize" type="checkbox" checked />
+                元画像の縦横比に幅・高さを自動で合わせる
+              </label>
+            </div>
+            <p class="hint">生成済み画像や履歴の「img2imgへ」からも、その画像を直接セットできます。</p>
+          </section>
 
           <div class="quickCount">
             <label for="candidateCount">候補枚数</label>
@@ -177,7 +234,7 @@
 
           <details>
             <summary>Hires.fix設定</summary>
-            <p class="hint">候補を選んだ後、そのSeedだけ高解像度化します。</p>
+            <p class="hint">新規生成はHires.fix、img2imgは選択候補を参照画像にして高解像度化します。Upscalerは新規生成だけで使用します。</p>
             <div class="settingsGrid">
               <label>倍率<input id="hiresScale" type="number" min="1" max="2" step="0.1" /></label>
               <label>Hires Steps<input id="hiresSteps" type="number" min="1" max="50" /></label>
@@ -213,11 +270,12 @@
             <section id="finalResult" class="finalResult hidden">
               <div class="sectionHeading">
                 <div>
-                  <p class="eyebrow">HIRES.FIX COMPLETE</p>
-                  <h2>高解像度版</h2>
+                  <p id="finalEyebrow" class="eyebrow">HIRES.FIX COMPLETE</p>
+                  <h2 id="finalTitle">高解像度版</h2>
                 </div>
                 <div class="resultActions">
                   <button id="favoriteFinalButton" class="iconButton" type="button" aria-label="お気に入り">👍</button>
+                  <button id="sendFinalToImg2ImgButton" class="secondary smallButton" type="button">img2imgへ</button>
                   <button id="reuseFinalButton" class="secondary smallButton" type="button">この構図で差し替え</button>
                   <a id="downloadLink" class="downloadButton" download>画像を保存</a>
                 </div>

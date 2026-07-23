@@ -30,6 +30,8 @@
     "samplerName": "Euler a",
     "scheduler": "Automatic",
     "candidateCount": 1,
+    "img2imgDenoising": 0.45,
+    "img2imgResizeMode": 1,
     "hiresScale": 1.5,
     "hiresSteps": 20,
     "hiresDenoising": 0.4,

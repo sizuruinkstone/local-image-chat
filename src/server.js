@@ -1,4 +1,5 @@
 import express from "express";
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +12,7 @@ import { createUpdater } from "./updater.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
+const MAX_INIT_IMAGE_BYTES = 20 * 1024 * 1024;
 const baseConfig = JSON.parse(await fs.readFile(path.join(rootDir, "config.json"), "utf8"));
 const localConfigPath = process.env.LOCAL_IMAGE_CHAT_CONFIG
   ? path.resolve(process.env.LOCAL_IMAGE_CHAT_CONFIG)
@@ -44,7 +46,7 @@ const updater = createUpdater(rootDir, {
 const jobs = createJobManager(performGeneration);
 
 const app = express();
-app.use(express.json({ limit: "5mb" }));
+app.use(express.json({ limit: "30mb" }));
 app.use(express.static(path.join(rootDir, "public")));
 app.use("/outputs", express.static(outputDir));
 
@@ -233,9 +235,11 @@ app.listen(config.port, "127.0.0.1", () => {
 
 async function performGeneration(body, { signal, report }) {
   const description = requireText(body.description, "生成したい内容");
+  const mode = validateGenerationMode(body.mode);
   const settings = validateSettings(body.settings ?? {});
   const loras = validateLoras(body.loras);
   const promptBoosts = validatePromptBoosts(body.promptBoosts);
+  const sourceImage = await resolveSourceImage(body, mode);
 
   report(5, "プロンプトを準備中");
   const generatedPrompt = body.prompt?.trim()
@@ -256,6 +260,7 @@ async function performGeneration(body, { signal, report }) {
   const generated = await generateImages(config.reforge, {
     prompt: effectivePrompt,
     negativePrompt: effectiveNegativePrompt,
+    initImageBase64: sourceImage?.base64,
     ...settings
   }, {
     signal,
@@ -264,6 +269,18 @@ async function performGeneration(body, { signal, report }) {
 
   report(94, "画像とレシピを保存中");
   const runId = timestamp();
+  let sourceImageUrl = sourceImage?.imageUrl ?? null;
+  if (sourceImage?.uploaded) {
+    const sourceHash = crypto.createHash("sha256").update(sourceImage.buffer).digest("hex").slice(0, 20);
+    const sourceFilename = `img2img-source_${sourceHash}.${sourceImage.extension}`;
+    try {
+      await fs.writeFile(path.join(outputDir, sourceFilename), sourceImage.buffer, { flag: "wx" });
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
+    sourceImageUrl = `/outputs/${sourceFilename}`;
+  }
+  const outputSize = outputDimensions(mode, settings);
   const savedImages = await Promise.all(generated.images.map(async (image, index) => {
     const kind = settings.hiresEnabled ? "hires" : `candidate-${index + 1}`;
     const filename = `${runId}_${kind}_seed-${image.seed}.png`;
@@ -272,14 +289,17 @@ async function performGeneration(body, { signal, report }) {
       imageUrl: `/outputs/${filename}`,
       filename,
       seed: image.seed,
-      width: settings.hiresEnabled ? Math.round(settings.width * settings.hiresScale) : settings.width,
-      height: settings.hiresEnabled ? Math.round(settings.height * settings.hiresScale) : settings.height
+      width: outputSize.width,
+      height: outputSize.height
     };
   }));
 
   const stored = await history.addGeneration({
     kind: settings.hiresEnabled ? "hires" : "candidates",
+    mode,
     parentImageId: body.parentImageId,
+    sourceImageId: sourceImage?.imageId,
+    sourceImageUrl,
     description,
     prompt: promptWithBoosts,
     negativePrompt: generatedPrompt.negative_prompt,
@@ -293,6 +313,9 @@ async function performGeneration(body, { signal, report }) {
   report(99, "完了");
   return {
     generationId: stored.id,
+    mode,
+    sourceImageId: stored.sourceImageId,
+    sourceImageUrl: stored.sourceImageUrl,
     images: stored.images,
     prompt: promptWithBoosts,
     negativePrompt: generatedPrompt.negative_prompt,
@@ -333,11 +356,124 @@ function validateSettings(input) {
     samplerName: textOrDefault(input.samplerName, defaults.samplerName),
     scheduler: textOrDefault(input.scheduler, defaults.scheduler),
     candidateCount: hiresEnabled ? 1 : boundedInt(input.candidateCount, defaults.candidateCount ?? 4, 1, 4),
+    img2imgDenoising: boundedNumber(
+      input.img2imgDenoising,
+      defaults.img2imgDenoising ?? 0.45,
+      0.05,
+      0.95
+    ),
+    img2imgResizeMode: boundedInt(
+      input.img2imgResizeMode,
+      defaults.img2imgResizeMode ?? 1,
+      0,
+      2
+    ),
     hiresEnabled,
     hiresScale: boundedNumber(input.hiresScale, defaults.hiresScale ?? 1.5, 1, 2),
     hiresSteps: boundedInt(input.hiresSteps, defaults.hiresSteps ?? 20, 1, 50),
     hiresDenoising: boundedNumber(input.hiresDenoising, defaults.hiresDenoising ?? 0.4, 0.1, 0.8),
     hiresUpscaler: textOrDefault(input.hiresUpscaler, defaults.hiresUpscaler ?? "R-ESRGAN 4x+ Anime6B")
+  };
+}
+
+function validateGenerationMode(value) {
+  if (value === undefined || value === null || value === "" || value === "txt2img") return "txt2img";
+  if (value === "img2img") return "img2img";
+  throw new Error("生成モードが不正です");
+}
+
+async function resolveSourceImage(body, mode) {
+  if (mode !== "img2img") return null;
+
+  if (body.initImageId) {
+    const imageId = requireId(body.initImageId);
+    const recipe = await history.getRecipe(imageId);
+    const filename = path.basename(String(recipe.selectedImage.filename ?? ""));
+    if (!filename || filename !== recipe.selectedImage.filename) {
+      throw new Error("参照画像の保存先が不正です");
+    }
+    const buffer = await fs.readFile(path.join(outputDir, filename));
+    validateImageBuffer(buffer, extensionFromFilename(filename));
+    return {
+      base64: buffer.toString("base64"),
+      buffer,
+      extension: extensionFromFilename(filename),
+      imageId,
+      imageUrl: recipe.selectedImage.imageUrl,
+      uploaded: false
+    };
+  }
+
+  if (typeof body.initImage === "string" && body.initImage) {
+    return {
+      ...parseImageDataUrl(body.initImage),
+      imageId: null,
+      imageUrl: null,
+      uploaded: true
+    };
+  }
+
+  throw new Error("img2imgの参照画像を選択してください");
+}
+
+function parseImageDataUrl(value) {
+  const matched = value.match(/^data:image\/(png|jpe?g|webp);base64,([a-z0-9+/]+={0,2})$/i);
+  if (!matched) throw new Error("参照画像はPNG・JPEG・WebPを選択してください");
+  const extension = matched[1].toLowerCase().replace("jpeg", "jpg");
+  const buffer = Buffer.from(matched[2], "base64");
+  validateImageBuffer(buffer, extension);
+  return { base64: matched[2], buffer, extension };
+}
+
+function validateImageBuffer(buffer, extension) {
+  if (!Buffer.isBuffer(buffer) || !buffer.length) throw new Error("参照画像が空です");
+  if (buffer.length > MAX_INIT_IMAGE_BYTES) throw new Error("参照画像は20MB以下にしてください");
+
+  const valid = extension === "png"
+    ? buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    : extension === "jpg"
+      ? buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff
+      : extension === "webp"
+        ? buffer.subarray(0, 4).toString("ascii") === "RIFF"
+          && buffer.subarray(8, 12).toString("ascii") === "WEBP"
+        : false;
+  if (!valid) throw new Error("参照画像の形式を確認できませんでした");
+}
+
+function extensionFromFilename(filename) {
+  const extension = path.extname(filename).slice(1).toLowerCase().replace("jpeg", "jpg");
+  if (!["png", "jpg", "webp"].includes(extension)) {
+    throw new Error("履歴の参照画像形式に対応していません");
+  }
+  return extension;
+}
+
+function outputDimensions(mode, settings) {
+  if (mode !== "img2img" || !settings.hiresEnabled) {
+    return {
+      width: settings.hiresEnabled ? Math.round(settings.width * settings.hiresScale) : settings.width,
+      height: settings.hiresEnabled ? Math.round(settings.height * settings.hiresScale) : settings.height
+    };
+  }
+  return img2imgRefineDimensions(settings.width, settings.height, settings.hiresScale);
+}
+
+function roundToMultiple(value, multiple) {
+  return Math.max(multiple, Math.round(Number(value) / multiple) * multiple);
+}
+
+function img2imgRefineDimensions(width, height, scale) {
+  let targetWidth = Number(width) * Number(scale);
+  let targetHeight = Number(height) * Number(scale);
+  const maximumPixels = 2_600_000;
+  if (targetWidth * targetHeight > maximumPixels) {
+    const reduction = Math.sqrt(maximumPixels / (targetWidth * targetHeight));
+    targetWidth *= reduction;
+    targetHeight *= reduction;
+  }
+  return {
+    width: roundToMultiple(targetWidth, 8),
+    height: roundToMultiple(targetHeight, 8)
   };
 }
 

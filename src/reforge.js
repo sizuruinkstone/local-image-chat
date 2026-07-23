@@ -32,11 +32,14 @@ export async function refreshLoras(config) {
 }
 
 export async function generateImages(config, request, { signal, onProgress } = {}) {
+  const isImg2Img = Boolean(request.initImageBase64);
   const count = request.hiresEnabled ? 1 : request.candidateCount;
-  const label = request.hiresEnabled ? "Hires.fix" : `${count} candidate(s)`;
+  const label = request.hiresEnabled
+    ? isImg2Img ? "img2img refine" : "Hires.fix"
+    : `${count} ${isImg2Img ? "img2img " : ""}candidate(s)`;
   const startedAt = Date.now();
   const images = [];
-  const effectiveRequest = request.hiresEnabled
+  const effectiveRequest = request.hiresEnabled && !isImg2Img
     ? { ...request, hiresUpscaler: await resolveUpscaler(config, request.hiresUpscaler) }
     : request;
   console.log(`[ReForge] ${label} started`);
@@ -94,6 +97,10 @@ async function resolveUpscaler(config, requestedName) {
 }
 
 async function generateOne(config, request, seed, { signal, onProgress } = {}) {
+  const isImg2Img = Boolean(request.initImageBase64);
+  const refinedSize = request.hiresEnabled && isImg2Img
+    ? img2imgRefineDimensions(request.width, request.height, request.hiresScale)
+    : { width: request.width, height: request.height };
   const payload = {
     prompt: request.prompt,
     negative_prompt: request.negativePrompt,
@@ -102,28 +109,39 @@ async function generateOne(config, request, seed, { signal, onProgress } = {}) {
     scheduler: request.scheduler,
     batch_size: 1,
     n_iter: 1,
-    steps: request.steps,
+    steps: request.hiresEnabled && isImg2Img ? request.hiresSteps : request.steps,
     cfg_scale: request.cfgScale,
-    width: request.width,
-    height: request.height,
-    enable_hr: request.hiresEnabled,
+    width: refinedSize.width,
+    height: refinedSize.height,
     do_not_save_grid: true,
     save_images: true
   };
 
-  if (request.hiresEnabled) {
+  if (isImg2Img) {
     Object.assign(payload, {
-      hr_scale: request.hiresScale,
-      hr_upscaler: request.hiresUpscaler,
-      hr_second_pass_steps: request.hiresSteps,
-      denoising_strength: request.hiresDenoising
+      init_images: [request.initImageBase64],
+      resize_mode: request.img2imgResizeMode,
+      denoising_strength: request.hiresEnabled
+        ? request.hiresDenoising
+        : request.img2imgDenoising,
+      include_init_images: false
     });
+  } else {
+    payload.enable_hr = request.hiresEnabled;
+    if (request.hiresEnabled) {
+      Object.assign(payload, {
+        hr_scale: request.hiresScale,
+        hr_upscaler: request.hiresUpscaler,
+        hr_second_pass_steps: request.hiresSteps,
+        denoising_strength: request.hiresDenoising
+      });
+    }
   }
 
   const stopProgressPolling = startProgressPolling(config, signal, onProgress);
   let response;
   try {
-    response = await fetch(`${config.url}/sdapi/v1/txt2img`, {
+    response = await fetch(`${config.url}/sdapi/v1/${isImg2Img ? "img2img" : "txt2img"}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -160,6 +178,25 @@ async function generateOne(config, request, seed, { signal, onProgress } = {}) {
 
 function validSeed(value) {
   return Number.isInteger(value) && value >= -1 && value <= 4294967295;
+}
+
+function roundToMultiple(value, multiple) {
+  return Math.max(multiple, Math.round(Number(value) / multiple) * multiple);
+}
+
+function img2imgRefineDimensions(width, height, scale) {
+  let targetWidth = Number(width) * Number(scale);
+  let targetHeight = Number(height) * Number(scale);
+  const maximumPixels = 2_600_000;
+  if (targetWidth * targetHeight > maximumPixels) {
+    const reduction = Math.sqrt(maximumPixels / (targetWidth * targetHeight));
+    targetWidth *= reduction;
+    targetHeight *= reduction;
+  }
+  return {
+    width: roundToMultiple(targetWidth, 8),
+    height: roundToMultiple(targetHeight, 8)
+  };
 }
 
 export function normalizeLora(item) {

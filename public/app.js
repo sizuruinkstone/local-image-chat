@@ -1,6 +1,7 @@
 import { LORA_PROFILES, findProfileForLora, getPreset, getProfile } from "./lora-profiles.js";
 
 const PROFILE_STORAGE_VERSION = 2;
+const MAX_INIT_IMAGE_BYTES = 20 * 1024 * 1024;
 
 const elements = Object.fromEntries(
   [
@@ -21,7 +22,12 @@ const elements = Object.fromEntries(
     "civitaiToken", "inspectCivitaiButton", "installCivitaiButton",
     "civitaiPreview", "civitaiStatus", "updateStatusButton", "updateDetails",
     "githubToken", "checkUpdateButton", "applyUpdateButton", "updateStatus",
-    "favoritesOnly", "refreshHistoryButton", "preferenceSummary", "historyGrid"
+    "favoritesOnly", "refreshHistoryButton", "preferenceSummary", "historyGrid",
+    "txt2imgModeButton", "img2imgModeButton", "img2imgPanel", "img2imgDropZone",
+    "initImageInput", "initImageEmpty", "initImagePreview", "chooseInitImageButton",
+    "clearInitImageButton", "initImageStatus", "img2imgPreset", "img2imgDenoising",
+    "img2imgDenoisingValue", "img2imgResizeMode", "syncInitImageSize",
+    "sendFinalToImg2ImgButton", "finalEyebrow", "finalTitle"
   ].map((id) => [id, document.getElementById(id)])
 );
 
@@ -40,6 +46,8 @@ let preferenceBoosts = [];
 let inspectedCivitai = null;
 let updateInfo = null;
 let activeLoraCategory = loadLoraCategory();
+let generationMode = "txt2img";
+let initImageReference = null;
 const selectedLoras = new Map();
 const loraWeights = loadLoraWeights();
 const loraTriggers = loadLoraTriggers();
@@ -48,21 +56,59 @@ const loraProfileAssignments = loadStringMap("localImageChat.loraProfileAssignme
 const loraPresetSelections = loadStringMap("localImageChat.loraPresetSelections");
 
 await loadConfig();
+loadImg2ImgPreferences();
 loadPromptPartSelections();
 restoreSessionSecrets();
 await Promise.all([checkHealth(), loadLoras(), loadHistory()]);
+setGenerationMode("txt2img");
 updateGenerateButton();
 
 elements.healthButton.addEventListener("click", checkHealth);
 elements.promptButton.addEventListener("click", buildPrompt);
 elements.generateButton.addEventListener("click", generateCandidates);
 elements.finishButton.addEventListener("click", finishSelected);
+elements.txt2imgModeButton.addEventListener("click", () => setGenerationMode("txt2img"));
+elements.img2imgModeButton.addEventListener("click", () => setGenerationMode("img2img"));
+elements.chooseInitImageButton.addEventListener("click", () => elements.initImageInput.click());
+elements.initImageInput.addEventListener("change", () => {
+  const [file] = elements.initImageInput.files ?? [];
+  if (file) void loadInitImageFile(file);
+});
+elements.clearInitImageButton.addEventListener("click", clearInitImageReference);
+elements.img2imgPreset.addEventListener("change", handleImg2ImgPresetChange);
+elements.img2imgDenoising.addEventListener("input", handleImg2ImgDenoisingInput);
+elements.img2imgResizeMode.addEventListener("change", saveImg2ImgPreferences);
+elements.syncInitImageSize.addEventListener("change", () => {
+  saveImg2ImgPreferences();
+  if (elements.syncInitImageSize.checked && initImageReference?.width && initImageReference?.height) {
+    syncResolutionToReference(initImageReference.width, initImageReference.height);
+  }
+});
+for (const eventName of ["dragenter", "dragover"]) {
+  elements.img2imgDropZone.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    elements.img2imgDropZone.classList.add("dragging");
+  });
+}
+for (const eventName of ["dragleave", "drop"]) {
+  elements.img2imgDropZone.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    elements.img2imgDropZone.classList.remove("dragging");
+  });
+}
+elements.img2imgDropZone.addEventListener("drop", (event) => {
+  const [file] = event.dataTransfer?.files ?? [];
+  if (file) void loadInitImageFile(file);
+});
 elements.lockCompositionButton.addEventListener("click", lockSelectedComposition);
 elements.reuseFinalButton.addEventListener("click", () => {
   if (finalGeneration && finalImage) activateCompositionLock(finalGeneration, finalImage);
 });
 elements.favoriteFinalButton.addEventListener("click", () => {
   if (finalImage) void toggleFavorite(finalImage, elements.favoriteFinalButton);
+});
+elements.sendFinalToImg2ImgButton.addEventListener("click", () => {
+  if (finalImage) useImageForImg2Img(finalImage);
 });
 elements.unlockCompositionButton.addEventListener("click", unlockComposition);
 elements.cancelJobButton.addEventListener("click", cancelActiveJob);
@@ -113,6 +159,179 @@ async function loadConfig() {
   }
   const savedCount = localStorage.getItem("localImageChat.candidateCount");
   if (["1", "2", "3", "4"].includes(savedCount)) elements.candidateCount.value = savedCount;
+}
+
+function setGenerationMode(mode) {
+  generationMode = mode === "img2img" ? "img2img" : "txt2img";
+  const isImg2Img = generationMode === "img2img";
+  elements.txt2imgModeButton.classList.toggle("active", !isImg2Img);
+  elements.txt2imgModeButton.setAttribute("aria-pressed", String(!isImg2Img));
+  elements.img2imgModeButton.classList.toggle("active", isImg2Img);
+  elements.img2imgModeButton.setAttribute("aria-pressed", String(isImg2Img));
+  elements.img2imgPanel.classList.toggle("hidden", !isImg2Img);
+  updateGenerateButton();
+}
+
+async function loadInitImageFile(file) {
+  clearError();
+  const mimeType = inferImageMimeType(file);
+  if (!mimeType) {
+    return showError("参照画像はPNG・JPEG・WebPを選択してください");
+  }
+  if (file.size > MAX_INIT_IMAGE_BYTES) {
+    return showError("参照画像は20MB以下にしてください");
+  }
+
+  try {
+    const loadedDataUrl = await fileToDataUrl(file);
+    const dataUrl = loadedDataUrl.replace(/^data:[^;]*;/, `data:${mimeType};`);
+    const dimensions = await imageDimensions(dataUrl);
+    setImg2ImgReference({
+      dataUrl,
+      imageUrl: dataUrl,
+      imageId: null,
+      filename: file.name,
+      ...dimensions
+    });
+  } catch (error) {
+    showError(`参照画像を読み込めませんでした: ${error.message}`);
+  }
+}
+
+function inferImageMimeType(file) {
+  if (["image/png", "image/jpeg", "image/webp"].includes(file.type)) return file.type;
+  const extension = file.name.split(".").pop()?.toLowerCase();
+  return extension === "png"
+    ? "image/png"
+    : ["jpg", "jpeg"].includes(extension)
+      ? "image/jpeg"
+      : extension === "webp"
+        ? "image/webp"
+        : "";
+}
+
+function useImageForImg2Img(image) {
+  setImg2ImgReference({
+    dataUrl: null,
+    imageUrl: image.imageUrl,
+    imageId: image.id,
+    filename: image.filename,
+    width: image.width,
+    height: image.height
+  }, { scroll: true });
+}
+
+function setImg2ImgReference(reference, { scroll = false } = {}) {
+  initImageReference = reference;
+  setGenerationMode("img2img");
+  elements.initImagePreview.src = reference.imageUrl;
+  elements.initImagePreview.classList.remove("hidden");
+  elements.initImageEmpty.classList.add("hidden");
+  elements.initImageStatus.textContent = reference.imageId
+    ? `履歴から使用: ${reference.filename ?? reference.imageId}`
+    : `アップロード: ${reference.filename ?? "参照画像"}`;
+  elements.clearInitImageButton.disabled = false;
+  elements.initImageInput.value = "";
+
+  if (reference.width && reference.height) {
+    if (elements.syncInitImageSize.checked) syncResolutionToReference(reference.width, reference.height);
+  } else {
+    void imageDimensions(reference.imageUrl).then(({ width, height }) => {
+      if (initImageReference !== reference) return;
+      initImageReference.width = width;
+      initImageReference.height = height;
+      if (elements.syncInitImageSize.checked) syncResolutionToReference(width, height);
+    }).catch(() => {});
+  }
+
+  if (scroll) elements.img2imgPanel.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function clearInitImageReference() {
+  initImageReference = null;
+  elements.initImageInput.value = "";
+  elements.initImagePreview.removeAttribute("src");
+  elements.initImagePreview.classList.add("hidden");
+  elements.initImageEmpty.classList.remove("hidden");
+  elements.initImageStatus.textContent = "参照画像が未選択です";
+  elements.clearInitImageButton.disabled = true;
+}
+
+function syncResolutionToReference(sourceWidth, sourceHeight) {
+  const width = Number(sourceWidth);
+  const height = Number(sourceHeight);
+  if (!(width > 0 && height > 0)) return;
+  const longEdge = Math.min(1536, Math.max(512, Math.max(
+    Number(elements.width.value) || 896,
+    Number(elements.height.value) || 1152
+  )));
+  const ratio = width / height;
+  const targetWidth = ratio >= 1 ? longEdge : longEdge * ratio;
+  const targetHeight = ratio >= 1 ? longEdge / ratio : longEdge;
+  elements.width.value = clampRound(targetWidth, 256, 1536, 64);
+  elements.height.value = clampRound(targetHeight, 256, 1536, 64);
+}
+
+function handleImg2ImgPresetChange() {
+  if (!elements.img2imgPreset.value) return;
+  elements.img2imgDenoising.value = elements.img2imgPreset.value;
+  updateImg2ImgDenoisingDisplay();
+  saveImg2ImgPreferences();
+}
+
+function handleImg2ImgDenoisingInput() {
+  const value = Number(elements.img2imgDenoising.value).toFixed(2);
+  const presetExists = [...elements.img2imgPreset.options]
+    .some((option) => option.value && Number(option.value).toFixed(2) === value);
+  elements.img2imgPreset.value = presetExists ? value : "";
+  updateImg2ImgDenoisingDisplay();
+  saveImg2ImgPreferences();
+}
+
+function updateImg2ImgDenoisingDisplay() {
+  elements.img2imgDenoisingValue.value = Number(elements.img2imgDenoising.value).toFixed(2);
+}
+
+function loadImg2ImgPreferences() {
+  const denoising = Number(localStorage.getItem("localImageChat.img2imgDenoising"));
+  if (Number.isFinite(denoising) && denoising >= 0.05 && denoising <= 0.95) {
+    elements.img2imgDenoising.value = denoising;
+  }
+  const resizeMode = localStorage.getItem("localImageChat.img2imgResizeMode");
+  if (["0", "1", "2"].includes(resizeMode)) elements.img2imgResizeMode.value = resizeMode;
+  elements.syncInitImageSize.checked = localStorage.getItem("localImageChat.syncInitImageSize") !== "false";
+  handleImg2ImgDenoisingInput();
+}
+
+function saveImg2ImgPreferences() {
+  localStorage.setItem("localImageChat.img2imgDenoising", elements.img2imgDenoising.value);
+  localStorage.setItem("localImageChat.img2imgResizeMode", elements.img2imgResizeMode.value);
+  localStorage.setItem("localImageChat.syncInitImageSize", String(elements.syncInitImageSize.checked));
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => resolve(String(reader.result)));
+    reader.addEventListener("error", () => reject(reader.error ?? new Error("ファイル読込エラー")));
+    reader.readAsDataURL(file);
+  });
+}
+
+function imageDimensions(source) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.addEventListener("load", () => resolve({
+      width: image.naturalWidth,
+      height: image.naturalHeight
+    }), { once: true });
+    image.addEventListener("error", () => reject(new Error("画像形式を認識できません")), { once: true });
+    image.src = source;
+  });
+}
+
+function clampRound(value, minimum, maximum, multiple) {
+  return Math.min(maximum, Math.max(minimum, Math.round(value / multiple) * multiple));
 }
 
 async function loadLoras(refresh = false) {
@@ -588,12 +807,19 @@ async function generateCandidates() {
   clearError();
   const description = elements.description.value.trim();
   if (!description) return showError("生成したい画像を日本語で入力してくれ");
+  if (generationMode === "img2img" && !initImageReference) {
+    setGenerationMode("img2img");
+    return showError("img2imgの参照画像を選択してください");
+  }
 
   elements.emptyState.classList.add("hidden");
   elements.finalResult.classList.add("hidden");
+  finalImage = null;
+  finalGeneration = null;
   selectedCandidate = null;
   const count = Number(elements.candidateCount.value);
-  setBusy(true, `${count}枚の候補を1枚ずつ生成します…`);
+  const modeLabel = generationMode === "img2img" ? "img2img候補" : "候補";
+  setBusy(true, `${count}枚の${modeLabel}を1枚ずつ生成します…`);
 
   try {
     if (!elements.prompt.value.trim() || promptDescription !== description) {
@@ -601,17 +827,22 @@ async function generateCandidates() {
       await requestPrompt(description);
     }
 
-    elements.loadingText.textContent = `${count}枚の候補を1枚ずつ生成中…`;
+    elements.loadingText.textContent = `${count}枚の${modeLabel}を1枚ずつ生成中…`;
     const data = await submitGeneration({
+      mode: generationMode,
       description,
       prompt: elements.prompt.value,
       negativePrompt: elements.negativePrompt.value,
       loras: readSelectedLoras(),
       promptBoosts: readPromptBoosts(),
+      ...readInitImagePayload(),
       settings: readSettings({ candidateCount: count, hiresEnabled: false })
     });
 
     lastGeneration = {
+      mode: data.mode,
+      sourceImageId: data.sourceImageId,
+      sourceImageUrl: data.sourceImageUrl,
       description,
       prompt: data.prompt,
       negativePrompt: data.negativePrompt,
@@ -635,16 +866,21 @@ async function generateCandidates() {
 async function finishSelected() {
   if (!selectedCandidate || !lastGeneration) return;
   clearError();
-  setBusy(true, `Seed ${selectedCandidate.seed} をHires.fix中…`);
+  const isImg2Img = lastGeneration.mode === "img2img";
+  setBusy(true, isImg2Img
+    ? `Seed ${selectedCandidate.seed} をimg2img高解像度仕上げ中…`
+    : `Seed ${selectedCandidate.seed} をHires.fix中…`);
 
   try {
     const data = await submitGeneration({
+      mode: isImg2Img ? "img2img" : "txt2img",
       description: lastGeneration.description,
       prompt: lastGeneration.prompt,
       negativePrompt: lastGeneration.negativePrompt,
       loras: lastGeneration.loras,
       promptBoosts: [],
       parentImageId: selectedCandidate.id,
+      ...(isImg2Img ? { initImageId: selectedCandidate.id } : {}),
       settings: {
         ...lastGeneration.settings,
         candidateCount: 1,
@@ -660,6 +896,9 @@ async function finishSelected() {
     const finished = data.images[0];
     finalImage = finished;
     finalGeneration = {
+      mode: data.mode,
+      sourceImageId: data.sourceImageId,
+      sourceImageUrl: data.sourceImageUrl,
       description: lastGeneration.description,
       prompt: data.prompt,
       negativePrompt: data.negativePrompt,
@@ -667,9 +906,11 @@ async function finishSelected() {
       loras: data.loras,
       images: data.images
     };
+    elements.finalEyebrow.textContent = isImg2Img ? "IMG2IMG REFINE COMPLETE" : "HIRES.FIX COMPLETE";
+    elements.finalTitle.textContent = isImg2Img ? "img2img高解像度版" : "高解像度版";
     elements.resultImage.src = `${finished.imageUrl}?t=${Date.now()}`;
     elements.seedText.textContent = `Seed ${finished.seed}`;
-    elements.resolutionText.textContent = `${Math.round(Number(data.settings.width) * Number(data.settings.hiresScale))} × ${Math.round(Number(data.settings.height) * Number(data.settings.hiresScale))}`;
+    elements.resolutionText.textContent = `${finished.width} × ${finished.height}`;
     elements.downloadLink.href = finished.imageUrl;
     elements.downloadLink.download = finished.filename;
     elements.favoriteFinalButton.classList.toggle("active", finished.favorite);
@@ -752,7 +993,16 @@ function renderCandidates(images) {
       event.stopPropagation();
       void toggleFavorite(candidate, favorite);
     });
-    actions.append(favorite, download);
+    const toImg2Img = document.createElement("button");
+    toImg2Img.type = "button";
+    toImg2Img.className = "candidateImg2ImgButton";
+    toImg2Img.textContent = "img2img";
+    toImg2Img.title = "この画像をimg2imgの参照にする";
+    toImg2Img.addEventListener("click", (event) => {
+      event.stopPropagation();
+      useImageForImg2Img(candidate);
+    });
+    actions.append(favorite, toImg2Img, download);
     footer.append(label, actions);
     card.append(image, footer);
 
@@ -778,6 +1028,9 @@ function selectCandidate(candidate, card) {
   elements.selectedSeedText.textContent = `選択中: Seed ${candidate.seed}`;
   elements.finishButton.disabled = false;
   elements.lockCompositionButton.disabled = false;
+  elements.finishButton.textContent = lastGeneration?.mode === "img2img"
+    ? "選択画像をimg2img仕上げ"
+    : "選択画像をHires.fix";
 }
 
 async function submitGeneration(payload) {
@@ -848,6 +1101,7 @@ function loadRecipeFields(recipe, image) {
   const settings = recipe.settings ?? {};
   for (const key of [
     "width", "height", "steps", "cfgScale", "samplerName", "scheduler",
+    "img2imgDenoising", "img2imgResizeMode",
     "hiresScale", "hiresSteps", "hiresDenoising", "hiresUpscaler"
   ]) {
     if (settings[key] !== undefined && elements[key]) elements[key].value = settings[key];
@@ -855,6 +1109,7 @@ function loadRecipeFields(recipe, image) {
   elements.seed.value = image.seed;
   elements.candidateCount.value = "1";
   handleCandidateCountChange();
+  handleImg2ImgDenoisingInput();
 
   selectedLoras.clear();
   for (const lora of recipe.loras ?? []) {
@@ -921,7 +1176,8 @@ function renderHistory(generations) {
     title.textContent = generation.description || "生成画像";
     title.title = generation.description;
     const metadata = document.createElement("span");
-    metadata.textContent = `${generation.kind === "hires" ? "Hires" : "候補"}・Seed ${image.seed}・${formatDate(generation.createdAt)}`;
+    const mode = generation.mode === "img2img" ? "img2img" : "txt2img";
+    metadata.textContent = `${mode}・${generation.kind === "hires" ? "仕上げ" : "候補"}・Seed ${image.seed}・${formatDate(generation.createdAt)}`;
     const actions = document.createElement("div");
     actions.className = "historyCardActions";
     const favorite = document.createElement("button");
@@ -929,12 +1185,17 @@ function renderHistory(generations) {
     favorite.className = `iconButton${image.favorite ? " active" : ""}`;
     favorite.textContent = "👍";
     favorite.addEventListener("click", () => void toggleFavorite(image, favorite));
+    const toImg2Img = document.createElement("button");
+    toImg2Img.type = "button";
+    toImg2Img.className = "secondary";
+    toImg2Img.textContent = "img2imgへ";
+    toImg2Img.addEventListener("click", () => useImageForImg2Img(image));
     const reuse = document.createElement("button");
     reuse.type = "button";
     reuse.className = "secondary";
     reuse.textContent = "レシピ読込・構図固定";
     reuse.addEventListener("click", () => activateCompositionLock(generation, image));
-    actions.append(favorite, reuse);
+    actions.append(favorite, toImg2Img, reuse);
     body.append(title, metadata, actions);
     card.append(preview, body);
     elements.historyGrid.append(card);
@@ -1202,6 +1463,8 @@ function readSettings(overrides = {}) {
     samplerName: elements.samplerName.value,
     scheduler: elements.scheduler.value,
     candidateCount: elements.candidateCount.value,
+    img2imgDenoising: elements.img2imgDenoising.value,
+    img2imgResizeMode: elements.img2imgResizeMode.value,
     hiresScale: elements.hiresScale.value,
     hiresSteps: elements.hiresSteps.value,
     hiresDenoising: elements.hiresDenoising.value,
@@ -1209,6 +1472,13 @@ function readSettings(overrides = {}) {
     hiresEnabled: false,
     ...overrides
   };
+}
+
+function readInitImagePayload() {
+  if (generationMode !== "img2img" || !initImageReference) return {};
+  return initImageReference.imageId
+    ? { initImageId: initImageReference.imageId }
+    : { initImage: initImageReference.dataUrl };
 }
 
 function readSelectedLoras() {
@@ -1317,6 +1587,15 @@ function setBusy(busy, message = "") {
   elements.generateButton.disabled = busy;
   elements.healthButton.disabled = busy;
   elements.refreshLorasButton.disabled = busy;
+  elements.txt2imgModeButton.disabled = busy;
+  elements.img2imgModeButton.disabled = busy;
+  elements.chooseInitImageButton.disabled = busy;
+  elements.initImageInput.disabled = busy;
+  elements.clearInitImageButton.disabled = busy || !initImageReference;
+  elements.img2imgPreset.disabled = busy;
+  elements.img2imgDenoising.disabled = busy;
+  elements.img2imgResizeMode.disabled = busy;
+  elements.syncInitImageSize.disabled = busy;
   elements.finishButton.disabled = busy || !selectedCandidate;
   elements.lockCompositionButton.disabled = busy || !selectedCandidate;
   elements.loading.classList.toggle("hidden", !busy);
@@ -1325,7 +1604,9 @@ function setBusy(busy, message = "") {
 
 function updateGenerateButton() {
   const count = elements.candidateCount.value;
-  elements.generateButton.textContent = `${count}枚の候補を生成`;
+  elements.generateButton.textContent = generationMode === "img2img"
+    ? `${count}枚のimg2img候補を生成`
+    : `${count}枚の候補を生成`;
 }
 
 function handleCandidateCountChange() {

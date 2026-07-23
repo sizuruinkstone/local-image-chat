@@ -96,6 +96,8 @@ export function createJobManager(execute, { retentionMs = 60 * 60 * 1000 } = {})
     job.progress = status === "done" ? 100 : job.progress;
     job.message = message;
     job.finishedAt = new Date().toISOString();
+    // img2imgのData URLなど大きな入力は完了後すぐ解放する。
+    job.payload = null;
   }
 
   function updateQueuePositions() {
