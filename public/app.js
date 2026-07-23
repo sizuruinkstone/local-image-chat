@@ -1,4 +1,10 @@
-import { LORA_PROFILES, findProfileForLora, getPreset, getProfile } from "./lora-profiles.js";
+import {
+  LORA_PROFILES,
+  createRegistryProfile,
+  findProfileForLora,
+  getPreset,
+  getProfile
+} from "./lora-profiles.js";
 
 const PROFILE_STORAGE_VERSION = 2;
 const MAX_INIT_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -798,6 +804,9 @@ function createLoraRow(lora) {
   profileSelect.setAttribute("aria-label", `${lora.displayName}のプロフィール`);
   profileSelect.append(new Option("プロフィール未設定", ""));
   for (const item of LORA_PROFILES) profileSelect.append(new Option(item.name, item.id));
+  if (profile && !getProfile(profile.id)) {
+    profileSelect.append(new Option(profile.name, profile.id));
+  }
   profileSelect.value = profile?.id ?? "";
 
   const presetSelect = document.createElement("select");
@@ -869,7 +878,8 @@ function createLoraRow(lora) {
   });
 
   profileSelect.addEventListener("change", () => {
-    const nextProfile = getProfile(profileSelect.value);
+    const nextProfile = getProfile(profileSelect.value)
+      ?? (profileSelect.value === profile?.id ? profile : null);
     if (!nextProfile) {
       loraProfileAssignments.delete(lora.name);
       loraPresetSelections.delete(lora.name);
@@ -886,7 +896,8 @@ function createLoraRow(lora) {
   });
 
   presetSelect.addEventListener("change", () => {
-    const currentProfile = getProfile(profileSelect.value);
+    const currentProfile = getProfile(profileSelect.value)
+      ?? (profileSelect.value === profile?.id ? profile : null);
     const preset = getPreset(currentProfile, presetSelect.value);
     if (!currentProfile || !preset) return;
     loraPresetSelections.set(lora.name, preset.id);
@@ -945,7 +956,7 @@ function registerDetectedProfiles() {
   for (const lora of installedLoras) {
     let profile = getProfile(loraProfileAssignments.get(lora.name));
     if (!profile) {
-      profile = findProfileForLora(lora);
+      profile = findProfileForLora(lora) ?? createRegistryProfile(lora);
       if (profile) {
         loraProfileAssignments.set(lora.name, profile.id);
         changed = true;
@@ -1032,7 +1043,9 @@ function migrateCharacterProfileDefaults() {
 }
 
 function resolveProfile(lora) {
-  return getProfile(loraProfileAssignments.get(lora.name)) ?? findProfileForLora(lora);
+  return getProfile(loraProfileAssignments.get(lora.name))
+    ?? findProfileForLora(lora)
+    ?? createRegistryProfile(lora);
 }
 
 function fillPresetSelect(select, profile, selectedPresetId) {

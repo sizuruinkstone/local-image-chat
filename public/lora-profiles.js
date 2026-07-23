@@ -385,6 +385,34 @@ export function findProfileForLora(lora) {
   ) ?? null;
 }
 
+export function createRegistryProfile(lora) {
+  const registry = lora?.registry;
+  if (!registry || registry.category !== "character") return null;
+
+  const triggerWords = String(registry.triggerWords ?? "").trim();
+  const modelId = positiveInteger(registry.modelId);
+  const versionId = positiveInteger(registry.versionId);
+  const identity = modelId && versionId
+    ? `${modelId}-${versionId}`
+    : normalize(`${lora?.name ?? ""}-${registry.modelName ?? "character"}`) || "character";
+
+  return {
+    id: `civitai-${identity}`,
+    name: `${registry.modelName || lora?.displayName || "Civitaiキャラクター"}（自動登録）`,
+    baseModel: registry.baseModel || "不明",
+    versionId,
+    sourceUrl: registry.sourceUrl || "",
+    recommendedWeight: Number(registry.recommendedWeight) || 0.75,
+    defaultPreset: "civitai-default",
+    note: "CivitaiのTrigger Wordsから自動作成した衣装プリセットです。",
+    presets: [{
+      id: "civitai-default",
+      name: "Civitai登録衣装",
+      triggerWords: triggerWords || "1girl, solo"
+    }]
+  };
+}
+
 export function getProfile(profileId) {
   return LORA_PROFILES.find((profile) => profile.id === profileId) ?? null;
 }
@@ -407,4 +435,9 @@ function normalize(value) {
 function profileModelId(profile) {
   const matched = String(profile?.sourceUrl ?? "").match(/\/models\/(\d+)/i);
   return matched ? Number(matched[1]) : null;
+}
+
+function positiveInteger(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : null;
 }
