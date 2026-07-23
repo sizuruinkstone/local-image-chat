@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Local Image Chat</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <div>
+          <p class="eyebrow">LOCAL GENERATION</p>
+          <h1>Local Image Chat</h1>
+          <p class="subtitle">日本語で話して、ReForgeで生成。<span class="version">v2.0</span></p>
+        </div>
+        <button id="healthButton" class="ghost">接続確認</button>
+      </header>
+
+      <section id="health" class="health" aria-live="polite">
+        <span class="status waiting">Ollama 確認中</span>
+        <span class="status waiting">ReForge 確認中</span>
+      </section>
+
+      <div class="layout">
+        <section class="panel controls">
+          <label for="description">生成したい画像</label>
+          <textarea id="description" rows="6" placeholder="例：銀髪の女の子が、黒い大きめのパーカーを着て夜の秋葉原に立っている。縦長のアニメイラスト。"></textarea>
+
+          <div class="quickCount">
+            <label for="candidateCount">候補枚数</label>
+            <select id="candidateCount" aria-label="生成する候補枚数">
+              <option value="1">1枚・最速</option>
+              <option value="2">2枚</option>
+              <option value="3">3枚</option>
+              <option value="4">4枚</option>
+            </select>
+            <span>前回の選択を記憶します</span>
+          </div>
+
+          <div class="buttonRow">
+            <button id="promptButton" class="secondary">プロンプトだけ作る</button>
+            <button id="generateButton" class="primary">1枚の候補を生成</button>
+          </div>
+
+          <details>
+            <summary>プロンプトを確認・編集</summary>
+            <label for="prompt">Prompt</label>
+            <textarea id="prompt" rows="5" placeholder="空なら日本語から自動作成"></textarea>
+            <label for="negativePrompt">Negative prompt</label>
+            <textarea id="negativePrompt" rows="4"></textarea>
+          </details>
+
+          <details>
+            <summary>LoRA <span id="loraSelectedCount" class="summaryCount">0個選択</span></summary>
+            <p class="hint">ReForgeのLoRAフォルダを読み取り、キャラクターと画風・体型・構図へ自動分類します。キャラLoRAは「衣装自由」が初期値です。</p>
+            <div id="loraCategories" class="loraCategories" role="group" aria-label="LoRAの分類">
+              <button class="loraCategory active" type="button" data-lora-category="character" aria-pressed="true">キャラクター <span>0</span></button>
+              <button class="loraCategory" type="button" data-lora-category="direction" aria-pressed="false">画風・体型・構図 <span>0</span></button>
+              <button class="loraCategory" type="button" data-lora-category="selected" aria-pressed="false">選択中 <span>0</span></button>
+              <button class="loraCategory" type="button" data-lora-category="all" aria-pressed="false">すべて <span>0</span></button>
+            </div>
+            <div class="loraToolbar">
+              <input id="loraSearch" type="search" placeholder="LoRAを検索" aria-label="LoRAを検索" />
+              <button id="refreshLorasButton" class="secondary" type="button">再読込</button>
+            </div>
+            <p id="loraStatus" class="hint" aria-live="polite">LoRAを取得中…</p>
+            <div id="loraList" class="loraList"></div>
+            <div id="selectedLoraSummary" class="selectedLoraSummary">LoRAなし</div>
+          </details>
+
+          <details>
+            <summary>生成設定</summary>
+            <div class="settingsGrid">
+              <label>幅<input id="width" type="number" step="64" /></label>
+              <label>高さ<input id="height" type="number" step="64" /></label>
+              <label>Steps<input id="steps" type="number" /></label>
+              <label>CFG<input id="cfgScale" type="number" step="0.5" /></label>
+              <label>Seed<input id="seed" type="number" value="-1" /></label>
+              <label>Sampler<input id="samplerName" type="text" /></label>
+              <label>Scheduler<input id="scheduler" type="text" /></label>
+            </div>
+          </details>
+
+          <details>
+            <summary>Hires.fix設定</summary>
+            <p class="hint">候補を選んだ後、そのSeedだけ高解像度化します。</p>
+            <div class="settingsGrid">
+              <label>倍率<input id="hiresScale" type="number" min="1" max="2" step="0.1" /></label>
+              <label>Hires Steps<input id="hiresSteps" type="number" min="1" max="50" /></label>
+              <label>Denoising<input id="hiresDenoising" type="number" min="0.1" max="0.8" step="0.05" /></label>
+              <label>Upscaler<input id="hiresUpscaler" type="text" /></label>
+            </div>
+          </details>
+        </section>
+
+        <section class="panel result">
+          <div id="emptyState" class="emptyState">
+            <div class="spark">✦</div>
+            <p>生成した画像がここに表示されます</p>
+          </div>
+          <div id="loading" class="loading hidden">
+            <div class="spinner"></div>
+            <p id="loadingText">準備中…</p>
+          </div>
+          <div id="resultContent" class="hidden">
+            <section id="finalResult" class="finalResult hidden">
+              <div class="sectionHeading">
+                <div>
+                  <p class="eyebrow">HIRES.FIX COMPLETE</p>
+                  <h2>高解像度版</h2>
+                </div>
+                <a id="downloadLink" class="downloadButton" download>画像を保存</a>
+              </div>
+              <img id="resultImage" alt="高解像度化した生成画像" />
+              <div class="resultMeta">
+                <span id="seedText"></span>
+                <span id="resolutionText"></span>
+              </div>
+            </section>
+
+            <section id="candidateSection" class="candidateSection">
+              <div class="sectionHeading">
+                <div>
+                  <p class="eyebrow">CANDIDATES</p>
+                  <h2>仕上げる1枚を選択</h2>
+                </div>
+                <span id="candidateSummary" class="muted"></span>
+              </div>
+              <div id="candidateGrid" class="candidateGrid"></div>
+              <div class="finishBar">
+                <span id="selectedSeedText">画像を選択してください</span>
+                <button id="finishButton" class="primary" disabled>選択画像をHires.fix</button>
+              </div>
+            </section>
+            <p id="explanation"></p>
+          </div>
+          <p id="error" class="error hidden"></p>
+        </section>
+      </div>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
