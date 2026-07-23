@@ -46,7 +46,7 @@ const updater = createUpdater(rootDir, {
 const jobs = createJobManager(performGeneration);
 
 const app = express();
-app.use(express.json({ limit: "30mb" }));
+app.use(express.json({ limit: "50mb" }));
 app.use(express.static(path.join(rootDir, "public")));
 app.use("/outputs", express.static(outputDir));
 
@@ -240,6 +240,7 @@ async function performGeneration(body, { signal, report }) {
   const loras = validateLoras(body.loras);
   const promptBoosts = validatePromptBoosts(body.promptBoosts);
   const sourceImage = await resolveSourceImage(body, mode);
+  const maskImage = resolveMaskImage(body, mode, settings);
 
   report(5, "プロンプトを準備中");
   const generatedPrompt = body.prompt?.trim()
@@ -258,9 +259,11 @@ async function performGeneration(body, { signal, report }) {
   const effectiveNegativePrompt = appendLoraNegatives(generatedPrompt.negative_prompt, loras);
   report(25, "ReForgeで生成を開始");
   const generated = await generateImages(config.reforge, {
+    mode,
     prompt: effectivePrompt,
     negativePrompt: effectiveNegativePrompt,
     initImageBase64: sourceImage?.base64,
+    maskBase64: maskImage?.base64,
     ...settings
   }, {
     signal,
@@ -271,15 +274,11 @@ async function performGeneration(body, { signal, report }) {
   const runId = timestamp();
   let sourceImageUrl = sourceImage?.imageUrl ?? null;
   if (sourceImage?.uploaded) {
-    const sourceHash = crypto.createHash("sha256").update(sourceImage.buffer).digest("hex").slice(0, 20);
-    const sourceFilename = `img2img-source_${sourceHash}.${sourceImage.extension}`;
-    try {
-      await fs.writeFile(path.join(outputDir, sourceFilename), sourceImage.buffer, { flag: "wx" });
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
-    }
-    sourceImageUrl = `/outputs/${sourceFilename}`;
+    sourceImageUrl = await saveContentAddressedImage("img2img-source", sourceImage);
   }
+  const maskImageUrl = maskImage
+    ? await saveContentAddressedImage("inpaint-mask", maskImage)
+    : null;
   const outputSize = outputDimensions(mode, settings);
   const savedImages = await Promise.all(generated.images.map(async (image, index) => {
     const kind = settings.hiresEnabled ? "hires" : `candidate-${index + 1}`;
@@ -300,6 +299,7 @@ async function performGeneration(body, { signal, report }) {
     parentImageId: body.parentImageId,
     sourceImageId: sourceImage?.imageId,
     sourceImageUrl,
+    maskImageUrl,
     description,
     prompt: promptWithBoosts,
     negativePrompt: generatedPrompt.negative_prompt,
@@ -316,6 +316,7 @@ async function performGeneration(body, { signal, report }) {
     mode,
     sourceImageId: stored.sourceImageId,
     sourceImageUrl: stored.sourceImageUrl,
+    maskImageUrl: stored.maskImageUrl,
     images: stored.images,
     prompt: promptWithBoosts,
     negativePrompt: generatedPrompt.negative_prompt,
@@ -368,6 +369,22 @@ function validateSettings(input) {
       0,
       2
     ),
+    inpaintDenoising: boundedNumber(
+      input.inpaintDenoising,
+      defaults.inpaintDenoising ?? 0.55,
+      0.05,
+      0.95
+    ),
+    maskBlur: boundedInt(input.maskBlur, defaults.maskBlur ?? 4, 0, 64),
+    inpaintFill: boundedInt(input.inpaintFill, defaults.inpaintFill ?? 1, 0, 3),
+    inpaintFullRes: booleanOrDefault(input.inpaintFullRes, defaults.inpaintFullRes ?? true),
+    inpaintFullResPadding: boundedInt(
+      input.inpaintFullResPadding,
+      defaults.inpaintFullResPadding ?? 32,
+      0,
+      256,
+      4
+    ),
     hiresEnabled,
     hiresScale: boundedNumber(input.hiresScale, defaults.hiresScale ?? 1.5, 1, 2),
     hiresSteps: boundedInt(input.hiresSteps, defaults.hiresSteps ?? 20, 1, 50),
@@ -379,11 +396,12 @@ function validateSettings(input) {
 function validateGenerationMode(value) {
   if (value === undefined || value === null || value === "" || value === "txt2img") return "txt2img";
   if (value === "img2img") return "img2img";
+  if (value === "inpaint") return "inpaint";
   throw new Error("生成モードが不正です");
 }
 
 async function resolveSourceImage(body, mode) {
-  if (mode !== "img2img") return null;
+  if (!["img2img", "inpaint"].includes(mode)) return null;
 
   if (body.initImageId) {
     const imageId = requireId(body.initImageId);
@@ -413,7 +431,17 @@ async function resolveSourceImage(body, mode) {
     };
   }
 
-  throw new Error("img2imgの参照画像を選択してください");
+  throw new Error(`${mode === "inpaint" ? "部分修正" : "img2img"}の参照画像を選択してください`);
+}
+
+function resolveMaskImage(body, mode, settings) {
+  if (mode !== "inpaint" || settings.hiresEnabled) return null;
+  if (typeof body.maskImage !== "string" || !body.maskImage) {
+    throw new Error("修正したい範囲を白く塗ってください");
+  }
+  const mask = parseImageDataUrl(body.maskImage);
+  if (mask.extension !== "png") throw new Error("InpaintマスクはPNG形式で送信してください");
+  return mask;
 }
 
 function parseImageDataUrl(value) {
@@ -449,13 +477,24 @@ function extensionFromFilename(filename) {
 }
 
 function outputDimensions(mode, settings) {
-  if (mode !== "img2img" || !settings.hiresEnabled) {
+  if (!["img2img", "inpaint"].includes(mode) || !settings.hiresEnabled) {
     return {
       width: settings.hiresEnabled ? Math.round(settings.width * settings.hiresScale) : settings.width,
       height: settings.hiresEnabled ? Math.round(settings.height * settings.hiresScale) : settings.height
     };
   }
   return img2imgRefineDimensions(settings.width, settings.height, settings.hiresScale);
+}
+
+async function saveContentAddressedImage(prefix, image) {
+  const hash = crypto.createHash("sha256").update(image.buffer).digest("hex").slice(0, 20);
+  const filename = `${prefix}_${hash}.${image.extension}`;
+  try {
+    await fs.writeFile(path.join(outputDir, filename), image.buffer, { flag: "wx" });
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+  }
+  return `/outputs/${filename}`;
 }
 
 function roundToMultiple(value, multiple) {
@@ -578,6 +617,11 @@ function boundedNumber(value, fallback, min, max) {
   let number = Number(value);
   if (!Number.isFinite(number)) number = fallback;
   return Math.min(max, Math.max(min, number));
+}
+
+function booleanOrDefault(value, fallback) {
+  if (value === undefined || value === null || value === "") return Boolean(fallback);
+  return value === true || value === "true";
 }
 
 function textOrDefault(value, fallback) {

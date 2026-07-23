@@ -60,7 +60,7 @@ textarea:focus, input:focus, select:focus { border-color: rgba(185,255,77,.55); 
 
 .buttonRow { display: flex; gap: 10px; margin: 14px 0; }
 .compactButtons button { flex: 1; padding: 9px 11px; font-size: 11px; }
-.generationMode { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
+.generationMode { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
 .modeButton { display: grid; gap: 2px; padding: 10px 12px; color: var(--muted); border: 1px solid var(--line); background: rgba(255,255,255,.035); text-align: left; }
 .modeButton span { font-size: 9px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; }
 .modeButton.active { color: var(--accent); border-color: rgba(185,255,77,.42); background: rgba(185,255,77,.09); }
@@ -79,6 +79,21 @@ textarea:focus, input:focus, select:focus { border-color: rgba(185,255,77,.55); 
 .rangeField output { color: var(--accent); font-size: 11px; font-variant-numeric: tabular-nums; text-align: right; }
 .autoSizeChoice { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--muted); font-size: 11px; font-weight: 600; }
 .autoSizeChoice input { flex: 0 0 auto; width: 15px; height: 15px; margin: 0; accent-color: var(--accent); }
+.inpaintPanel { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.inpaintHeading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 9px; }
+.inpaintHeading div { display: grid; gap: 3px; }
+.inpaintHeading strong { color: #d9dce3; font-size: 12px; }
+.inpaintHeading span { color: var(--muted); font-size: 10px; }
+.inpaintHeading .maskStatus { flex: 0 0 auto; padding: 5px 8px; border-radius: 99px; color: var(--accent); background: rgba(185,255,77,.08); font-size: 9px; font-weight: 800; }
+.inpaintCanvasStage { position: relative; min-height: 220px; overflow: hidden; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 12px; background: #050506; }
+.inpaintCanvasStage.hasImage { min-height: 0; }
+.inpaintMaskEmpty { padding: 30px 20px; color: var(--muted); font-size: 11px; text-align: center; }
+#inpaintBaseImage { display: block; width: 100%; height: auto; object-fit: contain; }
+#inpaintMaskCanvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; opacity: .55; mix-blend-mode: screen; touch-action: none; }
+.maskToolbar { display: flex; flex-wrap: wrap; gap: 6px; margin: 9px 0; }
+.maskToolbar button { padding: 7px 9px; font-size: 10px; }
+.maskToolbar .maskTool.active { color: var(--accent); border-color: rgba(185,255,77,.42); background: rgba(185,255,77,.09); }
+.inpaintSettings { margin-top: 10px; }
 .compositionLockStatus { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 12px 0; padding: 9px 11px; border: 1px solid rgba(185,255,77,.3); border-radius: 11px; color: var(--accent); background: rgba(185,255,77,.07); font-size: 11px; font-weight: 800; }
 .compositionLockStatus button { padding: 6px 9px; color: #ffc2ca; background: rgba(255,102,122,.09); }
 .quickCount { display: grid; grid-template-columns: auto minmax(130px, 180px) 1fr; align-items: center; gap: 10px; margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.035); }
@@ -150,7 +165,7 @@ details label { margin-top: 13px; }
 #resultImage { display: block; width: 100%; max-height: 720px; object-fit: contain; border-radius: 13px; background: #050506; }
 .resultMeta { display: flex; justify-content: space-between; gap: 12px; padding: 13px 3px 3px; color: var(--muted); font-size: 13px; }
 .resultMeta a { color: var(--accent); font-weight: 750; text-decoration: none; }
-.resultActions { display: flex; align-items: center; gap: 7px; }
+.resultActions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 7px; }
 .iconButton { min-width: 38px; padding: 9px; color: var(--text); border: 1px solid var(--line); background: rgba(255,255,255,.055); }
 .iconButton.active { border-color: rgba(185,255,77,.5); color: var(--accent); background: rgba(185,255,77,.1); }
 .smallButton { padding: 9px 10px; font-size: 11px; }
@@ -191,8 +206,9 @@ details label { margin-top: 13px; }
 .historyCardBody { padding: 9px; }
 .historyCardBody strong { display: block; overflow: hidden; color: #d9dce3; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .historyCardBody span { display: block; margin-top: 4px; color: var(--muted); font-size: 9px; }
-.historyCardActions { display: grid; grid-template-columns: auto auto 1fr; gap: 6px; margin-top: 8px; }
+.historyCardActions { display: grid; grid-template-columns: auto 1fr 1fr; gap: 6px; margin-top: 8px; }
 .historyCardActions button { padding: 7px 8px; font-size: 10px; }
+.historyCardActions button:last-child { grid-column: 1 / -1; }
 .hidden { display: none !important; }
 
 @media (max-width: 850px) {
@@ -208,6 +224,7 @@ details label { margin-top: 13px; }
   .quickCount { grid-template-columns: auto 1fr; }
   .quickCount span { grid-column: 1 / -1; }
   .settingsGrid { grid-template-columns: 1fr; }
+  .generationMode { grid-template-columns: 1fr; }
   .candidateGrid { grid-template-columns: 1fr; }
   .finishBar { align-items: stretch; flex-direction: column; }
   .finishBar > div { flex-direction: column; }

@@ -106,14 +106,16 @@ export function analyzePreferences(generations) {
 
 function normalizeGeneration(input) {
   const id = input.id ?? crypto.randomUUID();
+  const mode = ["img2img", "inpaint"].includes(input.mode) ? input.mode : "txt2img";
   return {
     id,
     createdAt: input.createdAt ?? new Date().toISOString(),
     kind: input.kind === "hires" ? "hires" : "candidates",
-    mode: input.mode === "img2img" ? "img2img" : "txt2img",
+    mode,
     parentImageId: input.parentImageId ?? null,
     sourceImageId: input.sourceImageId ?? null,
     sourceImageUrl: input.sourceImageUrl ?? null,
+    maskImageUrl: input.maskImageUrl ?? null,
     description: String(input.description ?? "").slice(0, 4000),
     prompt: String(input.prompt ?? "").slice(0, 12000),
     negativePrompt: String(input.negativePrompt ?? "").slice(0, 12000),

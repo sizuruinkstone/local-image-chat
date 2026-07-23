@@ -23,11 +23,16 @@ const elements = Object.fromEntries(
     "civitaiPreview", "civitaiStatus", "updateStatusButton", "updateDetails",
     "githubToken", "checkUpdateButton", "applyUpdateButton", "updateStatus",
     "favoritesOnly", "refreshHistoryButton", "preferenceSummary", "historyGrid",
-    "txt2imgModeButton", "img2imgModeButton", "img2imgPanel", "img2imgDropZone",
+    "txt2imgModeButton", "img2imgModeButton", "inpaintModeButton", "img2imgPanel", "img2imgDropZone",
     "initImageInput", "initImageEmpty", "initImagePreview", "chooseInitImageButton",
     "clearInitImageButton", "initImageStatus", "img2imgPreset", "img2imgDenoising",
-    "img2imgDenoisingValue", "img2imgResizeMode", "syncInitImageSize",
-    "sendFinalToImg2ImgButton", "finalEyebrow", "finalTitle"
+    "img2imgDenoisingValue", "img2imgResizeMode", "syncInitImageSize", "img2imgSettings",
+    "inpaintPanel", "inpaintCanvasStage", "inpaintMaskEmpty", "inpaintBaseImage",
+    "inpaintMaskCanvas", "maskStatus", "maskPaintButton", "maskEraseButton",
+    "maskUndoButton", "maskRedoButton", "maskClearButton", "maskBrushSize",
+    "maskBrushSizeValue", "inpaintDenoising", "inpaintDenoisingValue", "maskBlur",
+    "inpaintFill", "inpaintFullRes", "inpaintFullResPadding",
+    "sendFinalToImg2ImgButton", "sendFinalToInpaintButton", "finalEyebrow", "finalTitle"
   ].map((id) => [id, document.getElementById(id)])
 );
 
@@ -48,6 +53,14 @@ let updateInfo = null;
 let activeLoraCategory = loadLoraCategory();
 let generationMode = "txt2img";
 let initImageReference = null;
+let defaultInpaintFullRes = true;
+let maskDrawing = false;
+let maskLastPoint = null;
+let maskTool = "paint";
+let maskSourceKey = "";
+let maskUndoStack = [];
+let maskRedoStack = [];
+const MAX_MASK_HISTORY = 12;
 const selectedLoras = new Map();
 const loraWeights = loadLoraWeights();
 const loraTriggers = loadLoraTriggers();
@@ -57,6 +70,7 @@ const loraPresetSelections = loadStringMap("localImageChat.loraPresetSelections"
 
 await loadConfig();
 loadImg2ImgPreferences();
+loadInpaintPreferences();
 loadPromptPartSelections();
 restoreSessionSecrets();
 await Promise.all([checkHealth(), loadLoras(), loadHistory()]);
@@ -69,6 +83,7 @@ elements.generateButton.addEventListener("click", generateCandidates);
 elements.finishButton.addEventListener("click", finishSelected);
 elements.txt2imgModeButton.addEventListener("click", () => setGenerationMode("txt2img"));
 elements.img2imgModeButton.addEventListener("click", () => setGenerationMode("img2img"));
+elements.inpaintModeButton.addEventListener("click", () => setGenerationMode("inpaint"));
 elements.chooseInitImageButton.addEventListener("click", () => elements.initImageInput.click());
 elements.initImageInput.addEventListener("change", () => {
   const [file] = elements.initImageInput.files ?? [];
@@ -84,6 +99,23 @@ elements.syncInitImageSize.addEventListener("change", () => {
     syncResolutionToReference(initImageReference.width, initImageReference.height);
   }
 });
+elements.maskPaintButton.addEventListener("click", () => setMaskTool("paint"));
+elements.maskEraseButton.addEventListener("click", () => setMaskTool("erase"));
+elements.maskUndoButton.addEventListener("click", undoMask);
+elements.maskRedoButton.addEventListener("click", redoMask);
+elements.maskClearButton.addEventListener("click", () => clearMask());
+elements.maskBrushSize.addEventListener("input", updateMaskBrushSize);
+elements.inpaintDenoising.addEventListener("input", handleInpaintSettingsChange);
+for (const element of [
+  elements.maskBlur, elements.inpaintFill, elements.inpaintFullRes, elements.inpaintFullResPadding
+]) {
+  element.addEventListener("change", handleInpaintSettingsChange);
+}
+elements.inpaintMaskCanvas.addEventListener("pointerdown", beginMaskStroke);
+elements.inpaintMaskCanvas.addEventListener("pointermove", continueMaskStroke);
+for (const eventName of ["pointerup", "pointercancel", "pointerleave"]) {
+  elements.inpaintMaskCanvas.addEventListener(eventName, endMaskStroke);
+}
 for (const eventName of ["dragenter", "dragover"]) {
   elements.img2imgDropZone.addEventListener(eventName, (event) => {
     event.preventDefault();
@@ -109,6 +141,9 @@ elements.favoriteFinalButton.addEventListener("click", () => {
 });
 elements.sendFinalToImg2ImgButton.addEventListener("click", () => {
   if (finalImage) useImageForImg2Img(finalImage);
+});
+elements.sendFinalToInpaintButton.addEventListener("click", () => {
+  if (finalImage) useImageForInpaint(finalImage);
 });
 elements.unlockCompositionButton.addEventListener("click", unlockComposition);
 elements.cancelJobButton.addEventListener("click", cancelActiveJob);
@@ -155,20 +190,33 @@ async function loadConfig() {
   loraConfig = { ...loraConfig, ...lora };
   if (version) elements.versionText.textContent = `v${version}`;
   for (const [key, value] of Object.entries(defaults)) {
-    if (elements[key]) elements[key].value = value;
+    if (!elements[key]) continue;
+    if (key === "inpaintFullRes") {
+      defaultInpaintFullRes = value !== false;
+      elements.inpaintFullRes.checked = defaultInpaintFullRes;
+    } else {
+      elements[key].value = value;
+    }
   }
   const savedCount = localStorage.getItem("localImageChat.candidateCount");
   if (["1", "2", "3", "4"].includes(savedCount)) elements.candidateCount.value = savedCount;
 }
 
 function setGenerationMode(mode) {
-  generationMode = mode === "img2img" ? "img2img" : "txt2img";
+  generationMode = ["img2img", "inpaint"].includes(mode) ? mode : "txt2img";
   const isImg2Img = generationMode === "img2img";
-  elements.txt2imgModeButton.classList.toggle("active", !isImg2Img);
-  elements.txt2imgModeButton.setAttribute("aria-pressed", String(!isImg2Img));
+  const isInpaint = generationMode === "inpaint";
+  const usesSource = isImg2Img || isInpaint;
+  elements.txt2imgModeButton.classList.toggle("active", !usesSource);
+  elements.txt2imgModeButton.setAttribute("aria-pressed", String(!usesSource));
   elements.img2imgModeButton.classList.toggle("active", isImg2Img);
   elements.img2imgModeButton.setAttribute("aria-pressed", String(isImg2Img));
-  elements.img2imgPanel.classList.toggle("hidden", !isImg2Img);
+  elements.inpaintModeButton.classList.toggle("active", isInpaint);
+  elements.inpaintModeButton.setAttribute("aria-pressed", String(isInpaint));
+  elements.img2imgPanel.classList.toggle("hidden", !usesSource);
+  elements.img2imgSettings.classList.toggle("hidden", !isImg2Img);
+  elements.inpaintPanel.classList.toggle("hidden", !isInpaint);
+  if (isInpaint && initImageReference) void initializeInpaintEditor(initImageReference);
   updateGenerateButton();
 }
 
@@ -186,13 +234,13 @@ async function loadInitImageFile(file) {
     const loadedDataUrl = await fileToDataUrl(file);
     const dataUrl = loadedDataUrl.replace(/^data:[^;]*;/, `data:${mimeType};`);
     const dimensions = await imageDimensions(dataUrl);
-    setImg2ImgReference({
+    setImageReference({
       dataUrl,
       imageUrl: dataUrl,
       imageId: null,
       filename: file.name,
       ...dimensions
-    });
+    }, { mode: generationMode === "inpaint" ? "inpaint" : "img2img" });
   } catch (error) {
     showError(`参照画像を読み込めませんでした: ${error.message}`);
   }
@@ -211,19 +259,31 @@ function inferImageMimeType(file) {
 }
 
 function useImageForImg2Img(image) {
-  setImg2ImgReference({
+  setImageReference({
     dataUrl: null,
     imageUrl: image.imageUrl,
     imageId: image.id,
     filename: image.filename,
     width: image.width,
     height: image.height
-  }, { scroll: true });
+  }, { scroll: true, mode: "img2img" });
 }
 
-function setImg2ImgReference(reference, { scroll = false } = {}) {
+function useImageForInpaint(image) {
+  setImageReference({
+    dataUrl: null,
+    imageUrl: image.imageUrl,
+    imageId: image.id,
+    filename: image.filename,
+    width: image.width,
+    height: image.height
+  }, { scroll: true, mode: "inpaint" });
+}
+
+function setImageReference(reference, { scroll = false, mode = "img2img" } = {}) {
+  reference.maskKey = reference.imageId ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   initImageReference = reference;
-  setGenerationMode("img2img");
+  setGenerationMode(mode);
   elements.initImagePreview.src = reference.imageUrl;
   elements.initImagePreview.classList.remove("hidden");
   elements.initImageEmpty.classList.add("hidden");
@@ -255,6 +315,7 @@ function clearInitImageReference() {
   elements.initImageEmpty.classList.remove("hidden");
   elements.initImageStatus.textContent = "参照画像が未選択です";
   elements.clearInitImageButton.disabled = true;
+  resetInpaintEditor();
 }
 
 function syncResolutionToReference(sourceWidth, sourceHeight) {
@@ -307,6 +368,244 @@ function saveImg2ImgPreferences() {
   localStorage.setItem("localImageChat.img2imgDenoising", elements.img2imgDenoising.value);
   localStorage.setItem("localImageChat.img2imgResizeMode", elements.img2imgResizeMode.value);
   localStorage.setItem("localImageChat.syncInitImageSize", String(elements.syncInitImageSize.checked));
+}
+
+function loadInpaintPreferences() {
+  const saved = {
+    inpaintDenoising: localStorage.getItem("localImageChat.inpaintDenoising"),
+    maskBlur: localStorage.getItem("localImageChat.maskBlur"),
+    inpaintFill: localStorage.getItem("localImageChat.inpaintFill"),
+    inpaintFullResPadding: localStorage.getItem("localImageChat.inpaintFullResPadding")
+  };
+  if (Number(saved.inpaintDenoising) >= 0.05 && Number(saved.inpaintDenoising) <= 0.95) {
+    elements.inpaintDenoising.value = saved.inpaintDenoising;
+  }
+  if (saved.maskBlur !== null && Number(saved.maskBlur) >= 0 && Number(saved.maskBlur) <= 64) {
+    elements.maskBlur.value = saved.maskBlur;
+  }
+  if (["0", "1", "2", "3"].includes(saved.inpaintFill)) {
+    elements.inpaintFill.value = saved.inpaintFill;
+  }
+  if (
+    saved.inpaintFullResPadding !== null
+    && Number(saved.inpaintFullResPadding) >= 0
+    && Number(saved.inpaintFullResPadding) <= 256
+  ) {
+    elements.inpaintFullResPadding.value = saved.inpaintFullResPadding;
+  }
+  const fullRes = localStorage.getItem("localImageChat.inpaintFullRes");
+  elements.inpaintFullRes.checked = fullRes === null ? defaultInpaintFullRes : fullRes !== "false";
+  handleInpaintSettingsChange();
+  updateMaskBrushSize();
+  setMaskTool("paint");
+  updateMaskHistoryButtons();
+}
+
+function handleInpaintSettingsChange() {
+  elements.inpaintDenoisingValue.value = Number(elements.inpaintDenoising.value).toFixed(2);
+  localStorage.setItem("localImageChat.inpaintDenoising", elements.inpaintDenoising.value);
+  localStorage.setItem("localImageChat.maskBlur", elements.maskBlur.value);
+  localStorage.setItem("localImageChat.inpaintFill", elements.inpaintFill.value);
+  localStorage.setItem("localImageChat.inpaintFullRes", String(elements.inpaintFullRes.checked));
+  localStorage.setItem("localImageChat.inpaintFullResPadding", elements.inpaintFullResPadding.value);
+}
+
+function updateMaskBrushSize() {
+  elements.maskBrushSizeValue.value = elements.maskBrushSize.value;
+}
+
+function setMaskTool(tool) {
+  maskTool = tool === "erase" ? "erase" : "paint";
+  const painting = maskTool === "paint";
+  elements.maskPaintButton.classList.toggle("active", painting);
+  elements.maskPaintButton.setAttribute("aria-pressed", String(painting));
+  elements.maskEraseButton.classList.toggle("active", !painting);
+  elements.maskEraseButton.setAttribute("aria-pressed", String(!painting));
+}
+
+async function initializeInpaintEditor(reference) {
+  const sourceKey = reference.maskKey ?? reference.imageId ?? reference.imageUrl;
+  if (maskSourceKey === sourceKey && elements.inpaintMaskCanvas.width) return;
+  maskSourceKey = sourceKey;
+  elements.inpaintBaseImage.src = reference.imageUrl;
+  try {
+    await waitForImage(elements.inpaintBaseImage);
+  } catch {
+    if (maskSourceKey === sourceKey) elements.maskStatus.textContent = "画像を表示できませんでした";
+    return;
+  }
+  if (maskSourceKey !== sourceKey) return;
+
+  const width = elements.inpaintBaseImage.naturalWidth;
+  const height = elements.inpaintBaseImage.naturalHeight;
+  elements.inpaintMaskCanvas.width = width;
+  elements.inpaintMaskCanvas.height = height;
+  elements.inpaintCanvasStage.classList.add("hasImage");
+  elements.inpaintBaseImage.classList.remove("hidden");
+  elements.inpaintMaskCanvas.classList.remove("hidden");
+  elements.inpaintMaskEmpty.classList.add("hidden");
+  maskUndoStack = [];
+  maskRedoStack = [];
+  clearMask(false);
+  elements.maskStatus.textContent = `${width}×${height}・未塗り`;
+}
+
+function waitForImage(image) {
+  if (image.complete && image.naturalWidth) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    image.addEventListener("load", resolve, { once: true });
+    image.addEventListener("error", () => reject(new Error("画像読込エラー")), { once: true });
+  });
+}
+
+function resetInpaintEditor() {
+  maskSourceKey = "";
+  maskUndoStack = [];
+  maskRedoStack = [];
+  maskDrawing = false;
+  maskLastPoint = null;
+  elements.inpaintBaseImage.removeAttribute("src");
+  elements.inpaintBaseImage.classList.add("hidden");
+  elements.inpaintMaskCanvas.width = 0;
+  elements.inpaintMaskCanvas.height = 0;
+  elements.inpaintMaskCanvas.classList.add("hidden");
+  elements.inpaintMaskEmpty.classList.remove("hidden");
+  elements.inpaintCanvasStage.classList.remove("hasImage");
+  elements.maskStatus.textContent = "画像を選択してください";
+  updateMaskHistoryButtons();
+}
+
+function beginMaskStroke(event) {
+  if (!elements.inpaintMaskCanvas.width) return;
+  event.preventDefault();
+  elements.inpaintMaskCanvas.setPointerCapture?.(event.pointerId);
+  pushMaskUndo();
+  maskRedoStack = [];
+  maskDrawing = true;
+  maskLastPoint = maskPointFromEvent(event);
+  drawMaskLine(maskLastPoint, maskLastPoint);
+  updateMaskHistoryButtons();
+}
+
+function continueMaskStroke(event) {
+  if (!maskDrawing || !maskLastPoint) return;
+  event.preventDefault();
+  const nextPoint = maskPointFromEvent(event);
+  drawMaskLine(maskLastPoint, nextPoint);
+  maskLastPoint = nextPoint;
+}
+
+function endMaskStroke(event) {
+  if (!maskDrawing) return;
+  event.preventDefault();
+  maskDrawing = false;
+  maskLastPoint = null;
+  elements.maskStatus.textContent = maskHasWhitePixels() ? "修正範囲あり" : "未塗り";
+  updateMaskHistoryButtons();
+}
+
+function maskPointFromEvent(event) {
+  const rect = elements.inpaintMaskCanvas.getBoundingClientRect();
+  return {
+    x: (event.clientX - rect.left) * elements.inpaintMaskCanvas.width / rect.width,
+    y: (event.clientY - rect.top) * elements.inpaintMaskCanvas.height / rect.height
+  };
+}
+
+function drawMaskLine(from, to) {
+  const context = elements.inpaintMaskCanvas.getContext("2d", { willReadFrequently: true });
+  context.save();
+  const color = maskTool === "paint" ? "#ffffff" : "#000000";
+  const lineWidth = Number(elements.maskBrushSize.value);
+  context.strokeStyle = color;
+  context.fillStyle = color;
+  context.lineWidth = lineWidth;
+  context.lineCap = "round";
+  context.lineJoin = "round";
+  context.beginPath();
+  context.moveTo(from.x, from.y);
+  context.lineTo(to.x, to.y);
+  context.stroke();
+  if (from.x === to.x && from.y === to.y) {
+    context.beginPath();
+    context.arc(from.x, from.y, lineWidth / 2, 0, Math.PI * 2);
+    context.fill();
+  }
+  context.restore();
+}
+
+function clearMask(record = true) {
+  const canvas = elements.inpaintMaskCanvas;
+  if (!canvas.width) return;
+  if (record) pushMaskUndo();
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  context.save();
+  context.globalCompositeOperation = "source-over";
+  context.fillStyle = "#000000";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.restore();
+  if (record) maskRedoStack = [];
+  elements.maskStatus.textContent = "未塗り";
+  updateMaskHistoryButtons();
+}
+
+function captureMaskSnapshot() {
+  return elements.inpaintMaskCanvas.width
+    ? elements.inpaintMaskCanvas.toDataURL("image/png")
+    : null;
+}
+
+function pushMaskUndo() {
+  const snapshot = captureMaskSnapshot();
+  if (!snapshot) return;
+  maskUndoStack.push(snapshot);
+  if (maskUndoStack.length > MAX_MASK_HISTORY) maskUndoStack.shift();
+}
+
+async function undoMask() {
+  const snapshot = maskUndoStack.pop();
+  if (!snapshot) return;
+  const current = captureMaskSnapshot();
+  if (current) maskRedoStack.push(current);
+  await restoreMaskSnapshot(snapshot);
+}
+
+async function redoMask() {
+  const snapshot = maskRedoStack.pop();
+  if (!snapshot) return;
+  const current = captureMaskSnapshot();
+  if (current) maskUndoStack.push(current);
+  await restoreMaskSnapshot(snapshot);
+}
+
+async function restoreMaskSnapshot(dataUrl) {
+  const image = new Image();
+  image.src = dataUrl;
+  await waitForImage(image);
+  const canvas = elements.inpaintMaskCanvas;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  elements.maskStatus.textContent = maskHasWhitePixels() ? "修正範囲あり" : "未塗り";
+  updateMaskHistoryButtons();
+}
+
+function maskHasWhitePixels() {
+  const canvas = elements.inpaintMaskCanvas;
+  if (!canvas.width) return false;
+  const pixels = canvas.getContext("2d", { willReadFrequently: true })
+    .getImageData(0, 0, canvas.width, canvas.height).data;
+  for (let index = 0; index < pixels.length; index += 4) {
+    if (pixels[index] > 16) return true;
+  }
+  return false;
+}
+
+function updateMaskHistoryButtons() {
+  const available = Boolean(elements.inpaintMaskCanvas.width);
+  elements.maskUndoButton.disabled = !available || !maskUndoStack.length;
+  elements.maskRedoButton.disabled = !available || !maskRedoStack.length;
+  elements.maskClearButton.disabled = !available;
 }
 
 function fileToDataUrl(file) {
@@ -807,9 +1106,12 @@ async function generateCandidates() {
   clearError();
   const description = elements.description.value.trim();
   if (!description) return showError("生成したい画像を日本語で入力してくれ");
-  if (generationMode === "img2img" && !initImageReference) {
-    setGenerationMode("img2img");
-    return showError("img2imgの参照画像を選択してください");
+  if (generationMode !== "txt2img" && !initImageReference) {
+    setGenerationMode(generationMode);
+    return showError(`${generationMode === "inpaint" ? "部分修正" : "img2img"}の参照画像を選択してください`);
+  }
+  if (generationMode === "inpaint" && !maskHasWhitePixels()) {
+    return showError("修正したい範囲を白く塗ってください");
   }
 
   elements.emptyState.classList.add("hidden");
@@ -818,7 +1120,11 @@ async function generateCandidates() {
   finalGeneration = null;
   selectedCandidate = null;
   const count = Number(elements.candidateCount.value);
-  const modeLabel = generationMode === "img2img" ? "img2img候補" : "候補";
+  const modeLabel = generationMode === "inpaint"
+    ? "部分修正候補"
+    : generationMode === "img2img"
+      ? "img2img候補"
+      : "候補";
   setBusy(true, `${count}枚の${modeLabel}を1枚ずつ生成します…`);
 
   try {
@@ -836,6 +1142,7 @@ async function generateCandidates() {
       loras: readSelectedLoras(),
       promptBoosts: readPromptBoosts(),
       ...readInitImagePayload(),
+      ...readInpaintPayload(),
       settings: readSettings({ candidateCount: count, hiresEnabled: false })
     });
 
@@ -843,6 +1150,7 @@ async function generateCandidates() {
       mode: data.mode,
       sourceImageId: data.sourceImageId,
       sourceImageUrl: data.sourceImageUrl,
+      maskImageUrl: data.maskImageUrl,
       description,
       prompt: data.prompt,
       negativePrompt: data.negativePrompt,
@@ -867,20 +1175,24 @@ async function finishSelected() {
   if (!selectedCandidate || !lastGeneration) return;
   clearError();
   const isImg2Img = lastGeneration.mode === "img2img";
-  setBusy(true, isImg2Img
-    ? `Seed ${selectedCandidate.seed} をimg2img高解像度仕上げ中…`
-    : `Seed ${selectedCandidate.seed} をHires.fix中…`);
+  const isInpaint = lastGeneration.mode === "inpaint";
+  const usesSource = isImg2Img || isInpaint;
+  setBusy(true, isInpaint
+    ? `Seed ${selectedCandidate.seed} を部分修正の高解像度仕上げ中…`
+    : isImg2Img
+      ? `Seed ${selectedCandidate.seed} をimg2img高解像度仕上げ中…`
+      : `Seed ${selectedCandidate.seed} をHires.fix中…`);
 
   try {
     const data = await submitGeneration({
-      mode: isImg2Img ? "img2img" : "txt2img",
+      mode: usesSource ? lastGeneration.mode : "txt2img",
       description: lastGeneration.description,
       prompt: lastGeneration.prompt,
       negativePrompt: lastGeneration.negativePrompt,
       loras: lastGeneration.loras,
       promptBoosts: [],
       parentImageId: selectedCandidate.id,
-      ...(isImg2Img ? { initImageId: selectedCandidate.id } : {}),
+      ...(usesSource ? { initImageId: selectedCandidate.id } : {}),
       settings: {
         ...lastGeneration.settings,
         candidateCount: 1,
@@ -899,6 +1211,7 @@ async function finishSelected() {
       mode: data.mode,
       sourceImageId: data.sourceImageId,
       sourceImageUrl: data.sourceImageUrl,
+      maskImageUrl: data.maskImageUrl,
       description: lastGeneration.description,
       prompt: data.prompt,
       negativePrompt: data.negativePrompt,
@@ -906,8 +1219,16 @@ async function finishSelected() {
       loras: data.loras,
       images: data.images
     };
-    elements.finalEyebrow.textContent = isImg2Img ? "IMG2IMG REFINE COMPLETE" : "HIRES.FIX COMPLETE";
-    elements.finalTitle.textContent = isImg2Img ? "img2img高解像度版" : "高解像度版";
+    elements.finalEyebrow.textContent = isInpaint
+      ? "INPAINT REFINE COMPLETE"
+      : isImg2Img
+        ? "IMG2IMG REFINE COMPLETE"
+        : "HIRES.FIX COMPLETE";
+    elements.finalTitle.textContent = isInpaint
+      ? "部分修正・高解像度版"
+      : isImg2Img
+        ? "img2img高解像度版"
+        : "高解像度版";
     elements.resultImage.src = `${finished.imageUrl}?t=${Date.now()}`;
     elements.seedText.textContent = `Seed ${finished.seed}`;
     elements.resolutionText.textContent = `${finished.width} × ${finished.height}`;
@@ -1002,7 +1323,16 @@ function renderCandidates(images) {
       event.stopPropagation();
       useImageForImg2Img(candidate);
     });
-    actions.append(favorite, toImg2Img, download);
+    const toInpaint = document.createElement("button");
+    toInpaint.type = "button";
+    toInpaint.className = "candidateImg2ImgButton";
+    toInpaint.textContent = "修正";
+    toInpaint.title = "この画像を部分修正する";
+    toInpaint.addEventListener("click", (event) => {
+      event.stopPropagation();
+      useImageForInpaint(candidate);
+    });
+    actions.append(favorite, toImg2Img, toInpaint, download);
     footer.append(label, actions);
     card.append(image, footer);
 
@@ -1028,9 +1358,11 @@ function selectCandidate(candidate, card) {
   elements.selectedSeedText.textContent = `選択中: Seed ${candidate.seed}`;
   elements.finishButton.disabled = false;
   elements.lockCompositionButton.disabled = false;
-  elements.finishButton.textContent = lastGeneration?.mode === "img2img"
-    ? "選択画像をimg2img仕上げ"
-    : "選択画像をHires.fix";
+  elements.finishButton.textContent = lastGeneration?.mode === "inpaint"
+    ? "選択画像を部分修正仕上げ"
+    : lastGeneration?.mode === "img2img"
+      ? "選択画像をimg2img仕上げ"
+      : "選択画像をHires.fix";
 }
 
 async function submitGeneration(payload) {
@@ -1102,14 +1434,19 @@ function loadRecipeFields(recipe, image) {
   for (const key of [
     "width", "height", "steps", "cfgScale", "samplerName", "scheduler",
     "img2imgDenoising", "img2imgResizeMode",
+    "inpaintDenoising", "maskBlur", "inpaintFill", "inpaintFullResPadding",
     "hiresScale", "hiresSteps", "hiresDenoising", "hiresUpscaler"
   ]) {
     if (settings[key] !== undefined && elements[key]) elements[key].value = settings[key];
+  }
+  if (settings.inpaintFullRes !== undefined) {
+    elements.inpaintFullRes.checked = settings.inpaintFullRes === true;
   }
   elements.seed.value = image.seed;
   elements.candidateCount.value = "1";
   handleCandidateCountChange();
   handleImg2ImgDenoisingInput();
+  handleInpaintSettingsChange();
 
   selectedLoras.clear();
   for (const lora of recipe.loras ?? []) {
@@ -1176,7 +1513,11 @@ function renderHistory(generations) {
     title.textContent = generation.description || "生成画像";
     title.title = generation.description;
     const metadata = document.createElement("span");
-    const mode = generation.mode === "img2img" ? "img2img" : "txt2img";
+    const mode = generation.mode === "inpaint"
+      ? "inpaint"
+      : generation.mode === "img2img"
+        ? "img2img"
+        : "txt2img";
     metadata.textContent = `${mode}・${generation.kind === "hires" ? "仕上げ" : "候補"}・Seed ${image.seed}・${formatDate(generation.createdAt)}`;
     const actions = document.createElement("div");
     actions.className = "historyCardActions";
@@ -1190,12 +1531,17 @@ function renderHistory(generations) {
     toImg2Img.className = "secondary";
     toImg2Img.textContent = "img2imgへ";
     toImg2Img.addEventListener("click", () => useImageForImg2Img(image));
+    const toInpaint = document.createElement("button");
+    toInpaint.type = "button";
+    toInpaint.className = "secondary";
+    toInpaint.textContent = "部分修正";
+    toInpaint.addEventListener("click", () => useImageForInpaint(image));
     const reuse = document.createElement("button");
     reuse.type = "button";
     reuse.className = "secondary";
     reuse.textContent = "レシピ読込・構図固定";
     reuse.addEventListener("click", () => activateCompositionLock(generation, image));
-    actions.append(favorite, toImg2Img, reuse);
+    actions.append(favorite, toImg2Img, toInpaint, reuse);
     body.append(title, metadata, actions);
     card.append(preview, body);
     elements.historyGrid.append(card);
@@ -1465,6 +1811,11 @@ function readSettings(overrides = {}) {
     candidateCount: elements.candidateCount.value,
     img2imgDenoising: elements.img2imgDenoising.value,
     img2imgResizeMode: elements.img2imgResizeMode.value,
+    inpaintDenoising: elements.inpaintDenoising.value,
+    maskBlur: elements.maskBlur.value,
+    inpaintFill: elements.inpaintFill.value,
+    inpaintFullRes: elements.inpaintFullRes.checked,
+    inpaintFullResPadding: elements.inpaintFullResPadding.value,
     hiresScale: elements.hiresScale.value,
     hiresSteps: elements.hiresSteps.value,
     hiresDenoising: elements.hiresDenoising.value,
@@ -1475,10 +1826,15 @@ function readSettings(overrides = {}) {
 }
 
 function readInitImagePayload() {
-  if (generationMode !== "img2img" || !initImageReference) return {};
+  if (generationMode === "txt2img" || !initImageReference) return {};
   return initImageReference.imageId
     ? { initImageId: initImageReference.imageId }
     : { initImage: initImageReference.dataUrl };
+}
+
+function readInpaintPayload() {
+  if (generationMode !== "inpaint" || !elements.inpaintMaskCanvas.width) return {};
+  return { maskImage: elements.inpaintMaskCanvas.toDataURL("image/png") };
 }
 
 function readSelectedLoras() {
@@ -1589,6 +1945,7 @@ function setBusy(busy, message = "") {
   elements.refreshLorasButton.disabled = busy;
   elements.txt2imgModeButton.disabled = busy;
   elements.img2imgModeButton.disabled = busy;
+  elements.inpaintModeButton.disabled = busy;
   elements.chooseInitImageButton.disabled = busy;
   elements.initImageInput.disabled = busy;
   elements.clearInitImageButton.disabled = busy || !initImageReference;
@@ -1596,6 +1953,21 @@ function setBusy(busy, message = "") {
   elements.img2imgDenoising.disabled = busy;
   elements.img2imgResizeMode.disabled = busy;
   elements.syncInitImageSize.disabled = busy;
+  elements.maskPaintButton.disabled = busy;
+  elements.maskEraseButton.disabled = busy;
+  elements.maskBrushSize.disabled = busy;
+  elements.inpaintDenoising.disabled = busy;
+  elements.maskBlur.disabled = busy;
+  elements.inpaintFill.disabled = busy;
+  elements.inpaintFullRes.disabled = busy;
+  elements.inpaintFullResPadding.disabled = busy;
+  if (busy) {
+    elements.maskUndoButton.disabled = true;
+    elements.maskRedoButton.disabled = true;
+    elements.maskClearButton.disabled = true;
+  } else {
+    updateMaskHistoryButtons();
+  }
   elements.finishButton.disabled = busy || !selectedCandidate;
   elements.lockCompositionButton.disabled = busy || !selectedCandidate;
   elements.loading.classList.toggle("hidden", !busy);
@@ -1604,9 +1976,11 @@ function setBusy(busy, message = "") {
 
 function updateGenerateButton() {
   const count = elements.candidateCount.value;
-  elements.generateButton.textContent = generationMode === "img2img"
-    ? `${count}枚のimg2img候補を生成`
-    : `${count}枚の候補を生成`;
+  elements.generateButton.textContent = generationMode === "inpaint"
+    ? `${count}枚の部分修正候補を生成`
+    : generationMode === "img2img"
+      ? `${count}枚のimg2img候補を生成`
+      : `${count}枚の候補を生成`;
 }
 
 function handleCandidateCountChange() {

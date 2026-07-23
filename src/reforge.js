@@ -33,10 +33,11 @@ export async function refreshLoras(config) {
 
 export async function generateImages(config, request, { signal, onProgress } = {}) {
   const isImg2Img = Boolean(request.initImageBase64);
+  const isInpaint = request.mode === "inpaint";
   const count = request.hiresEnabled ? 1 : request.candidateCount;
   const label = request.hiresEnabled
-    ? isImg2Img ? "img2img refine" : "Hires.fix"
-    : `${count} ${isImg2Img ? "img2img " : ""}candidate(s)`;
+    ? isInpaint ? "inpaint refine" : isImg2Img ? "img2img refine" : "Hires.fix"
+    : `${count} ${isInpaint ? "inpaint " : isImg2Img ? "img2img " : ""}candidate(s)`;
   const startedAt = Date.now();
   const images = [];
   const effectiveRequest = request.hiresEnabled && !isImg2Img
@@ -123,9 +124,21 @@ async function generateOne(config, request, seed, { signal, onProgress } = {}) {
       resize_mode: request.img2imgResizeMode,
       denoising_strength: request.hiresEnabled
         ? request.hiresDenoising
-        : request.img2imgDenoising,
+        : request.maskBase64
+          ? request.inpaintDenoising
+          : request.img2imgDenoising,
       include_init_images: false
     });
+    if (request.maskBase64) {
+      Object.assign(payload, {
+        mask: request.maskBase64,
+        mask_blur: request.maskBlur,
+        inpainting_fill: request.inpaintFill,
+        inpaint_full_res: request.inpaintFullRes,
+        inpaint_full_res_padding: request.inpaintFullResPadding,
+        inpainting_mask_invert: 0
+      });
+    }
   } else {
     payload.enable_hr = request.hiresEnabled;
     if (request.hiresEnabled) {

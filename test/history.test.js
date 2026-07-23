@@ -11,9 +11,10 @@ test("生成レシピを保存し、画像単位の👍から傾向を集計で�
   const history = createHistoryService(directory);
 
   const generation = await history.addGeneration({
-    mode: "img2img",
+    mode: "inpaint",
     sourceImageId: "source-image-id",
     sourceImageUrl: "/outputs/source.png",
+    maskImageUrl: "/outputs/mask.png",
     description: "夜の秋葉原に立つ女の子",
     prompt: "masterpiece, 1girl, black hair, neon lighting, dynamic angle",
     negativePrompt: "low quality",
@@ -36,7 +37,8 @@ test("生成レシピを保存し、画像単位の👍から傾向を集計で�
 
   const recipe = await history.getRecipe(generation.images[0].id);
   assert.equal(recipe.selectedImage.seed, 123);
-  assert.equal(recipe.mode, "img2img");
+  assert.equal(recipe.mode, "inpaint");
   assert.equal(recipe.sourceImageId, "source-image-id");
+  assert.equal(recipe.maskImageUrl, "/outputs/mask.png");
   assert.equal((await history.list({ favoritesOnly: true }))[0].images.length, 1);
 });

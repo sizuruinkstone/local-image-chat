@@ -12,7 +12,7 @@
         <div>
           <p class="eyebrow">LOCAL GENERATION</p>
           <h1>Local Image Chat</h1>
-          <p class="subtitle">日本語で話して、ReForgeで生成。<span id="versionText" class="version">v2.2</span></p>
+          <p class="subtitle">日本語で話して、ReForgeで生成。<span id="versionText" class="version">v2.3</span></p>
         </div>
         <div class="headerActions">
           <button id="updateStatusButton" class="ghost">最新版確認</button>
@@ -48,9 +48,13 @@
               元画像から生成
               <span>img2img</span>
             </button>
+            <button id="inpaintModeButton" class="modeButton" type="button" aria-pressed="false">
+              部分修正
+              <span>inpaint</span>
+            </button>
           </div>
 
-          <section id="img2imgPanel" class="img2imgPanel hidden" aria-label="img2img参照画像">
+          <section id="img2imgPanel" class="img2imgPanel hidden" aria-label="参照画像">
             <div id="img2imgDropZone" class="img2imgDropZone">
               <input id="initImageInput" class="hidden" type="file" accept="image/png,image/jpeg,image/webp" />
               <div id="initImageEmpty" class="initImageEmpty">
@@ -64,36 +68,93 @@
               <span id="initImageStatus">参照画像が未選択です</span>
               <button id="clearInitImageButton" class="ghost smallButton" type="button" disabled>解除</button>
             </div>
-            <div class="settingsGrid">
-              <label>変化プリセット
-                <select id="img2imgPreset">
-                  <option value="">カスタム</option>
-                  <option value="0.25">ほぼ維持</option>
-                  <option value="0.35">画風を変更</option>
-                  <option value="0.45" selected>衣装を変更</option>
-                  <option value="0.60">キャラを変更</option>
-                  <option value="0.72">大きく描き直す</option>
-                </select>
-              </label>
-              <label>Denoising
+            <div id="img2imgSettings">
+              <div class="settingsGrid">
+                <label>変化プリセット
+                  <select id="img2imgPreset">
+                    <option value="">カスタム</option>
+                    <option value="0.25">ほぼ維持</option>
+                    <option value="0.35">画風を変更</option>
+                    <option value="0.45" selected>衣装を変更</option>
+                    <option value="0.60">キャラを変更</option>
+                    <option value="0.72">大きく描き直す</option>
+                  </select>
+                </label>
+                <label>Denoising
+                  <div class="rangeField">
+                    <input id="img2imgDenoising" type="range" min="0.05" max="0.95" step="0.01" value="0.45" />
+                    <output id="img2imgDenoisingValue">0.45</output>
+                  </div>
+                </label>
+                <label class="fullWidthField">リサイズ方法
+                  <select id="img2imgResizeMode">
+                    <option value="1" selected>比率を保って中央クロップ</option>
+                    <option value="2">全体を収めて余白を追加</option>
+                    <option value="0">指定サイズへそのまま変形</option>
+                  </select>
+                </label>
+                <label class="fullWidthField autoSizeChoice">
+                  <input id="syncInitImageSize" type="checkbox" checked />
+                  元画像の縦横比に幅・高さを自動で合わせる
+                </label>
+              </div>
+              <p class="hint">生成済み画像や履歴の「img2img」からも、その画像を直接セットできます。</p>
+            </div>
+
+            <section id="inpaintPanel" class="inpaintPanel hidden" aria-label="Inpaintマスク編集">
+              <div class="inpaintHeading">
+                <div>
+                  <strong>修正する範囲を塗る</strong>
+                  <span>白い部分だけReForgeが描き直します</span>
+                </div>
+                <span id="maskStatus" class="maskStatus">画像を選択してください</span>
+              </div>
+              <div id="inpaintCanvasStage" class="inpaintCanvasStage">
+                <div id="inpaintMaskEmpty" class="inpaintMaskEmpty">参照画像を選ぶと、ここへマスクを描けます</div>
+                <img id="inpaintBaseImage" class="hidden" alt="Inpaintの元画像" />
+                <canvas id="inpaintMaskCanvas" class="hidden" aria-label="修正範囲を描くキャンバス"></canvas>
+              </div>
+              <div class="maskToolbar" role="toolbar" aria-label="マスク編集">
+                <button id="maskPaintButton" class="secondary maskTool active" type="button" aria-pressed="true">塗る</button>
+                <button id="maskEraseButton" class="secondary maskTool" type="button" aria-pressed="false">消す</button>
+                <button id="maskUndoButton" class="ghost" type="button" disabled>↶ 戻す</button>
+                <button id="maskRedoButton" class="ghost" type="button" disabled>↷ やり直し</button>
+                <button id="maskClearButton" class="dangerButton" type="button" disabled>全消去</button>
+              </div>
+              <label>ブラシサイズ
                 <div class="rangeField">
-                  <input id="img2imgDenoising" type="range" min="0.05" max="0.95" step="0.01" value="0.45" />
-                  <output id="img2imgDenoisingValue">0.45</output>
+                  <input id="maskBrushSize" type="range" min="4" max="160" step="2" value="48" />
+                  <output id="maskBrushSizeValue">48</output>
                 </div>
               </label>
-              <label class="fullWidthField">リサイズ方法
-                <select id="img2imgResizeMode">
-                  <option value="1" selected>比率を保って中央クロップ</option>
-                  <option value="2">全体を収めて余白を追加</option>
-                  <option value="0">指定サイズへそのまま変形</option>
-                </select>
-              </label>
-              <label class="fullWidthField autoSizeChoice">
-                <input id="syncInitImageSize" type="checkbox" checked />
-                元画像の縦横比に幅・高さを自動で合わせる
-              </label>
-            </div>
-            <p class="hint">生成済み画像や履歴の「img2imgへ」からも、その画像を直接セットできます。</p>
+              <div class="settingsGrid inpaintSettings">
+                <label>Denoising
+                  <div class="rangeField">
+                    <input id="inpaintDenoising" type="range" min="0.05" max="0.95" step="0.01" value="0.55" />
+                    <output id="inpaintDenoisingValue">0.55</output>
+                  </div>
+                </label>
+                <label>Mask blur
+                  <input id="maskBlur" type="number" min="0" max="64" step="1" value="4" />
+                </label>
+                <label>マスク内部
+                  <select id="inpaintFill">
+                    <option value="1" selected>元画像を使う</option>
+                    <option value="0">周囲で埋める</option>
+                    <option value="2">ノイズから描く</option>
+                    <option value="3">空から描く</option>
+                  </select>
+                </label>
+                <label>周辺余白
+                  <input id="inpaintFullResPadding" type="number" min="0" max="256" step="4" value="32" />
+                </label>
+                <label class="fullWidthField autoSizeChoice">
+                  <input id="inpaintFullRes" type="checkbox" checked />
+                  マスク部分だけを高精細に処理する
+                </label>
+              </div>
+              <p class="hint">衣装なら服の少し外側まで、顔なら髪や輪郭を避けて塗ると崩れにくいです。</p>
+            </section>
           </section>
 
           <div class="quickCount">
@@ -234,7 +295,7 @@
 
           <details>
             <summary>Hires.fix設定</summary>
-            <p class="hint">新規生成はHires.fix、img2imgは選択候補を参照画像にして高解像度化します。Upscalerは新規生成だけで使用します。</p>
+            <p class="hint">新規生成はHires.fix、img2img・部分修正は選択候補を参照画像にして高解像度化します。Upscalerは新規生成だけで使用します。</p>
             <div class="settingsGrid">
               <label>倍率<input id="hiresScale" type="number" min="1" max="2" step="0.1" /></label>
               <label>Hires Steps<input id="hiresSteps" type="number" min="1" max="50" /></label>
@@ -276,6 +337,7 @@
                 <div class="resultActions">
                   <button id="favoriteFinalButton" class="iconButton" type="button" aria-label="お気に入り">👍</button>
                   <button id="sendFinalToImg2ImgButton" class="secondary smallButton" type="button">img2imgへ</button>
+                  <button id="sendFinalToInpaintButton" class="secondary smallButton" type="button">部分修正</button>
                   <button id="reuseFinalButton" class="secondary smallButton" type="button">この構図で差し替え</button>
                   <a id="downloadLink" class="downloadButton" download>画像を保存</a>
                 </div>

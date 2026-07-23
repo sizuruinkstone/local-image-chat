@@ -107,6 +107,46 @@ test("生成キューからReForge、履歴、👍集計までAPIが往復する
   assert.equal(recipe.mode, "img2img");
   assert.equal(recipe.sourceImageUrl, img2imgCompleted.result.sourceImageUrl);
 
+  const inpaintQueued = await postJson(`${baseUrl}/api/jobs`, {
+    mode: "inpaint",
+    description: "上着だけ変更",
+    prompt: "masterpiece, 1girl, white jacket",
+    negativePrompt: "low quality",
+    initImageId: img2imgImage.id,
+    maskImage: `data:image/png;base64,${ONE_PIXEL_PNG}`,
+    loras: [],
+    settings: {
+      width: 512,
+      height: 512,
+      steps: 5,
+      candidateCount: 1,
+      img2imgResizeMode: 1,
+      inpaintDenoising: 0.55,
+      maskBlur: 6,
+      inpaintFill: 1,
+      inpaintFullRes: true,
+      inpaintFullResPadding: 32
+    }
+  });
+  const inpaintCompleted = await waitForJob(baseUrl, inpaintQueued.job.id);
+  assert.equal(inpaintCompleted.status, "done");
+  assert.equal(inpaintCompleted.result.mode, "inpaint");
+  assert.match(inpaintCompleted.result.maskImageUrl, /^\/outputs\/inpaint-mask_[a-f0-9]{20}\.png$/);
+
+  const inpaintRequest = reforgeRequests.filter((item) => item.url === "/sdapi/v1/img2img").at(-1);
+  assert.equal(inpaintRequest.body.mask, ONE_PIXEL_PNG);
+  assert.equal(inpaintRequest.body.denoising_strength, 0.55);
+  assert.equal(inpaintRequest.body.mask_blur, 6);
+  assert.equal(inpaintRequest.body.inpainting_fill, 1);
+  assert.equal(inpaintRequest.body.inpaint_full_res, true);
+  assert.equal(inpaintRequest.body.inpaint_full_res_padding, 32);
+  assert.equal(inpaintRequest.body.inpainting_mask_invert, 0);
+
+  const inpaintImage = inpaintCompleted.result.images[0];
+  const inpaintRecipe = await (await fetch(`${baseUrl}/api/history/${inpaintImage.id}/recipe`)).json();
+  assert.equal(inpaintRecipe.mode, "inpaint");
+  assert.equal(inpaintRecipe.maskImageUrl, inpaintCompleted.result.maskImageUrl);
+
   const refineQueued = await postJson(`${baseUrl}/api/jobs`, {
     mode: "img2img",
     description: "高解像度仕上げ",
@@ -138,6 +178,36 @@ test("生成キューからReForge、履歴、👍集計までAPIが往復する
   assert.equal(refineRequest.body.steps, 7);
   assert.equal(refineRequest.body.denoising_strength, 0.32);
   assert.equal(refineRequest.body.enable_hr, undefined);
+
+  const inpaintRefineQueued = await postJson(`${baseUrl}/api/jobs`, {
+    mode: "inpaint",
+    description: "部分修正の高解像度仕上げ",
+    prompt: "masterpiece, 1girl, white jacket",
+    negativePrompt: "low quality",
+    initImageId: inpaintImage.id,
+    parentImageId: inpaintImage.id,
+    loras: [],
+    settings: {
+      width: 512,
+      height: 512,
+      steps: 5,
+      candidateCount: 1,
+      img2imgResizeMode: 1,
+      inpaintDenoising: 0.55,
+      hiresEnabled: true,
+      hiresScale: 1.5,
+      hiresSteps: 7,
+      hiresDenoising: 0.3
+    }
+  });
+  const inpaintRefined = await waitForJob(baseUrl, inpaintRefineQueued.job.id);
+  assert.equal(inpaintRefined.status, "done");
+  assert.equal(inpaintRefined.result.mode, "inpaint");
+  const inpaintRefineRequest = reforgeRequests.filter((item) => item.url === "/sdapi/v1/img2img").at(-1);
+  assert.equal(inpaintRefineRequest.body.mask, undefined);
+  assert.equal(inpaintRefineRequest.body.denoising_strength, 0.3);
+  assert.equal(inpaintRefineRequest.body.width, 768);
+  assert.equal(inpaintRefineRequest.body.height, 768);
 });
 
 function handleOllama(request, response) {
