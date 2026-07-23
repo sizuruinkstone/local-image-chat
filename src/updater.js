@@ -205,12 +205,26 @@ async function replaceIfExists(source, destination) {
 }
 
 async function installDependencies(rootDir) {
-  const command = process.platform === "win32" ? "npm.cmd" : "npm";
-  await execFileAsync(command, ["install", "--omit=dev", "--no-audit", "--no-fund"], {
+  const { command, args } = dependencyInstallCommand();
+  await execFileAsync(command, args, {
     cwd: rootDir,
     timeout: 5 * 60 * 1000,
     windowsHide: true
   });
+}
+
+export function dependencyInstallCommand(
+  platform = process.platform,
+  comspec = process.env.ComSpec
+) {
+  const installArgs = ["install", "--omit=dev", "--no-audit", "--no-fund"];
+  if (platform === "win32") {
+    return {
+      command: comspec || "cmd.exe",
+      args: ["/d", "/s", "/c", `npm.cmd ${installArgs.join(" ")}`]
+    };
+  }
+  return { command: "npm", args: installArgs };
 }
 
 function parseVersion(value) {
