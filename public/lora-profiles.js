@@ -368,6 +368,16 @@ export const LORA_PROFILES = [
 ];
 
 export function findProfileForLora(lora) {
+  const registryVersionId = Number(lora?.registry?.versionId);
+  const registryModelId = Number(lora?.registry?.modelId);
+  const registryMatch = LORA_PROFILES.find((profile) =>
+    (Number.isInteger(registryVersionId) && registryVersionId > 0
+      && Number(profile.versionId) === registryVersionId)
+    || (Number.isInteger(registryModelId) && registryModelId > 0
+      && profileModelId(profile) === registryModelId)
+  );
+  if (registryMatch) return registryMatch;
+
   const haystack = normalize(`${lora?.name ?? ""} ${lora?.alias ?? ""} ${lora?.displayName ?? ""}`);
   if (!haystack) return null;
   return LORA_PROFILES.find((profile) =>
@@ -392,4 +402,9 @@ function normalize(value) {
     .toLowerCase()
     .replace(/\.safetensors$/i, "")
     .replace(/[^a-z0-9]+/g, "");
+}
+
+function profileModelId(profile) {
+  const matched = String(profile?.sourceUrl ?? "").match(/\/models\/(\d+)/i);
+  return matched ? Number(matched[1]) : null;
 }

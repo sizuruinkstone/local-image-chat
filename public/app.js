@@ -641,8 +641,8 @@ async function loadLoras(refresh = false) {
       ? await postJson("/api/loras/refresh", {})
       : await getJson("/api/loras");
     installedLoras = data.loras ?? [];
-    registerCivitaiDefaults();
     registerDetectedProfiles();
+    registerCivitaiDefaults();
     migrateCharacterProfileDefaults();
     const available = new Set(installedLoras.map((item) => item.name));
     for (const name of selectedLoras.keys()) {
@@ -953,20 +953,28 @@ function registerDetectedProfiles() {
     }
     if (!profile) continue;
 
+    const hadPreset = loraPresetSelections.has(lora.name);
     const preset = getPreset(profile, loraPresetSelections.get(lora.name));
-    if (!loraPresetSelections.has(lora.name)) {
+    if (!hadPreset) {
       loraPresetSelections.set(lora.name, preset.id);
       changed = true;
     }
-    if (!loraWeights.has(lora.name)) {
+    const currentTriggerWords = loraTriggers.get(lora.name);
+    const shouldRestorePreset = !hadPreset
+      && (!currentTriggerWords || currentTriggerWords === lora.registry?.triggerWords);
+    if (shouldRestorePreset || !loraWeights.has(lora.name)) {
       loraWeights.set(lora.name, getPresetWeight(profile, preset));
       changed = true;
     }
-    if (!loraTriggers.has(lora.name)) {
+    if (shouldRestorePreset || !currentTriggerWords) {
       loraTriggers.set(lora.name, preset.triggerWords);
       changed = true;
     }
-    if (!loraNegativeWords.has(lora.name) && preset.negativeWords) {
+    if (shouldRestorePreset) {
+      if (preset.negativeWords) loraNegativeWords.set(lora.name, preset.negativeWords);
+      else loraNegativeWords.delete(lora.name);
+      changed = true;
+    } else if (!loraNegativeWords.has(lora.name) && preset.negativeWords) {
       loraNegativeWords.set(lora.name, preset.negativeWords);
       changed = true;
     }
