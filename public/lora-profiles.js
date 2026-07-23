@@ -1,5 +1,81 @@
 export const LORA_PROFILES = [
   {
+    id: "shanimas-illustrious-v2",
+    name: "アイドルマスター シャイニーカラーズ（28キャラ）",
+    category: "direction",
+    baseModel: "Illustrious",
+    versionId: 3048052,
+    sourceUrl: "https://civitai.com/models/1186512?modelVersionId=3048052",
+    filename: "shanimas.il.safetensors",
+    match: ["shanimas.il", "shanimas il"],
+    recommendedWeight: 0.9,
+    defaultPreset: "identity",
+    note: "画風＋28キャラ収録。キャラと衣装を別々に選択できます。配布例は0.9。",
+    presets: [
+      { id: "identity", name: "画風のみ（キャラ指定なし）", triggerWords: "shanimas, 1girl, solo, alternate costume" },
+      { id: "amana", name: "大崎甘奈（amana）", triggerWords: "shanimas, amana, 1girl, solo" },
+      { id: "asahi", name: "芹沢あさひ（asahi）", triggerWords: "shanimas, asahi, 1girl, solo" },
+      { id: "chiyoko", name: "園田智代子（chiyoko）", triggerWords: "shanimas, chiyoko, 1girl, solo" },
+      { id: "chiyuki", name: "桑山千雪（chiyuki）", triggerWords: "shanimas, chiyuki, 1girl, solo" },
+      { id: "fuyuko", name: "黛冬優子（fuyuko）", triggerWords: "shanimas, fuyuko, 1girl, solo" },
+      { id: "hana", name: "鈴木羽那（hana）", triggerWords: "shanimas, hana, 1girl, solo" },
+      { id: "haruki", name: "郁田はるき（haruki）", triggerWords: "shanimas, haruki, 1girl, solo" },
+      { id: "hiori", name: "風野灯織（hiori）", triggerWords: "shanimas, hiori, 1girl, solo" },
+      { id: "hinana", name: "市川雛菜（hinana）", triggerWords: "shanimas, hinana, 1girl, solo" },
+      { id: "juri", name: "西城樹里（juri）", triggerWords: "shanimas, juri, 1girl, solo" },
+      { id: "kaho", name: "小宮果穂（kaho）", triggerWords: "shanimas, kaho, 1girl, solo" },
+      { id: "kiriko", name: "幽谷霧子（kiriko）", triggerWords: "shanimas, kiriko, 1girl, solo" },
+      { id: "kogane", name: "月岡恋鐘（kogane）", triggerWords: "shanimas, kogane, 1girl, solo" },
+      { id: "koito", name: "福丸小糸（koito）", triggerWords: "shanimas, koito, 1girl, solo" },
+      { id: "luca", name: "斑鳩ルカ（luca）", triggerWords: "shanimas, luca, 1girl, solo" },
+      { id: "madoka", name: "樋口円香（madoka）", triggerWords: "shanimas, madoka, 1girl, solo" },
+      { id: "mamimi", name: "田中摩美々（mamimi）", triggerWords: "shanimas, mamimi, 1girl, solo" },
+      { id: "mano", name: "櫻木真乃（mano）", triggerWords: "shanimas, mano, 1girl, solo" },
+      { id: "meguru", name: "八宮めぐる（meguru）", triggerWords: "shanimas, meguru, 1girl, solo" },
+      { id: "mei", name: "和泉愛依（mei）", triggerWords: "shanimas, mei, 1girl, solo" },
+      { id: "mikoto", name: "緋田美琴（mikoto）", triggerWords: "shanimas, mikoto, 1girl, solo" },
+      { id: "natsuha", name: "有栖川夏葉（natsuha）", triggerWords: "shanimas, natsuha, 1girl, solo" },
+      { id: "nichika", name: "七草にちか（nichika）", triggerWords: "shanimas, nichika, 1girl, solo" },
+      { id: "rinze", name: "杜野凛世（rinze）", triggerWords: "shanimas, rinze, 1girl, solo" },
+      { id: "sakuya", name: "白瀬咲耶（sakuya）", triggerWords: "shanimas, sakuya, 1girl, solo" },
+      { id: "tenka", name: "大崎甜花（tenka）", triggerWords: "shanimas, tenka, 1girl, solo" },
+      { id: "toru", name: "浅倉透（toru）", triggerWords: "shanimas, toru, 1girl, solo" },
+      { id: "yuika", name: "三峰結華（yuika）", triggerWords: "shanimas, yuika, 1girl, solo" }
+    ],
+    addons: [
+      { id: "none", name: "衣装指定なし", triggerWords: "" },
+      { id: "cosaaa", name: "衣装A（cosaaa）", triggerWords: "cosaaa" },
+      { id: "cosccc", name: "衣装B（cosccc）", triggerWords: "cosccc" }
+    ],
+    defaultAddon: "none"
+  },
+  {
+    id: "suou-patra-illustrious",
+    name: "周防パトラ（VTuber）",
+    baseModel: "Illustrious",
+    versionId: 3028701,
+    sourceUrl: "https://civitai.com/models/2697170?modelVersionId=3028701",
+    filename: "patra.il.safetensors",
+    match: ["patra.il", "patra il"],
+    recommendedWeight: 0.9,
+    defaultPreset: "identity",
+    note: "本人＋2衣装収録。衣装を別プルダウンから選択できます。まず0.9。",
+    presets: [
+      {
+        id: "identity",
+        name: "衣装自由（キャラ特徴のみ）",
+        triggerWords: "patra, 1girl, solo, alternate costume",
+        negativeWords: "apt, bpt"
+      }
+    ],
+    addons: [
+      { id: "none", name: "衣装指定なし", triggerWords: "" },
+      { id: "apt", name: "衣装A（apt）", triggerWords: "apt", clearNegativeWords: true },
+      { id: "bpt", name: "衣装B（bpt）", triggerWords: "bpt", clearNegativeWords: true }
+    ],
+    defaultAddon: "none"
+  },
+  {
     id: "aizawa-ema-il-v2",
     name: "藍沢エマ v2.0（23衣装）",
     baseModel: "Illustrious",

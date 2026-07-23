@@ -6,7 +6,7 @@ import {
   getProfile
 } from "./lora-profiles.js";
 
-const PROFILE_STORAGE_VERSION = 2;
+const PROFILE_STORAGE_VERSION = 3;
 const MAX_INIT_IMAGE_BYTES = 20 * 1024 * 1024;
 
 const elements = Object.fromEntries(
@@ -74,6 +74,7 @@ const loraTriggers = loadLoraTriggers();
 const loraNegativeWords = loadStringMap("localImageChat.loraNegativeWords");
 const loraProfileAssignments = loadStringMap("localImageChat.loraProfileAssignments");
 const loraPresetSelections = loadStringMap("localImageChat.loraPresetSelections");
+const loraAddonSelections = loadStringMap("localImageChat.loraAddonSelections");
 
 await loadConfig();
 loadImg2ImgPreferences();
@@ -795,7 +796,9 @@ function createLoraRow(lora) {
   const advanced = document.createElement("details");
   advanced.className = "loraAdvanced";
   const advancedSummary = document.createElement("summary");
-  advancedSummary.textContent = isCharacter ? "衣装・Trigger設定" : "Trigger・Negative設定";
+  advancedSummary.textContent = isCharacter || profile
+    ? "キャラ・衣装・Trigger設定"
+    : "Trigger・Negative設定";
   const advancedBody = document.createElement("div");
   advancedBody.className = "loraAdvancedBody";
 
@@ -816,6 +819,11 @@ function createLoraRow(lora) {
   presetSelect.setAttribute("aria-label", `${lora.displayName}の衣装プリセット`);
   fillPresetSelect(presetSelect, profile, loraPresetSelections.get(lora.name));
 
+  const addonSelect = document.createElement("select");
+  addonSelect.className = "loraAddonSelect";
+  addonSelect.setAttribute("aria-label", `${lora.displayName}の追加衣装`);
+  fillAddonSelect(addonSelect, profile, loraAddonSelections.get(lora.name));
+
   const sourceLink = document.createElement("a");
   sourceLink.className = "loraSourceLink";
   sourceLink.textContent = "配布元";
@@ -825,9 +833,9 @@ function createLoraRow(lora) {
   sourceLink.classList.toggle("hidden", !profile && !registry);
   if (profile) sourceLink.title = `${profile.baseModel}・${profile.note}`;
   else if (registry) sourceLink.title = `${registry.baseModel}・Civitaiから登録`;
-  profileControls.append(profileSelect, presetSelect, sourceLink);
+  profileControls.append(profileSelect, presetSelect, addonSelect, sourceLink);
 
-  if (isCharacter) {
+  if (isCharacter || profile) {
     advancedBody.append(profileControls);
   } else if (registry) {
     profileControls.classList.add("sourceOnly");
@@ -885,14 +893,18 @@ function createLoraRow(lora) {
     if (!nextProfile) {
       loraProfileAssignments.delete(lora.name);
       loraPresetSelections.delete(lora.name);
+      loraAddonSelections.delete(lora.name);
       saveProfileSettings();
       renderLoras();
       return;
     }
     const preset = getPreset(nextProfile, nextProfile.defaultPreset);
+    const addon = getAddon(nextProfile, nextProfile.defaultAddon);
     loraProfileAssignments.set(lora.name, nextProfile.id);
     loraPresetSelections.set(lora.name, preset.id);
-    applyProfilePreset(lora.name, nextProfile, preset);
+    if (addon) loraAddonSelections.set(lora.name, addon.id);
+    else loraAddonSelections.delete(lora.name);
+    applyProfileSelection(lora.name, nextProfile, preset, addon);
     renderLoras();
     renderSelectedLoraSummary();
   });
@@ -902,13 +914,27 @@ function createLoraRow(lora) {
       ?? (profileSelect.value === profile?.id ? profile : null);
     const preset = getPreset(currentProfile, presetSelect.value);
     if (!currentProfile || !preset) return;
+    const addon = getAddon(currentProfile, addonSelect.value);
     loraPresetSelections.set(lora.name, preset.id);
-    applyProfilePreset(lora.name, currentProfile, preset);
-    triggerInput.value = preset.triggerWords;
-    negativeInput.value = preset.negativeWords ?? "";
+    applyProfileSelection(lora.name, currentProfile, preset, addon);
+    triggerInput.value = combineTriggerWords(preset.triggerWords, addon?.triggerWords);
+    negativeInput.value = addon?.clearNegativeWords ? "" : preset.negativeWords ?? "";
     const presetWeight = getPresetWeight(currentProfile, preset);
     slider.value = String(presetWeight);
     output.textContent = Number(presetWeight).toFixed(2);
+    renderSelectedLoraSummary();
+  });
+
+  addonSelect.addEventListener("change", () => {
+    const currentProfile = getProfile(profileSelect.value)
+      ?? (profileSelect.value === profile?.id ? profile : null);
+    const preset = getPreset(currentProfile, presetSelect.value);
+    const addon = getAddon(currentProfile, addonSelect.value);
+    if (!currentProfile || !preset || !addon) return;
+    loraAddonSelections.set(lora.name, addon.id);
+    applyProfileSelection(lora.name, currentProfile, preset, addon);
+    triggerInput.value = combineTriggerWords(preset.triggerWords, addon.triggerWords);
+    negativeInput.value = addon.clearNegativeWords ? "" : preset.negativeWords ?? "";
     renderSelectedLoraSummary();
   });
 
@@ -917,7 +943,8 @@ function createLoraRow(lora) {
 }
 
 function getLoraCategory(lora) {
-  if (resolveProfile(lora)) return "character";
+  const profile = resolveProfile(lora);
+  if (profile) return profile.category === "direction" ? "direction" : "character";
   if (lora.registry?.category) return lora.registry.category;
   return lora.category === "character" ? "character" : "direction";
 }
@@ -968,8 +995,13 @@ function registerDetectedProfiles() {
 
     const hadPreset = loraPresetSelections.has(lora.name);
     const preset = getPreset(profile, loraPresetSelections.get(lora.name));
+    const addon = getAddon(profile, loraAddonSelections.get(lora.name));
     if (!hadPreset) {
       loraPresetSelections.set(lora.name, preset.id);
+      changed = true;
+    }
+    if (profile.addons?.length && !loraAddonSelections.has(lora.name) && addon) {
+      loraAddonSelections.set(lora.name, addon.id);
       changed = true;
     }
     const currentTriggerWords = loraTriggers.get(lora.name);
@@ -980,14 +1012,15 @@ function registerDetectedProfiles() {
       changed = true;
     }
     if (shouldRestorePreset || !currentTriggerWords) {
-      loraTriggers.set(lora.name, preset.triggerWords);
+      loraTriggers.set(lora.name, combineTriggerWords(preset.triggerWords, addon?.triggerWords));
       changed = true;
     }
     if (shouldRestorePreset) {
-      if (preset.negativeWords) loraNegativeWords.set(lora.name, preset.negativeWords);
+      if (addon?.clearNegativeWords) loraNegativeWords.delete(lora.name);
+      else if (preset.negativeWords) loraNegativeWords.set(lora.name, preset.negativeWords);
       else loraNegativeWords.delete(lora.name);
       changed = true;
-    } else if (!loraNegativeWords.has(lora.name) && preset.negativeWords) {
+    } else if (!addon?.clearNegativeWords && !loraNegativeWords.has(lora.name) && preset.negativeWords) {
       loraNegativeWords.set(lora.name, preset.negativeWords);
       changed = true;
     }
@@ -1061,7 +1094,7 @@ function fillPresetSelect(select, profile, selectedPresetId) {
   const identityGroup = document.createElement("optgroup");
   identityGroup.label = "キャラのみ";
   const outfitGroup = document.createElement("optgroup");
-  outfitGroup.label = "衣装プリセット";
+  outfitGroup.label = profile.category === "direction" ? "キャラクター" : "衣装プリセット";
   for (const preset of profile.presets) {
     const option = new Option(preset.name, preset.id);
     if (preset.id === "identity") identityGroup.append(option);
@@ -1072,17 +1105,57 @@ function fillPresetSelect(select, profile, selectedPresetId) {
   select.value = getPreset(profile, selectedPresetId)?.id ?? profile.defaultPreset;
 }
 
-function applyProfilePreset(loraName, profile, preset) {
+function fillAddonSelect(select, profile, selectedAddonId) {
+  select.replaceChildren();
+  if (!profile?.addons?.length) {
+    select.append(new Option("追加衣装なし", ""));
+    select.disabled = true;
+    select.classList.add("hidden");
+    return;
+  }
+  select.disabled = false;
+  select.classList.remove("hidden");
+  for (const addon of profile.addons) select.append(new Option(addon.name, addon.id));
+  select.value = getAddon(profile, selectedAddonId)?.id ?? profile.defaultAddon ?? profile.addons[0].id;
+}
+
+function getAddon(profile, addonId) {
+  if (!profile?.addons?.length) return null;
+  return profile.addons.find((addon) => addon.id === addonId)
+    ?? profile.addons.find((addon) => addon.id === profile.defaultAddon)
+    ?? profile.addons[0];
+}
+
+function combineTriggerWords(...values) {
+  const seen = new Set();
+  return values
+    .flatMap((value) => String(value ?? "").split(","))
+    .map((word) => word.trim())
+    .filter((word) => {
+      const normalized = word.toLowerCase();
+      if (!normalized || seen.has(normalized)) return false;
+      seen.add(normalized);
+      return true;
+    })
+    .join(", ");
+}
+
+function applyProfileSelection(loraName, profile, preset, addon = null) {
   const weight = getPresetWeight(profile, preset);
   loraWeights.set(loraName, weight);
-  loraTriggers.set(loraName, preset.triggerWords);
-  if (preset.negativeWords) loraNegativeWords.set(loraName, preset.negativeWords);
+  loraTriggers.set(loraName, combineTriggerWords(preset.triggerWords, addon?.triggerWords));
+  if (addon?.clearNegativeWords) loraNegativeWords.delete(loraName);
+  else if (preset.negativeWords) loraNegativeWords.set(loraName, preset.negativeWords);
   else loraNegativeWords.delete(loraName);
   if (selectedLoras.has(loraName)) selectedLoras.set(loraName, weight);
   saveLoraWeights();
   saveLoraTriggers();
   saveLoraNegativeWords();
   saveProfileSettings();
+}
+
+function applyProfilePreset(loraName, profile, preset) {
+  applyProfileSelection(loraName, profile, preset, getAddon(profile, loraAddonSelections.get(loraName)));
 }
 
 function getPresetWeight(profile, preset) {
@@ -1979,6 +2052,7 @@ function saveLoraNegativeWords() {
 function saveProfileSettings() {
   localStorage.setItem("localImageChat.loraProfileAssignments", JSON.stringify(Object.fromEntries(loraProfileAssignments)));
   localStorage.setItem("localImageChat.loraPresetSelections", JSON.stringify(Object.fromEntries(loraPresetSelections)));
+  localStorage.setItem("localImageChat.loraAddonSelections", JSON.stringify(Object.fromEntries(loraAddonSelections)));
 }
 
 async function getJson(url) {

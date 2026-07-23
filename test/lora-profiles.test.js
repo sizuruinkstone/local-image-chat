@@ -34,6 +34,33 @@ test("同じCivitaiモデルの別バージョンもmodelIdで既知プロフィ
   assert.equal(profile?.id, "last-rite-illustrious");
 });
 
+test("手動配置したシャニマス複合LoRAを28キャラ＋2衣装プロフィールへ接続する", () => {
+  const profile = findProfileForLora({
+    name: "Style/shanimas.il",
+    displayName: "shanimas.il"
+  });
+
+  assert.equal(profile?.id, "shanimas-illustrious-v2");
+  assert.equal(profile?.category, "direction");
+  assert.equal(profile?.presets.length, 29);
+  assert.equal(profile?.addons.length, 3);
+  assert.equal(profile?.presets.find((preset) => preset.id === "fuyuko")?.triggerWords,
+    "shanimas, fuyuko, 1girl, solo");
+  assert.equal(profile?.addons.find((addon) => addon.id === "cosaaa")?.triggerWords, "cosaaa");
+});
+
+test("手動配置した周防パトラLoRAを2衣装プロフィールへ接続する", () => {
+  const profile = findProfileForLora({
+    name: "Characters/patra.il",
+    displayName: "patra.il"
+  });
+
+  assert.equal(profile?.id, "suou-patra-illustrious");
+  assert.equal(profile?.presets[0].triggerWords, "patra, 1girl, solo, alternate costume");
+  assert.deepEqual(profile?.addons.map((addon) => addon.id), ["none", "apt", "bpt"]);
+  assert.equal(profile?.addons[1].clearNegativeWords, true);
+});
+
 test("未登録のCivitaiキャラもTrigger Wordsから衣装プリセットを自動作成する", () => {
   const profile = createRegistryProfile({
     name: "Characters/new-character",
