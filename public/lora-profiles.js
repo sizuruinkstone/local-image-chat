@@ -390,6 +390,7 @@ export function createRegistryProfile(lora) {
   if (!registry || registry.category !== "character") return null;
 
   const triggerWords = String(registry.triggerWords ?? "").trim();
+  const { identityWords, outfitWords } = splitCharacterTriggerWords(triggerWords);
   const modelId = positiveInteger(registry.modelId);
   const versionId = positiveInteger(registry.versionId);
   const identity = modelId && versionId
@@ -403,13 +404,34 @@ export function createRegistryProfile(lora) {
     versionId,
     sourceUrl: registry.sourceUrl || "",
     recommendedWeight: Number(registry.recommendedWeight) || 0.75,
-    defaultPreset: "civitai-default",
-    note: "CivitaiのTrigger Wordsから自動作成した衣装プリセットです。",
-    presets: [{
-      id: "civitai-default",
-      name: "Civitai登録衣装",
-      triggerWords: triggerWords || "1girl, solo"
-    }]
+    defaultPreset: "identity",
+    note: "CivitaiのTrigger Wordsをキャラ特徴と衣装タグに分けて自動作成したプリセットです。",
+    presets: [
+      {
+        id: "identity",
+        name: "衣装自由（服タグなし）",
+        triggerWords: identityWords,
+        negativeWords: outfitWords
+      },
+      {
+        id: "civitai-default",
+        name: "Civitai登録衣装",
+        triggerWords: triggerWords || "1girl, solo"
+      }
+    ]
+  };
+}
+
+export function splitCharacterTriggerWords(triggerWords) {
+  const words = uniqueWords(String(triggerWords ?? "").split(","));
+  const outfit = words.filter(isOutfitWord);
+  const identity = words.filter((word) => !isOutfitWord(word));
+  if (!identity.some((word) => /^1(?:girl|boy)$/i.test(word))) identity.push("1girl");
+  if (!identity.some((word) => /^solo$/i.test(word))) identity.push("solo");
+  if (!identity.some((word) => /^alternate costume$/i.test(word))) identity.push("alternate costume");
+  return {
+    identityWords: identity.join(", "),
+    outfitWords: outfit.join(", ")
   };
 }
 
@@ -440,4 +462,21 @@ function profileModelId(profile) {
 function positiveInteger(value) {
   const number = Number(value);
   return Number.isInteger(number) && number > 0 ? number : null;
+}
+
+function uniqueWords(words) {
+  const seen = new Set();
+  return words
+    .map((word) => word.trim())
+    .filter((word) => {
+      const normalized = word.toLowerCase();
+      if (!normalized || seen.has(normalized)) return false;
+      seen.add(normalized);
+      return true;
+    });
+}
+
+function isOutfitWord(word) {
+  return /\b(?:apron|armor|armour|belt|bikini|blazer|bodysuit|boot|bra|cape|capelet|cardigan|choker|cloak|coat|collar|costume|dress|footwear|garter|glove|gown|hat|headgear|heel|hood|hoodie|jacket|jeans|kimono|leotard|lingerie|loafer|necktie|nightgown|obi|outfit|pauldron|panties|pants|pantyhose|pajama|robe|sandal|shirt|shoe|shorts|skirt|sleeve|sneaker|sock|stocking|suit|sweater|swimsuit|thighhigh|tie|top|tracksuit|trousers|t-shirt|uniform|vest|yukata)s?\b/i.test(word)
+    || /\b(?:clothing|clothes|dressed|off[- ]shoulder|strapless|sleeveless|high-leg|crop top|detached sleeves|wrist cuffs)\b/i.test(word);
 }

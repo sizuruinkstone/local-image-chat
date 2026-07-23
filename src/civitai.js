@@ -211,7 +211,7 @@ async function fetchCivitaiJson(url, token) {
 function civitaiHeaders(token, accept) {
   const headers = {
     Accept: accept,
-    "User-Agent": "Local-Image-Chat/2.3.3"
+    "User-Agent": "Local-Image-Chat/2.3.4"
   };
   if (typeof token === "string" && token.trim()) headers.Authorization = `Bearer ${token.trim()}`;
   return headers;

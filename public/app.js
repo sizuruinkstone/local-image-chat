@@ -1056,7 +1056,17 @@ function fillPresetSelect(select, profile, selectedPresetId) {
     return;
   }
   select.disabled = false;
-  for (const preset of profile.presets) select.append(new Option(preset.name, preset.id));
+  const identityGroup = document.createElement("optgroup");
+  identityGroup.label = "キャラのみ";
+  const outfitGroup = document.createElement("optgroup");
+  outfitGroup.label = "衣装プリセット";
+  for (const preset of profile.presets) {
+    const option = new Option(preset.name, preset.id);
+    if (preset.id === "identity") identityGroup.append(option);
+    else outfitGroup.append(option);
+  }
+  if (identityGroup.children.length) select.append(identityGroup);
+  if (outfitGroup.children.length) select.append(outfitGroup);
   select.value = getPreset(profile, selectedPresetId)?.id ?? profile.defaultPreset;
 }
 
