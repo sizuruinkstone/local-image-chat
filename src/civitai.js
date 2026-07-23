@@ -202,15 +202,47 @@ export function resolveLoraInstallRoot(configuredPath, rawLoras) {
 
 export function deriveCivitaiOutfitPresets(trainedWords, description = "") {
   const words = uniqueStrings(trainedWords);
-  const conceptTriggers = words.filter(isLikelyConceptTrigger);
-  if (!conceptTriggers.length) return [];
-
   const lines = htmlToLines(description);
-  return conceptTriggers.map((trigger, index) => ({
-    id: `civitai-outfit-${slugify(trigger) || index + 1}`,
-    name: humanizeTrigger(trigger),
-    triggerWords: collectTriggerTags(trigger, conceptTriggers, lines)
-  }));
+  const descriptionPresets = extractDescriptionOutfitPresets(description);
+  const descriptionByTrigger = new Map(descriptionPresets.map((preset) => [
+    normalizeTrigger(preset.trigger),
+    preset
+  ]));
+  const triggerCounts = new Map();
+  const presets = [];
+
+  for (const word of words) {
+    const tags = splitPromptTags(word);
+    const trigger = tags[0] ?? "";
+    if (!isLikelyConceptTrigger(trigger)) continue;
+
+    const normalizedTrigger = normalizeTrigger(trigger);
+    const count = (triggerCounts.get(normalizedTrigger) ?? 0) + 1;
+    triggerCounts.set(normalizedTrigger, count);
+    const described = descriptionByTrigger.get(normalizedTrigger);
+    const triggerWords = tags.length > 1
+      ? tags.join(", ")
+      : collectTriggerTags(trigger, words.map(firstPromptTag).filter(Boolean), lines);
+
+    presets.push({
+      id: uniquePresetId(trigger, count, presets.length),
+      name: `${described?.name ?? humanizeTrigger(trigger)}${count > 1 ? ` (${count})` : ""}`,
+      triggerWords
+    });
+  }
+
+  for (const described of descriptionPresets) {
+    const normalizedTrigger = normalizeTrigger(described.trigger);
+    if (triggerCounts.has(normalizedTrigger)) continue;
+    triggerCounts.set(normalizedTrigger, 1);
+    presets.push({
+      id: uniquePresetId(described.trigger, 1, presets.length),
+      name: described.name,
+      triggerWords: described.triggerWords
+    });
+  }
+
+  return presets;
 }
 
 async function fetchRawLoras(config) {
@@ -239,7 +271,7 @@ async function fetchCivitaiJson(url, token) {
 function civitaiHeaders(token, accept) {
   const headers = {
     Accept: accept,
-    "User-Agent": "Local-Image-Chat/2.3.5"
+    "User-Agent": "Local-Image-Chat/2.3.6"
   };
   if (typeof token === "string" && token.trim()) headers.Authorization = `Bearer ${token.trim()}`;
   return headers;
@@ -294,11 +326,90 @@ function collectTriggerTags(trigger, allTriggers, lines) {
   return uniqueStrings(collected).join(", ");
 }
 
+function extractDescriptionOutfitPresets(description) {
+  const html = String(description ?? "");
+  const headingPattern = /<h3\b[^>]*>([\s\S]*?)<\/h3>([\s\S]*?)(?=<h[23]\b|$)/gi;
+  const presets = [];
+  let headingMatch;
+
+  while ((headingMatch = headingPattern.exec(html))) {
+    const name = decodeHtmlText(headingMatch[1]).replace(/[:：]\s*$/, "").trim();
+    const section = headingMatch[2];
+    const triggerMatch = section.match(
+      /(?:trigger\s*words?|トリガーワード|触发词)[\s\S]{0,500}?<pre\b[^>]*>\s*<code\b[^>]*>([\s\S]*?)<\/code>\s*<\/pre>/i
+    );
+    if (!triggerMatch) continue;
+
+    const trigger = firstPromptTag(decodeHtmlText(triggerMatch[1]));
+    if (!isLikelyConceptTrigger(trigger)) continue;
+
+    const sectionTags = [];
+    const codePattern = /<pre\b[^>]*>\s*<code\b[^>]*>([\s\S]*?)<\/code>\s*<\/pre>/gi;
+    let codeMatch;
+    let previousEnd = 0;
+    while ((codeMatch = codePattern.exec(section))) {
+      const between = section.slice(previousEnd, codeMatch.index);
+      previousEnd = codePattern.lastIndex;
+      if (/<p\b[^>]*>\s*or\s*<\/p>/i.test(between)) continue;
+      const value = decodeHtmlText(codeMatch[1]);
+      if (/https?:\/\/|if it(?:'|’)s|ならだめ|的话不行/i.test(value)) continue;
+      sectionTags.push(...splitPromptTags(value));
+    }
+
+    const triggerWords = uniqueStrings([trigger, ...sectionTags])
+      .filter((tag) => !/^official3d$/i.test(tag))
+      .join(", ");
+    presets.push({
+      trigger,
+      name: name || humanizeTrigger(trigger),
+      triggerWords: triggerWords || trigger
+    });
+  }
+
+  return presets;
+}
+
+function splitPromptTags(value) {
+  return String(value ?? "")
+    .split(",")
+    .map((tag) => tag.trim())
+    .filter(Boolean);
+}
+
+function firstPromptTag(value) {
+  return splitPromptTags(value)[0] ?? "";
+}
+
+function normalizeTrigger(value) {
+  return String(value ?? "")
+    .replaceAll("\\", "")
+    .replace(/\s+/g, "")
+    .toLowerCase();
+}
+
+function uniquePresetId(trigger, occurrence, fallbackIndex) {
+  const base = slugify(trigger) || String(fallbackIndex + 1);
+  return `civitai-outfit-${base}${occurrence > 1 ? `-${occurrence}` : ""}`;
+}
+
 function isLikelyConceptTrigger(word) {
   const normalized = String(word).trim().toLowerCase();
   if (!normalized || normalized.length < 3) return false;
   return !/^(?:1girl|1boy|solo|female|male|woman|man|adult|anime|character|masterpiece|best quality|highres|absurdres|alternate costume)$/.test(normalized)
     && !/\b(?:hair|eyes?|bangs?|ahoge|breasts?|hips?|waist|body|skin|ears?|tail|dress|shirt|skirt|shorts|pants|jacket|coat|cape|cloak|uniform|bikini|swimsuit|bodysuit|leotard|underwear|bra|panties|thighhighs?|stockings?|pantyhose|socks?|boots?|shoes?|heels?|sandals?|gloves?|sleeves?|collar|choker|necktie|bowtie|belt|straps?|apron|kimono|yukata|hat|headgear|hood|armor|pauldrons?|jewelry|earrings?|necklace|bracelet|ribbon|hairpin|hairclip|ornament)\b/.test(normalized);
+}
+
+function decodeHtmlText(value) {
+  return String(value ?? "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function htmlToLines(value) {
