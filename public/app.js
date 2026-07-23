@@ -26,6 +26,7 @@ const elements = Object.fromEntries(
     "unlockCompositionButton", "lockCompositionButton", "favoriteFinalButton",
     "reuseFinalButton", "civitaiDetails", "civitaiUrl", "civitaiCategory",
     "civitaiToken", "inspectCivitaiButton", "installCivitaiButton",
+    "refreshCivitaiRegistrationsButton",
     "civitaiPreview", "civitaiStatus", "updateStatusButton", "updateDetails",
     "githubToken", "checkUpdateButton", "applyUpdateButton", "updateStatus",
     "favoritesOnly", "refreshHistoryButton", "preferenceSummary", "historyGrid",
@@ -161,6 +162,7 @@ elements.loraSearch.addEventListener("input", renderLoras);
 elements.refreshLorasButton.addEventListener("click", () => loadLoras(true));
 elements.inspectCivitaiButton.addEventListener("click", inspectCivitai);
 elements.installCivitaiButton.addEventListener("click", installCivitai);
+elements.refreshCivitaiRegistrationsButton.addEventListener("click", refreshCivitaiRegistrations);
 elements.civitaiUrl.addEventListener("input", () => {
   inspectedCivitai = null;
   elements.installCivitaiButton.disabled = true;
@@ -1760,6 +1762,39 @@ async function installCivitai() {
   }
 }
 
+async function refreshCivitaiRegistrations() {
+  clearError();
+  rememberSessionSecrets();
+  elements.inspectCivitaiButton.disabled = true;
+  elements.installCivitaiButton.disabled = true;
+  elements.refreshCivitaiRegistrationsButton.disabled = true;
+  elements.civitaiStatus.textContent = "登録済みCivitai LoRAの衣装・Trigger Wordsを再解析中…";
+  try {
+    const result = await postJson("/api/civitai/refresh-registrations", {
+      token: elements.civitaiToken.value
+    });
+    if (!result.total) {
+      elements.civitaiStatus.textContent = "Civitai URLから登録したLoRAはまだありません。";
+      return;
+    }
+
+    const failureNames = (result.failures ?? [])
+      .slice(0, 3)
+      .map((item) => item.modelName)
+      .join("、");
+    elements.civitaiStatus.textContent = result.failed
+      ? `${result.updated}/${result.total}件を更新しました。失敗${result.failed}件: ${failureNames}`
+      : `${result.updated}件すべての衣装・Trigger Wordsを更新しました。`;
+    await loadLoras();
+  } catch (error) {
+    elements.civitaiStatus.textContent = `一括再解析に失敗しました: ${error.message}`;
+  } finally {
+    elements.inspectCivitaiButton.disabled = false;
+    elements.installCivitaiButton.disabled = !inspectedCivitai;
+    elements.refreshCivitaiRegistrationsButton.disabled = false;
+  }
+}
+
 async function checkForUpdate() {
   rememberSessionSecrets();
   elements.checkUpdateButton.disabled = true;
@@ -1980,6 +2015,7 @@ function setBusy(busy, message = "") {
   elements.generateButton.disabled = busy;
   elements.healthButton.disabled = busy;
   elements.refreshLorasButton.disabled = busy;
+  elements.refreshCivitaiRegistrationsButton.disabled = busy;
   elements.txt2imgModeButton.disabled = busy;
   elements.img2imgModeButton.disabled = busy;
   elements.inpaintModeButton.disabled = busy;

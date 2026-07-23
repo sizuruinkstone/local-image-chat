@@ -55,6 +55,13 @@ test("生成キューからReForge、履歴、👍集計までAPIが往復する
 
   const baseUrl = `http://127.0.0.1:${appPort}`;
   await waitForServer(`${baseUrl}/api/config`, child);
+  const refreshRegistrations = await postJson(`${baseUrl}/api/civitai/refresh-registrations`, {});
+  assert.deepEqual(refreshRegistrations, {
+    total: 0,
+    updated: 0,
+    failed: 0,
+    failures: []
+  });
   const queued = await postJson(`${baseUrl}/api/jobs`, {
     description: "テスト画像",
     prompt: "masterpiece, 1girl, blue hair",

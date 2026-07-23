@@ -136,6 +136,15 @@ app.post("/api/civitai/install", async (request, response) => {
   }
 });
 
+app.post("/api/civitai/refresh-registrations", async (request, response) => {
+  try {
+    const result = await civitai.refreshRegistrations(sanitizeSecret(request.body.token));
+    response.json(result);
+  } catch (error) {
+    response.status(500).json({ error: readableError(error) });
+  }
+});
+
 app.get("/api/history", async (request, response) => {
   try {
     const generations = await history.list({

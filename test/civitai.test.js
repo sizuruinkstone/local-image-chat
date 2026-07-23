@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import {
+  createCivitaiService,
   deriveCivitaiOutfitPresets,
   parseCivitaiUrl,
   resolveLoraInstallRoot
@@ -114,4 +118,71 @@ test("APIのtrainedWordsにない説明文の追加衣装を補完する", () =>
     name: "Military uniform",
     triggerWords: "AkariMilitary, long hair, single earring, off-shoulder shirt, side capelet, layered skirt"
   });
+});
+
+test("登録済みLoRAを再ダウンロードせず一括再解析する", async (t) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "local-image-chat-civitai-"));
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(dataDir, "lora-registry.json"), JSON.stringify({
+    schemaVersion: 1,
+    entries: [
+      {
+        id: "100:101",
+        modelName: "更新前",
+        sourceUrl: "https://civitai.com/models/100?modelVersionId=101",
+        relativeName: "Characters/example",
+        filename: "example.safetensors",
+        category: "character",
+        triggerWords: "oldTrigger",
+        outfitPresets: []
+      },
+      {
+        id: "200:201",
+        modelName: "取得失敗モデル",
+        sourceUrl: "https://civitai.com/models/200?modelVersionId=201",
+        relativeName: "Characters/failure",
+        triggerWords: "keepMe"
+      }
+    ]
+  }));
+
+  const receivedTokens = [];
+  const service = createCivitaiService({
+    dataDir,
+    loraConfig: {},
+    reforgeConfig: {},
+    inspectCivitai: async (url, token) => {
+      receivedTokens.push(token);
+      if (url.includes("/200?")) throw new Error("Civitai API HTTP 429");
+      return {
+        modelId: 100,
+        versionId: 101,
+        modelName: "更新後",
+        versionName: "v2",
+        baseModel: "Illustrious",
+        sourceUrl: url,
+        trainedWords: ["NewDefault, black dress", "NewSwimsuit, bikini"],
+        outfitPresets: [
+          { id: "default", name: "標準", triggerWords: "NewDefault, black dress" },
+          { id: "swimsuit", name: "水着", triggerWords: "NewSwimsuit, bikini" }
+        ],
+        recommendedWeight: 0.8,
+        previewUrl: "https://example.com/preview.jpg"
+      };
+    }
+  });
+
+  const result = await service.refreshRegistrations("secret-token");
+  assert.equal(result.total, 2);
+  assert.equal(result.updated, 1);
+  assert.equal(result.failed, 1);
+  assert.deepEqual(receivedTokens, ["secret-token", "secret-token"]);
+
+  const stored = JSON.parse(await fs.readFile(path.join(dataDir, "lora-registry.json"), "utf8"));
+  assert.equal(stored.entries[0].modelName, "更新後");
+  assert.equal(stored.entries[0].triggerWords, "NewDefault, black dress, NewSwimsuit, bikini");
+  assert.equal(stored.entries[0].outfitPresets.length, 2);
+  assert.equal(stored.entries[0].category, "character");
+  assert.equal(stored.entries[0].filename, "example.safetensors");
+  assert.equal(stored.entries[1].triggerWords, "keepMe");
 });

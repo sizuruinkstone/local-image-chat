@@ -13,17 +13,22 @@ const CATEGORY_FOLDERS = {
   pose: "Pose"
 };
 
-export function createCivitaiService({ dataDir, loraConfig, reforgeConfig }) {
+export function createCivitaiService({
+  dataDir,
+  loraConfig,
+  reforgeConfig,
+  inspectCivitai = inspectCivitaiUrl
+}) {
   const registry = new JsonStore(path.join(dataDir, "lora-registry.json"), {
     schemaVersion: 1,
     entries: []
   });
 
   return {
-    inspect: (url, token) => inspectCivitaiUrl(url, token),
+    inspect: (url, token) => inspectCivitai(url, token),
 
     async install({ url, token, category = "style", overwrite = false }) {
-      const metadata = await inspectCivitaiUrl(url, token);
+      const metadata = await inspectCivitai(url, token);
       if (metadata.modelType.toLowerCase() !== "lora") {
         throw new Error(`このモデルはLoRAではありません（種類: ${metadata.modelType}）`);
       }
@@ -96,6 +101,57 @@ export function createCivitaiService({ dataDir, loraConfig, reforgeConfig }) {
       });
 
       return { metadata, entry, destinationPath, reusedExisting };
+    },
+
+    async refreshRegistrations(token = "") {
+      const current = await registry.read();
+      const candidates = current.entries.filter((entry) =>
+        typeof entry?.sourceUrl === "string" && entry.sourceUrl.trim()
+      );
+      const updates = new Map();
+      const failures = [];
+
+      for (const entry of candidates) {
+        try {
+          const metadata = await inspectCivitai(entry.sourceUrl, token);
+          updates.set(entry.id, {
+            modelId: metadata.modelId,
+            versionId: metadata.versionId,
+            modelName: metadata.modelName,
+            versionName: metadata.versionName,
+            baseModel: metadata.baseModel,
+            sourceUrl: metadata.sourceUrl,
+            triggerWords: metadata.trainedWords.join(", "),
+            outfitPresets: metadata.outfitPresets,
+            recommendedWeight: metadata.recommendedWeight,
+            previewUrl: metadata.previewUrl,
+            metadataUpdatedAt: new Date().toISOString()
+          });
+        } catch (error) {
+          failures.push({
+            id: entry.id,
+            modelName: entry.modelName || entry.relativeName || entry.filename || entry.id,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+
+      if (updates.size) {
+        await registry.update((data) => {
+          data.entries = data.entries.map((entry) => {
+            const update = updates.get(entry.id);
+            return update ? { ...entry, ...update } : entry;
+          });
+          return data;
+        });
+      }
+
+      return {
+        total: candidates.length,
+        updated: updates.size,
+        failed: failures.length,
+        failures
+      };
     },
 
     async mergeWithInstalled(loras) {
@@ -271,7 +327,7 @@ async function fetchCivitaiJson(url, token) {
 function civitaiHeaders(token, accept) {
   const headers = {
     Accept: accept,
-    "User-Agent": "Local-Image-Chat/2.3.6"
+    "User-Agent": "Local-Image-Chat/2.3.7"
   };
   if (typeof token === "string" && token.trim()) headers.Authorization = `Bearer ${token.trim()}`;
   return headers;
