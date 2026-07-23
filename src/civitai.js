@@ -41,25 +41,32 @@ export function createCivitaiService({ dataDir, loraConfig, reforgeConfig }) {
       const destinationPath = path.join(destinationDir, filename);
       await fsp.mkdir(destinationDir, { recursive: true });
 
-      if (!overwrite && await exists(destinationPath)) {
-        throw new Error(`${folderName}/${filename} は既に存在します`);
-      }
+      const currentRegistry = await registry.read();
+      const existingRegistration = currentRegistry.entries.find((item) =>
+        item.id === `${metadata.modelId}:${metadata.versionId}`
+      );
+      const alreadyInstalled = Boolean(existingRegistration)
+        || await exists(destinationPath)
+        || rawLoras.some((lora) => sameLoraFilename(lora, filename));
+      const reusedExisting = !overwrite && alreadyInstalled;
 
-      const temporaryPath = `${destinationPath}.${process.pid}.download`;
-      try {
-        const response = await fetch(metadata.file.downloadUrl, {
-          headers: civitaiHeaders(token, "application/octet-stream"),
-          signal: AbortSignal.timeout(60 * 60 * 1000)
-        });
-        if (!response.ok || !response.body) {
-          const detail = await response.text().catch(() => "");
-          throw new Error(`Civitaiダウンロード HTTP ${response.status}: ${detail.slice(0, 300)}`);
+      if (!reusedExisting) {
+        const temporaryPath = `${destinationPath}.${process.pid}.download`;
+        try {
+          const response = await fetch(metadata.file.downloadUrl, {
+            headers: civitaiHeaders(token, "application/octet-stream"),
+            signal: AbortSignal.timeout(60 * 60 * 1000)
+          });
+          if (!response.ok || !response.body) {
+            const detail = await response.text().catch(() => "");
+            throw new Error(`Civitaiダウンロード HTTP ${response.status}: ${detail.slice(0, 300)}`);
+          }
+          await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(temporaryPath));
+          await fsp.rename(temporaryPath, destinationPath);
+        } catch (error) {
+          await fsp.rm(temporaryPath, { force: true }).catch(() => {});
+          throw error;
         }
-        await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(temporaryPath));
-        await fsp.rename(temporaryPath, destinationPath);
-      } catch (error) {
-        await fsp.rm(temporaryPath, { force: true }).catch(() => {});
-        throw error;
       }
 
       const relativeName = `${folderName}/${filename.replace(/\.(?:safetensors|ckpt|pt)$/i, "")}`;
@@ -76,6 +83,7 @@ export function createCivitaiService({ dataDir, loraConfig, reforgeConfig }) {
         category: category === "character" ? "character" : "direction",
         subcategory: category,
         triggerWords: metadata.trainedWords.join(", "),
+        outfitPresets: metadata.outfitPresets,
         recommendedWeight: metadata.recommendedWeight,
         previewUrl: metadata.previewUrl,
         installedAt: new Date().toISOString()
@@ -87,7 +95,7 @@ export function createCivitaiService({ dataDir, loraConfig, reforgeConfig }) {
         return data;
       });
 
-      return { metadata, entry, destinationPath };
+      return { metadata, entry, destinationPath, reusedExisting };
     },
 
     async mergeWithInstalled(loras) {
@@ -126,6 +134,14 @@ export async function inspectCivitaiUrl(inputUrl, token = "") {
   const file = selectModelFile(version.files);
   if (!file) throw new Error("ダウンロード可能な.safetensorsファイルがありません");
 
+  const trainedWords = Array.isArray(version.trainedWords)
+    ? version.trainedWords.filter((word) => typeof word === "string" && word.trim()).slice(0, 40)
+    : [];
+  const outfitPresets = deriveCivitaiOutfitPresets(
+    trainedWords,
+    `${model.description ?? ""}\n${version.description ?? ""}`
+  );
+
   return {
     modelId: Number(model.id ?? version.modelId ?? parsed.modelId),
     versionId: Number(version.id),
@@ -133,9 +149,8 @@ export async function inspectCivitaiUrl(inputUrl, token = "") {
     versionName: String(version.name ?? "バージョン不明"),
     modelType: String(model.type ?? "Unknown"),
     baseModel: String(version.baseModel ?? "不明"),
-    trainedWords: Array.isArray(version.trainedWords)
-      ? version.trainedWords.filter((word) => typeof word === "string" && word.trim()).slice(0, 40)
-      : [],
+    trainedWords,
+    outfitPresets,
     recommendedWeight: inferRecommendedWeight(version),
     previewUrl: version.images?.find((image) => image.type === "image")?.url ?? version.images?.[0]?.url ?? "",
     sourceUrl: `https://civitai.com/models/${model.id ?? parsed.modelId}?modelVersionId=${version.id}`,
@@ -185,6 +200,19 @@ export function resolveLoraInstallRoot(configuredPath, rawLoras) {
   return "";
 }
 
+export function deriveCivitaiOutfitPresets(trainedWords, description = "") {
+  const words = uniqueStrings(trainedWords);
+  const conceptTriggers = words.filter(isLikelyConceptTrigger);
+  if (!conceptTriggers.length) return [];
+
+  const lines = htmlToLines(description);
+  return conceptTriggers.map((trigger, index) => ({
+    id: `civitai-outfit-${slugify(trigger) || index + 1}`,
+    name: humanizeTrigger(trigger),
+    triggerWords: collectTriggerTags(trigger, conceptTriggers, lines)
+  }));
+}
+
 async function fetchRawLoras(config) {
   const response = await fetch(`${config.url}/sdapi/v1/loras`, {
     signal: AbortSignal.timeout(10000)
@@ -211,7 +239,7 @@ async function fetchCivitaiJson(url, token) {
 function civitaiHeaders(token, accept) {
   const headers = {
     Accept: accept,
-    "User-Agent": "Local-Image-Chat/2.3.4"
+    "User-Agent": "Local-Image-Chat/2.3.5"
   };
   if (typeof token === "string" && token.trim()) headers.Authorization = `Bearer ${token.trim()}`;
   return headers;
@@ -236,6 +264,84 @@ function inferRecommendedWeight(version) {
   return Math.max(0.05, Math.min(1.5, Number(value.toFixed(2))));
 }
 
+function collectTriggerTags(trigger, allTriggers, lines) {
+  const triggerLower = trigger.toLowerCase();
+  const index = lines.findIndex((line) => line.toLowerCase().includes(triggerLower));
+  if (index < 0) return trigger;
+
+  const sameLineTriggers = allTriggers.filter((candidate) =>
+    lines[index].toLowerCase().includes(candidate.toLowerCase())
+  );
+  if (sameLineTriggers.length > 1) return trigger;
+
+  const collected = [trigger];
+  for (let offset = 0; offset < 4 && index + offset < lines.length; offset += 1) {
+    const line = lines[index + offset].trim();
+    if (!line && offset > 0) break;
+    if (offset > 0 && allTriggers.some((candidate) =>
+      line.toLowerCase().includes(candidate.toLowerCase())
+    )) break;
+
+    const cleaned = offset === 0
+      ? line.slice(line.toLowerCase().indexOf(triggerLower) + trigger.length)
+      : line;
+    for (const item of cleaned.replace(/^[\s:：\-–—|]+/, "").split(",")) {
+      const tag = item.trim().replace(/^[•*·]\s*/, "");
+      if (!tag || tag.length > 60 || /https?:\/\//i.test(tag) || tag.split(/\s+/).length > 7) continue;
+      collected.push(tag);
+    }
+  }
+  return uniqueStrings(collected).join(", ");
+}
+
+function isLikelyConceptTrigger(word) {
+  const normalized = String(word).trim().toLowerCase();
+  if (!normalized || normalized.length < 3) return false;
+  return !/^(?:1girl|1boy|solo|female|male|woman|man|adult|anime|character|masterpiece|best quality|highres|absurdres|alternate costume)$/.test(normalized)
+    && !/\b(?:hair|eyes?|bangs?|ahoge|breasts?|hips?|waist|body|skin|ears?|tail|dress|shirt|skirt|shorts|pants|jacket|coat|cape|cloak|uniform|bikini|swimsuit|bodysuit|leotard|underwear|bra|panties|thighhighs?|stockings?|pantyhose|socks?|boots?|shoes?|heels?|sandals?|gloves?|sleeves?|collar|choker|necktie|bowtie|belt|straps?|apron|kimono|yukata|hat|headgear|hood|armor|pauldrons?|jewelry|earrings?|necklace|bracelet|ribbon|hairpin|hairclip|ornament)\b/.test(normalized);
+}
+
+function htmlToLines(value) {
+  return String(value ?? "")
+    .replace(/<(?:br|\/p|\/li|\/h[1-6]|\/div)>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&#39;|&apos;/gi, "'")
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, " ").trim());
+}
+
+function humanizeTrigger(value) {
+  return String(value)
+    .replaceAll("_", " ")
+    .replace(/[()\\]+/g, " ")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function slugify(value) {
+  return String(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+}
+
+function uniqueStrings(values) {
+  const seen = new Set();
+  return (Array.isArray(values) ? values : [])
+    .map((value) => String(value ?? "").trim())
+    .filter((value) => {
+      const normalized = value.toLowerCase();
+      if (!normalized || seen.has(normalized)) return false;
+      seen.add(normalized);
+      return true;
+    });
+}
+
 function findRegistryEntry(entries, lora) {
   const candidates = [lora.name, lora.displayName, lora.alias]
     .filter(Boolean)
@@ -255,6 +361,14 @@ function normalizeName(value) {
     .replaceAll("\\", "/")
     .replace(/\.(?:safetensors|ckpt|pt)$/i, "")
     .toLowerCase();
+}
+
+function sameLoraFilename(lora, filename) {
+  const target = normalizeName(filename);
+  return [lora?.name, lora?.displayName, lora?.alias]
+    .filter(Boolean)
+    .map(normalizeName)
+    .some((candidate) => candidate === target || candidate.endsWith(`/${target}`));
 }
 
 function sanitizeFilename(value) {

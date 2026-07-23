@@ -390,7 +390,12 @@ export function createRegistryProfile(lora) {
   if (!registry || registry.category !== "character") return null;
 
   const triggerWords = String(registry.triggerWords ?? "").trim();
-  const { identityWords, outfitWords } = splitCharacterTriggerWords(triggerWords);
+  const registeredOutfits = normalizeRegistryOutfits(registry.outfitPresets);
+  const defaultOutfitWords = registeredOutfits[0]?.triggerWords || triggerWords;
+  const { identityWords } = splitCharacterTriggerWords(defaultOutfitWords);
+  const outfitWords = uniqueWords(registeredOutfits
+    .flatMap((preset) => splitCharacterTriggerWords(preset.triggerWords).outfitWords.split(",")))
+    .join(", ") || splitCharacterTriggerWords(triggerWords).outfitWords;
   const modelId = positiveInteger(registry.modelId);
   const versionId = positiveInteger(registry.versionId);
   const identity = modelId && versionId
@@ -405,7 +410,7 @@ export function createRegistryProfile(lora) {
     sourceUrl: registry.sourceUrl || "",
     recommendedWeight: Number(registry.recommendedWeight) || 0.75,
     defaultPreset: "identity",
-    note: "CivitaiのTrigger Wordsをキャラ特徴と衣装タグに分けて自動作成したプリセットです。",
+    note: "Civitaiの専用Trigger Wordsを衣装ごとに分け、キャラ特徴と服装タグも分離した自動プリセットです。",
     presets: [
       {
         id: "identity",
@@ -413,11 +418,13 @@ export function createRegistryProfile(lora) {
         triggerWords: identityWords,
         negativeWords: outfitWords
       },
-      {
-        id: "civitai-default",
-        name: "Civitai登録衣装",
-        triggerWords: triggerWords || "1girl, solo"
-      }
+      ...(registeredOutfits.length
+        ? registeredOutfits
+        : [{
+            id: "civitai-default",
+            name: "Civitai登録衣装",
+            triggerWords: triggerWords || "1girl, solo"
+          }])
     ]
   };
 }
@@ -462,6 +469,26 @@ function profileModelId(profile) {
 function positiveInteger(value) {
   const number = Number(value);
   return Number.isInteger(number) && number > 0 ? number : null;
+}
+
+function normalizeRegistryOutfits(value) {
+  if (!Array.isArray(value)) return [];
+  const ids = new Set();
+  return value
+    .filter((preset) => preset && typeof preset === "object" && String(preset.triggerWords ?? "").trim())
+    .map((preset, index) => {
+      let id = String(preset.id ?? `civitai-outfit-${index + 1}`)
+        .toLowerCase()
+        .replace(/[^a-z0-9-]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+      if (!id || id === "identity" || ids.has(id)) id = `civitai-outfit-${index + 1}`;
+      ids.add(id);
+      return {
+        id,
+        name: String(preset.name ?? `Civitai衣装${index + 1}`).trim(),
+        triggerWords: String(preset.triggerWords).trim()
+      };
+    });
 }
 
 function uniqueWords(words) {

@@ -68,6 +68,31 @@ test("画風LoRAには衣装プリセットを自動作成しない", () => {
   }), null);
 });
 
+test("Civitaiで検出した複数衣装をすべて独立プリセットにする", () => {
+  const profile = createRegistryProfile({
+    name: "Characters/multi-outfit-character",
+    registry: {
+      modelId: 123,
+      versionId: 456,
+      modelName: "Multi Outfit Character",
+      category: "character",
+      triggerWords: "CharDefault, CharUniform, CharSwimsuit",
+      outfitPresets: [
+        { id: "default", name: "標準衣装", triggerWords: "CharDefault, black dress, heels" },
+        { id: "uniform", name: "制服", triggerWords: "CharUniform, school uniform, loafers" },
+        { id: "swimsuit", name: "水着", triggerWords: "CharSwimsuit, bikini, sandals" }
+      ]
+    }
+  });
+
+  assert.deepEqual(profile?.presets.map((preset) => preset.id), [
+    "identity", "default", "uniform", "swimsuit"
+  ]);
+  assert.match(profile?.presets[0].negativeWords, /black dress/);
+  assert.match(profile?.presets[0].negativeWords, /school uniform/);
+  assert.match(profile?.presets[0].negativeWords, /bikini/);
+});
+
 test("衣装タグをキャラ特徴から分離する", () => {
   assert.deepEqual(
     splitCharacterTriggerWords("heroine_x, 1girl, blue eyes, long hair, school uniform, red skirt, black boots"),

@@ -1724,9 +1724,13 @@ function renderCivitaiPreview(metadata) {
   triggers.textContent = metadata.trainedWords.length
     ? `Trigger: ${metadata.trainedWords.join(", ")}`
     : "Trigger Wordsの登録なし";
+  const outfits = document.createElement("span");
+  outfits.textContent = metadata.outfitPresets?.length > 1
+    ? `衣装プリセット候補: ${metadata.outfitPresets.length}種類`
+    : "衣装プリセット候補: 1種類";
   const filename = document.createElement("span");
   filename.textContent = metadata.file.name;
-  text.append(heading, base, triggers, filename);
+  text.append(heading, base, triggers, outfits, filename);
   elements.civitaiPreview.append(text);
   elements.civitaiPreview.classList.remove("hidden");
 }
@@ -1739,12 +1743,14 @@ async function installCivitai() {
   elements.installCivitaiButton.disabled = true;
   elements.civitaiStatus.textContent = "LoRAをダウンロード中です。大きいファイルは数分かかります…";
   try {
-    await postJson("/api/civitai/install", {
+    const result = await postJson("/api/civitai/install", {
       url: elements.civitaiUrl.value.trim(),
       token: elements.civitaiToken.value,
       category: elements.civitaiCategory.value
     });
-    elements.civitaiStatus.textContent = `${inspectedCivitai.modelName}を配置・登録しました。`;
+    elements.civitaiStatus.textContent = result.reusedExisting
+      ? `${inspectedCivitai.modelName}の既存ファイルを再利用し、分類・全衣装プリセットを更新しました。`
+      : `${inspectedCivitai.modelName}を配置し、全衣装プリセットを登録しました。`;
     await loadLoras();
   } catch (error) {
     elements.civitaiStatus.textContent = error.message;
