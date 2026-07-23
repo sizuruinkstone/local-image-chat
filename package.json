@@ -1,18 +1,19 @@
 {
   "name": "local-image-chat",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "description": "Japanese natural-language frontend for Ollama and ReForge",
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
-    "check": "node --check src/server.js && node --check src/ollama.js && node --check src/reforge.js && node --check public/app.js && node --check public/lora-profiles.js",
+    "check": "node --check src/server.js && node --check src/ollama.js && node --check src/reforge.js && node --check src/json-store.js && node --check src/history.js && node --check src/job-manager.js && node --check src/civitai.js && node --check src/updater.js && node --check public/app.js && node --check public/lora-profiles.js",
     "test": "node --test"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
+    "adm-zip": "^0.5.16",
     "express": "^5.1.0"
   }
 }

@@ -2,6 +2,17 @@
 
 日本語の指示をOllamaでStable Diffusion向けタグに変換し、ReForge APIでローカル画像生成するツールです。
 
+## v2.1の主な機能
+
+- 全画像をPrompt・Seed・LoRA・生成設定付きのレシピとして履歴保存
+- 画像単位の👍と、好みのタグ・LoRA・設定の自動集計
+- 過去画像の構図・Seedを固定し、キャラクターまたは衣装だけ差し替え
+- 画風・構図・光・雰囲気を独立したプロンプト部品として追加
+- CivitaiモデルページURLからLoRA情報を確認し、ダウンロード・フォルダ配置・Trigger Words登録
+- 画像生成を直列キュー化し、進捗・残り時間・中止操作を表示
+- プロンプト変換後にOllamaを明示的にアンロードしてVRAMを確保
+- GitHubの最新版を検知し、設定・履歴・画像を残したまま自己更新
+
 ## 前提
 
 - Node.js 20以上
@@ -28,6 +39,21 @@
 候補枚数は前回の選択をブラウザに記憶し、初期値は最速の1枚です。
 複数候補もGPUメモリに同時展開せず、ReForge APIを1枚ずつ呼び出して安全に処理します。
 元画像とHires.fix済み画像はすべて`outputs`にも保存されます。
+画面を閉じても生成はサーバー側のキューで継続します。再度開いた場合は履歴から結果を確認できます。
+
+## 履歴・👍・構図固定
+
+生成した画像は画面下部の`生成履歴と好み`へ自動追加されます。保存先は次のとおりです。
+
+- 画像本体: `outputs/`
+- Prompt・Seed・LoRA・設定・👍: `data/history.json`
+
+候補または履歴の👍を押すと、好きなタグ・LoRA・解像度設定を集計します。
+`👍の傾向を追加`を押すと、頻出タグ上位を次回生成のプロンプト部品として使用します。
+
+`この構図で差し替え`または`レシピ読込・構図固定`を押すと、元画像のPrompt・Seed・設定・LoRAを読み込みます。
+その後にキャラLoRAや衣装プリセットだけ変更して生成すると、構図をなるべく維持した差分を作れます。
+Seed固定は厳密なポーズ固定ではないため、キャラクターの体格やLoRAの影響が強い場合は構図も多少変化します。
 
 ## LoRA
 
@@ -74,15 +100,42 @@ SD1.5、Flux、Pony専用LoRAは互換性がなく、崩れたり効果が出な
 配布ページにTrigger WordsがあるLoRAは、生成内容またはPrompt欄にもその語を入力してください。
 Trigger WordsはブラウザへLoRA名ごとに自動保存され、次回そのLoRAを選ぶとPromptへ自動追加されます。
 
+### Civitai URLから直接追加
+
+1. `Civitai URLからLoRAを追加`を開く。
+2. `https://civitai.com/models/...`形式のモデルページURLを貼る。
+3. キャラクター・画風・体型・構図の分類を選ぶ。
+4. `内容を確認`でベースモデル、ファイル名、Trigger Wordsを確認する。
+5. `ダウンロードして登録`を押す。
+
+既存LoRAのパスから保存ルートを自動検出し、分類に応じて`Characters`、`Style`、`Body`、`Pose`へ配置します。
+検出できない場合は`config.local.example.json`を`config.local.json`へコピーし、`lora.installDir`へStability MatrixのLoRAフォルダを設定してください。
+
+閲覧制限付きモデルでCivitai APIキーが必要な場合だけ、画面のAPIキー欄へ入力します。
+キーは現在のブラウザタブのセッションにのみ保持され、履歴やGitHubには保存しません。
+
 ## 設定
 
 接続先、Ollamaモデル、既定の生成設定は`config.json`で変更できます。
+個人PC固有のパスはGit管理されない`config.local.json`へ書くと、`config.json`を上書きせず設定できます。
 
 Ollamaはプロンプト変換後にアンロードするため、画像生成時にVRAMを占有し続けません。
 標準設定ではQwenのThinkingとJSON構造化出力を使わず、Illustrious/NoobAI向けの軽量なタグ変換だけを行います。Ollamaを5分、ReForgeを15分でタイムアウトします。
 
 WAI Illustrious v17向けの既定値は`Euler a / Automatic / 25 Steps / CFG 6 / 896x1152`です。
 Hires.fixは`1.5倍 / 20 Steps / Denoising 0.4 / R-ESRGAN 4x+ Anime6B`です。
+
+## GitHubから更新
+
+`アプリのアップデート`を開いて`最新版を確認`を押すと、設定されたGitHubリポジトリの`package.json`と現在のバージョンを比較します。
+更新時は`.updates/backup-*`へ旧版を退避し、以下を保持します。
+
+- `config.json`と`config.local.json`
+- `data/`の履歴・Civitai登録情報
+- `outputs/`の生成画像
+
+更新が成功したら`start.bat`の画面を閉じ、もう一度起動してください。
+現在のリポジトリは非公開なので、GitHubのFine-grained PATを利用する場合は対象リポジトリ限定・`Contents: Read-only`で作成し、画面へ入力します。
 
 ## トラブルシューティング
 
@@ -91,6 +144,8 @@ Hires.fixは`1.5倍 / 20 Steps / Denoising 0.4 / R-ESRGAN 4x+ Anime6B`です。
 - サンプラーエラー: 画面のSamplerをReForgeに存在する名前へ変更する。
 - Hires upscalerエラー: ReForge側に`R-ESRGAN 4x+ Anime6B`があるか確認し、なければ画面で利用可能なUpscaler名へ変更する。
 - LoRAが一覧に出ない: Stability Matrix側で配置先がLoRAになっていることを確認し、画面の`再読込`を押す。フォルダ移動後に反映されなければReForgeを再起動する。
+- Civitaiから保存できない: `config.local.json`の`lora.installDir`を確認する。制限付きページはCivitai APIキーも入力する。
+- GitHub更新を確認できない: 非公開リポジトリへアクセスできるFine-grained PATの`Contents: Read-only`権限を確認する。
 - キャラLoRAが画風側に出る: 親フォルダ名を`Characters`または`キャラ`にして`再読込`する。登録済みプロフィールを手動選択したLoRAもキャラ側へ移動する。
 - LoRAで絵が崩れる: 対応ベースモデルを確認し、強度を`0.4〜0.7`へ下げる。複数LoRAは1個ずつ試してから重ねる。
 - メモリ不足: 解像度を`768×1024`以下にし、Batchを1のまま使う。

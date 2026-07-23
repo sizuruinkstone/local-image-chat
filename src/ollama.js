@@ -37,7 +37,7 @@ export async function checkOllama(config) {
   return { ok: true, model: config.model, installed: names.includes(config.model), models: names };
 }
 
-export async function createPrompt(config, description) {
+export async function createPrompt(config, description, { signal } = {}) {
   const startedAt = Date.now();
   console.log(`[Ollama] Prompt conversion started with ${config.model}`);
 
@@ -58,7 +58,7 @@ export async function createPrompt(config, description) {
           num_ctx: 4096
         }
       }),
-      signal: AbortSignal.timeout(config.timeoutMs ?? 300000)
+      signal: requestSignal(signal, config.timeoutMs ?? 300000)
     });
 
     if (!response.ok) {
@@ -85,6 +85,27 @@ export async function createPrompt(config, description) {
   }
 }
 
+export async function unloadOllama(config, { signal } = {}) {
+  try {
+    const response = await fetch(`${config.url}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: config.model,
+        keep_alive: 0
+      }),
+      signal: requestSignal(signal, 30000)
+    });
+    if (!response.ok) throw new Error(`Ollama unload HTTP ${response.status}`);
+    console.log(`[Ollama] ${config.model} unloaded`);
+    return true;
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    console.warn(`[Ollama] Model unload skipped: ${error.message}`);
+    return false;
+  }
+}
+
 function cleanTags(value) {
   if (typeof value !== "string") return "";
   let result = value
@@ -105,4 +126,9 @@ function cleanTags(value) {
 
 function formatSeconds(startedAt) {
   return ((Date.now() - startedAt) / 1000).toFixed(1);
+}
+
+function requestSignal(signal, timeoutMs) {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }

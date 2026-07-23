@@ -2,14 +2,46 @@ import express from "express";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { checkOllama, createPrompt } from "./ollama.js";
+import { checkOllama, createPrompt, unloadOllama } from "./ollama.js";
 import { checkReforge, generateImages, listLoras, refreshLoras } from "./reforge.js";
+import { createHistoryService } from "./history.js";
+import { createJobManager } from "./job-manager.js";
+import { createCivitaiService } from "./civitai.js";
+import { createUpdater } from "./updater.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
-const config = JSON.parse(await fs.readFile(path.join(rootDir, "config.json"), "utf8"));
-const outputDir = path.join(rootDir, "outputs");
-await fs.mkdir(outputDir, { recursive: true });
+const baseConfig = JSON.parse(await fs.readFile(path.join(rootDir, "config.json"), "utf8"));
+const localConfigPath = process.env.LOCAL_IMAGE_CHAT_CONFIG
+  ? path.resolve(process.env.LOCAL_IMAGE_CHAT_CONFIG)
+  : path.join(rootDir, "config.local.json");
+const localConfig = await readOptionalJson(localConfigPath);
+const packageJson = JSON.parse(await fs.readFile(path.join(rootDir, "package.json"), "utf8"));
+const config = deepMerge(baseConfig, localConfig);
+const outputDir = process.env.LOCAL_IMAGE_CHAT_OUTPUT_DIR
+  ? path.resolve(process.env.LOCAL_IMAGE_CHAT_OUTPUT_DIR)
+  : path.join(rootDir, "outputs");
+const dataDir = process.env.LOCAL_IMAGE_CHAT_DATA_DIR
+  ? path.resolve(process.env.LOCAL_IMAGE_CHAT_DATA_DIR)
+  : path.join(rootDir, "data");
+await Promise.all([
+  fs.mkdir(outputDir, { recursive: true }),
+  fs.mkdir(dataDir, { recursive: true })
+]);
+
+const history = createHistoryService(dataDir, {
+  limit: config.storage?.historyLimit ?? 500
+});
+const civitai = createCivitaiService({
+  dataDir,
+  loraConfig: config.lora,
+  reforgeConfig: config.reforge
+});
+const updater = createUpdater(rootDir, {
+  repository: config.github?.repository ?? "sizuruinkstone/local-image-chat",
+  branch: config.github?.branch ?? "main"
+}, packageJson.version);
+const jobs = createJobManager(performGeneration);
 
 const app = express();
 app.use(express.json({ limit: "5mb" }));
@@ -18,11 +50,17 @@ app.use("/outputs", express.static(outputDir));
 
 app.get("/api/config", (_request, response) => {
   response.json({
+    version: packageJson.version,
     defaults: config.defaults,
     ollamaModel: config.ollama.model,
     lora: {
       defaultWeight: config.lora?.defaultWeight ?? 0.7,
-      maxSelected: config.lora?.maxSelected ?? 4
+      maxSelected: config.lora?.maxSelected ?? 4,
+      installDirConfigured: Boolean(config.lora?.installDir)
+    },
+    github: {
+      repository: config.github?.repository ?? "sizuruinkstone/local-image-chat",
+      branch: config.github?.branch ?? "main"
     }
   });
 });
@@ -41,8 +79,11 @@ app.get("/api/health", async (_request, response) => {
 app.post("/api/prompt", async (request, response) => {
   try {
     const description = requireText(request.body.description, "生成したい内容");
-    const prompt = await createPrompt(config.ollama, description);
-    response.json(prompt);
+    const generated = await createPrompt(config.ollama, description);
+    response.json({
+      ...generated,
+      prompt: appendUniqueTags(generated.prompt, validatePromptBoosts(request.body.promptBoosts))
+    });
   } catch (error) {
     response.status(500).json({ error: readableError(error) });
   }
@@ -50,7 +91,7 @@ app.post("/api/prompt", async (request, response) => {
 
 app.get("/api/loras", async (_request, response) => {
   try {
-    response.json({ loras: await listLoras(config.reforge) });
+    response.json({ loras: await getInstalledLoras() });
   } catch (error) {
     response.status(500).json({ error: readableError(error) });
   }
@@ -58,70 +99,226 @@ app.get("/api/loras", async (_request, response) => {
 
 app.post("/api/loras/refresh", async (_request, response) => {
   try {
-    response.json({ loras: await refreshLoras(config.reforge) });
+    const loras = await refreshLoras(config.reforge);
+    response.json({ loras: await civitai.mergeWithInstalled(loras) });
   } catch (error) {
     response.status(500).json({ error: readableError(error) });
   }
 });
 
+app.post("/api/civitai/inspect", async (request, response) => {
+  try {
+    const url = requireText(request.body.url, "Civitai URL");
+    const metadata = await civitai.inspect(url, sanitizeSecret(request.body.token));
+    response.json({ metadata });
+  } catch (error) {
+    response.status(500).json({ error: readableError(error) });
+  }
+});
+
+app.post("/api/civitai/install", async (request, response) => {
+  try {
+    const result = await civitai.install({
+      url: requireText(request.body.url, "Civitai URL"),
+      token: sanitizeSecret(request.body.token),
+      category: textOrDefault(request.body.category, "style"),
+      overwrite: request.body.overwrite === true
+    });
+    const loras = await refreshLoras(config.reforge);
+    response.json({
+      ...result,
+      loras: await civitai.mergeWithInstalled(loras)
+    });
+  } catch (error) {
+    response.status(500).json({ error: readableError(error) });
+  }
+});
+
+app.get("/api/history", async (request, response) => {
+  try {
+    const generations = await history.list({
+      favoritesOnly: request.query.favorites === "1",
+      limit: request.query.limit
+    });
+    response.json({ generations });
+  } catch (error) {
+    response.status(500).json({ error: readableError(error) });
+  }
+});
+
+app.get("/api/history/preferences", async (_request, response) => {
+  try {
+    response.json(await history.getPreferences());
+  } catch (error) {
+    response.status(500).json({ error: readableError(error) });
+  }
+});
+
+app.get("/api/history/:imageId/recipe", async (request, response) => {
+  try {
+    response.json(await history.getRecipe(requireId(request.params.imageId)));
+  } catch (error) {
+    response.status(404).json({ error: readableError(error) });
+  }
+});
+
+app.patch("/api/history/:imageId/favorite", async (request, response) => {
+  try {
+    const image = await history.setFavorite(
+      requireId(request.params.imageId),
+      request.body.favorite !== false
+    );
+    response.json({ image, preferences: await history.getPreferences() });
+  } catch (error) {
+    response.status(404).json({ error: readableError(error) });
+  }
+});
+
+app.get("/api/jobs", (_request, response) => {
+  response.json({ jobs: jobs.list() });
+});
+
+app.post("/api/jobs", (request, response) => {
+  const job = jobs.create(request.body ?? {});
+  response.status(202).json({ job });
+});
+
+app.get("/api/jobs/:jobId", (request, response) => {
+  try {
+    response.json({ job: jobs.get(requireId(request.params.jobId)) });
+  } catch (error) {
+    response.status(404).json({ error: readableError(error) });
+  }
+});
+
+app.delete("/api/jobs/:jobId", (request, response) => {
+  try {
+    response.json({ job: jobs.cancel(requireId(request.params.jobId)) });
+  } catch (error) {
+    response.status(404).json({ error: readableError(error) });
+  }
+});
+
+app.post("/api/update/check", async (request, response) => {
+  try {
+    response.json(await updater.check(sanitizeSecret(request.body.token)));
+  } catch (error) {
+    response.status(500).json({ error: readableError(error) });
+  }
+});
+
+app.post("/api/update/apply", async (request, response) => {
+  try {
+    response.json(await updater.apply(sanitizeSecret(request.body.token)));
+  } catch (error) {
+    response.status(500).json({ error: readableError(error) });
+  }
+});
+
+// v2.0クライアントや外部スクリプト向けの同期APIも維持する。
 app.post("/api/generate", async (request, response) => {
   try {
-    const description = requireText(request.body.description, "生成したい内容");
-    const settings = validateSettings(request.body.settings ?? {});
-    const loras = validateLoras(request.body.loras);
-
-    const generatedPrompt = request.body.prompt?.trim()
-      ? {
-          prompt: request.body.prompt.trim(),
-          negative_prompt: request.body.negativePrompt?.trim() ?? "",
-          explanation_ja: "画面で編集したプロンプトを使用しました。"
-        }
-      : await createPrompt(config.ollama, description);
-
-    const effectivePrompt = appendLoras(generatedPrompt.prompt, loras);
-    const effectiveNegativePrompt = appendLoraNegatives(generatedPrompt.negative_prompt, loras);
-    const generated = await generateImages(config.reforge, {
-      prompt: effectivePrompt,
-      negativePrompt: effectiveNegativePrompt,
-      ...settings
-    });
-
-    const runId = timestamp();
-    const images = await Promise.all(generated.images.map(async (image, index) => {
-      const kind = settings.hiresEnabled ? "hires" : `candidate-${index + 1}`;
-      const filename = `${runId}_${kind}_seed-${image.seed}.png`;
-      await fs.writeFile(path.join(outputDir, filename), Buffer.from(image.base64, "base64"));
-      return {
-        imageUrl: `/outputs/${filename}`,
-        filename,
-        seed: image.seed
-      };
+    response.json(await performGeneration(request.body ?? {}, {
+      signal: request.signal,
+      report: () => {}
     }));
-
-    response.json({
-      images,
-      prompt: generatedPrompt.prompt,
-      negativePrompt: generatedPrompt.negative_prompt,
-      effectivePrompt,
-      effectiveNegativePrompt,
-      loras,
-      explanation: loras.length
-        ? `${generatedPrompt.explanation_ja} LoRA: ${loras.map((item) => `${item.name} (${item.weight})${item.negativeWords ? "・標準衣装抑制" : ""}`).join(", ")}`
-        : generatedPrompt.explanation_ja,
-      settings
-    });
   } catch (error) {
     response.status(500).json({ error: readableError(error) });
   }
 });
 
 app.listen(config.port, "127.0.0.1", () => {
-  console.log(`Local Image Chat: http://127.0.0.1:${config.port}`);
+  console.log(`Local Image Chat v${packageJson.version}: http://127.0.0.1:${config.port}`);
 });
+
+async function performGeneration(body, { signal, report }) {
+  const description = requireText(body.description, "生成したい内容");
+  const settings = validateSettings(body.settings ?? {});
+  const loras = validateLoras(body.loras);
+  const promptBoosts = validatePromptBoosts(body.promptBoosts);
+
+  report(5, "プロンプトを準備中");
+  const generatedPrompt = body.prompt?.trim()
+    ? {
+        prompt: body.prompt.trim(),
+        negative_prompt: body.negativePrompt?.trim() ?? "",
+        explanation_ja: "画面で編集したプロンプトを使用しました。"
+      }
+    : await createPrompt(config.ollama, description, { signal });
+
+  const promptWithBoosts = appendUniqueTags(generatedPrompt.prompt, promptBoosts);
+  report(18, "OllamaをVRAMから解放中");
+  await unloadOllama(config.ollama, { signal });
+
+  const effectivePrompt = appendLoras(promptWithBoosts, loras);
+  const effectiveNegativePrompt = appendLoraNegatives(generatedPrompt.negative_prompt, loras);
+  report(25, "ReForgeで生成を開始");
+  const generated = await generateImages(config.reforge, {
+    prompt: effectivePrompt,
+    negativePrompt: effectiveNegativePrompt,
+    ...settings
+  }, {
+    signal,
+    onProgress: (value, detail) => report(25 + value * 68, detail)
+  });
+
+  report(94, "画像とレシピを保存中");
+  const runId = timestamp();
+  const savedImages = await Promise.all(generated.images.map(async (image, index) => {
+    const kind = settings.hiresEnabled ? "hires" : `candidate-${index + 1}`;
+    const filename = `${runId}_${kind}_seed-${image.seed}.png`;
+    await fs.writeFile(path.join(outputDir, filename), Buffer.from(image.base64, "base64"));
+    return {
+      imageUrl: `/outputs/${filename}`,
+      filename,
+      seed: image.seed,
+      width: settings.hiresEnabled ? Math.round(settings.width * settings.hiresScale) : settings.width,
+      height: settings.hiresEnabled ? Math.round(settings.height * settings.hiresScale) : settings.height
+    };
+  }));
+
+  const stored = await history.addGeneration({
+    kind: settings.hiresEnabled ? "hires" : "candidates",
+    parentImageId: body.parentImageId,
+    description,
+    prompt: promptWithBoosts,
+    negativePrompt: generatedPrompt.negative_prompt,
+    effectivePrompt,
+    effectiveNegativePrompt,
+    settings,
+    loras,
+    images: savedImages
+  });
+
+  report(99, "完了");
+  return {
+    generationId: stored.id,
+    images: stored.images,
+    prompt: promptWithBoosts,
+    negativePrompt: generatedPrompt.negative_prompt,
+    effectivePrompt,
+    effectiveNegativePrompt,
+    loras,
+    explanation: loras.length
+      ? `${generatedPrompt.explanation_ja} LoRA: ${loras.map((item) => `${item.name} (${item.weight})${item.negativeWords ? "・標準衣装抑制" : ""}`).join(", ")}`
+      : generatedPrompt.explanation_ja,
+    settings
+  };
+}
+
+async function getInstalledLoras() {
+  return civitai.mergeWithInstalled(await listLoras(config.reforge));
+}
 
 function requireText(value, label) {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${label}を入力してください`);
   return value.trim().slice(0, 4000);
+}
+
+function requireId(value) {
+  const id = String(value ?? "");
+  if (!/^[a-z0-9-]{8,80}$/i.test(id)) throw new Error("IDが不正です");
+  return id;
 }
 
 function validateSettings(input) {
@@ -168,6 +365,16 @@ function validateLoras(input) {
   return [...unique.values()];
 }
 
+function validatePromptBoosts(input) {
+  if (!Array.isArray(input)) return [];
+  return input
+    .filter((value) => typeof value === "string")
+    .flatMap(splitTags)
+    .map((value) => value.replace(/[<>]/g, "").slice(0, 120))
+    .filter(Boolean)
+    .slice(0, 40);
+}
+
 function appendLoras(prompt, loras) {
   if (!loras.length) return prompt;
   const normalizedPrompt = prompt.toLowerCase().replaceAll(/\s+/g, " ");
@@ -181,17 +388,17 @@ function appendLoras(prompt, loras) {
   const loraTags = loras
     .filter((item) => !existing.has(item.name.toLowerCase().replaceAll("\\", "/")))
     .map((item) => `<lora:${item.name}:${item.weight}>`);
-  const additions = [...new Set(triggerWords.map((value) => value.toLowerCase()))]
-    .map((normalized) => triggerWords.find((value) => value.toLowerCase() === normalized))
-    .concat(loraTags);
-  return additions.length ? `${prompt.replace(/\s*,?\s*$/, "")}, ${additions.join(", ")}` : prompt;
+  return appendUniqueTags(prompt, [...triggerWords, ...loraTags]);
 }
 
 function appendLoraNegatives(negativePrompt, loras) {
-  const baseWords = splitTags(negativePrompt);
-  const additions = loras.flatMap((item) => splitTags(item.negativeWords));
+  return appendUniqueTags(negativePrompt, loras.flatMap((item) => splitTags(item.negativeWords)));
+}
+
+function appendUniqueTags(prompt, additions) {
+  const baseWords = splitTags(prompt);
   const seen = new Set(baseWords.map(normalizeTag));
-  for (const tag of additions) {
+  for (const tag of additions.flatMap((value) => splitTags(value))) {
     const normalized = normalizeTag(tag);
     if (!normalized || seen.has(normalized)) continue;
     seen.add(normalized);
@@ -220,6 +427,10 @@ function sanitizeTriggerWords(value) {
     .slice(0, 500);
 }
 
+function sanitizeSecret(value) {
+  return typeof value === "string" ? value.trim().slice(0, 500) : "";
+}
+
 function boundedInt(value, fallback, min, max, multiple = 1) {
   let number = Number.parseInt(value, 10);
   if (!Number.isFinite(number)) number = fallback;
@@ -238,11 +449,40 @@ function textOrDefault(value, fallback) {
 }
 
 function timestamp() {
-  return new Date().toISOString().replaceAll(":", "-").replace("T", "_").slice(0, 19);
+  return new Date().toISOString()
+    .replace("T", "_")
+    .replace("Z", "")
+    .replaceAll(":", "-")
+    .replace(".", "-");
 }
 
 function readableError(error) {
   if (error?.name === "TimeoutError") return "処理がタイムアウトしました";
+  if (error?.name === "AbortError" || /中止/.test(error?.message ?? "")) return "処理を中止しました";
   if (error?.cause?.code === "ECONNREFUSED") return "接続できません。OllamaとReForgeが起動しているか確認してください";
   return error?.message ?? "不明なエラーが発生しました";
+}
+
+async function readOptionalJson(filePath) {
+  try {
+    return JSON.parse(await fs.readFile(filePath, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return {};
+    throw error;
+  }
+}
+
+function deepMerge(base, override) {
+  if (!isPlainObject(base) || !isPlainObject(override)) return structuredClone(override);
+  const result = structuredClone(base);
+  for (const [key, value] of Object.entries(override)) {
+    result[key] = isPlainObject(value) && isPlainObject(result[key])
+      ? deepMerge(result[key], value)
+      : structuredClone(value);
+  }
+  return result;
+}
+
+function isPlainObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value);
 }

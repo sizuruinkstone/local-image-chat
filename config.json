@@ -12,7 +12,15 @@
   },
   "lora": {
     "defaultWeight": 0.7,
-    "maxSelected": 4
+    "maxSelected": 4,
+    "installDir": ""
+  },
+  "storage": {
+    "historyLimit": 500
+  },
+  "github": {
+    "repository": "sizuruinkstone/local-image-chat",
+    "branch": "main"
   },
   "defaults": {
     "width": 896,

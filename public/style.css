@@ -28,6 +28,7 @@ button, input, textarea, select { font: inherit; }
 .shell { width: min(1240px, calc(100% - 32px)); margin: 0 auto; padding: 38px 0 60px; }
 
 header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.headerActions { display: flex; gap: 8px; }
 .eyebrow { margin: 0 0 8px; color: var(--accent); font-size: 12px; font-weight: 800; letter-spacing: .19em; }
 h1 { margin: 0; font-size: clamp(32px, 5vw, 60px); letter-spacing: -.045em; }
 .subtitle { margin: 8px 0 0; color: var(--muted); }
@@ -38,6 +39,11 @@ h1 { margin: 0; font-size: clamp(32px, 5vw, 60px); letter-spacing: -.045em; }
 .status::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: #777; }
 .status.ok::before { background: var(--accent); box-shadow: 0 0 10px var(--accent); }
 .status.bad::before { background: var(--danger); }
+.jobBar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 9px 12px; align-items: center; margin: 0 0 14px; padding: 12px 14px; border: 1px solid rgba(185,255,77,.22); border-radius: 14px; background: rgba(185,255,77,.06); }
+.jobBar div { display: flex; justify-content: space-between; gap: 12px; color: #d9dce3; font-size: 12px; }
+.jobBar progress { grid-column: 1 / 2; width: 100%; height: 9px; overflow: hidden; border: 0; border-radius: 99px; accent-color: var(--accent); }
+.jobBar .dangerButton { grid-column: 2; grid-row: 1 / 3; }
+.dangerButton { color: #ffc2ca; border: 1px solid rgba(255,102,122,.3); background: rgba(255,102,122,.09); }
 
 .layout { display: grid; grid-template-columns: minmax(0, .9fr) minmax(420px, 1.1fr); gap: 14px; }
 .panel { border: 1px solid var(--line); border-radius: 20px; background: var(--panel); box-shadow: 0 18px 70px rgba(0,0,0,.28); backdrop-filter: blur(20px); }
@@ -53,6 +59,9 @@ input, select { padding: 10px 11px; margin-top: 6px; }
 textarea:focus, input:focus, select:focus { border-color: rgba(185,255,77,.55); box-shadow: 0 0 0 3px rgba(185,255,77,.08); }
 
 .buttonRow { display: flex; gap: 10px; margin: 14px 0; }
+.compactButtons button { flex: 1; padding: 9px 11px; font-size: 11px; }
+.compositionLockStatus { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 12px 0; padding: 9px 11px; border: 1px solid rgba(185,255,77,.3); border-radius: 11px; color: var(--accent); background: rgba(185,255,77,.07); font-size: 11px; font-weight: 800; }
+.compositionLockStatus button { padding: 6px 9px; color: #ffc2ca; background: rgba(255,102,122,.09); }
 .quickCount { display: grid; grid-template-columns: auto minmax(130px, 180px) 1fr; align-items: center; gap: 10px; margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.035); }
 .quickCount label { margin: 0; }
 .quickCount select { margin: 0; padding: 8px 10px; color: var(--accent); font-weight: 800; }
@@ -69,6 +78,7 @@ summary { cursor: pointer; color: #d9dce3; font-size: 13px; font-weight: 750; }
 .summaryCount { margin-left: 6px; color: var(--accent); font-size: 11px; }
 details label { margin-top: 13px; }
 .settingsGrid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 12px; }
+.fullWidthField { grid-column: 1 / -1; }
 .hint { margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .loraCategories { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin-top: 12px; }
 .loraCategory { min-width: 0; padding: 8px 7px; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); background: rgba(255,255,255,.035); font-size: 10px; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
@@ -96,6 +106,7 @@ details label { margin-top: 13px; }
 .loraWeight input { height: 22px; margin: 0; padding: 0; accent-color: var(--accent); }
 .loraWeight output { color: var(--accent); font-size: 11px; font-variant-numeric: tabular-nums; text-align: right; }
 .loraProfileControls { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 7px; align-items: center; }
+.loraProfileControls.sourceOnly { display: flex; justify-content: flex-end; }
 .loraProfileControls select { min-width: 0; margin: 0; padding: 8px 9px; font-size: 11px; }
 .loraSourceLink { padding: 8px 9px; border: 1px solid var(--line); border-radius: 9px; color: var(--accent); font-size: 10px; font-weight: 800; text-decoration: none; white-space: nowrap; }
 .loraAdvanced { grid-column: 1 / -1; width: 100%; margin: 0; padding: 0; border: 0; }
@@ -105,6 +116,10 @@ details label { margin-top: 13px; }
 .loraNegative { border-color: rgba(255, 102, 122, .22); color: #ffc2ca; }
 .loraNegative:focus { border-color: rgba(255, 102, 122, .5); box-shadow: 0 0 0 3px rgba(255, 102, 122, .08); }
 .selectedLoraSummary { margin-top: 9px; padding: 9px 10px; overflow-wrap: anywhere; border-radius: 10px; color: var(--muted); background: rgba(255,255,255,.035); font-size: 11px; line-height: 1.45; }
+.integrationPreview { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px; margin-top: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 11px; background: rgba(255,255,255,.035); }
+.integrationPreview img { width: 72px; height: 92px; border-radius: 8px; object-fit: cover; background: #050506; }
+.integrationPreview strong, .integrationPreview span { display: block; }
+.integrationPreview span { margin-top: 4px; color: var(--muted); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
 
 .emptyState { text-align: center; color: var(--muted); }
 .spark { color: var(--accent); font-size: 52px; }
@@ -116,6 +131,10 @@ details label { margin-top: 13px; }
 #resultImage { display: block; width: 100%; max-height: 720px; object-fit: contain; border-radius: 13px; background: #050506; }
 .resultMeta { display: flex; justify-content: space-between; gap: 12px; padding: 13px 3px 3px; color: var(--muted); font-size: 13px; }
 .resultMeta a { color: var(--accent); font-weight: 750; text-decoration: none; }
+.resultActions { display: flex; align-items: center; gap: 7px; }
+.iconButton { min-width: 38px; padding: 9px; color: var(--text); border: 1px solid var(--line); background: rgba(255,255,255,.055); }
+.iconButton.active { border-color: rgba(185,255,77,.5); color: var(--accent); background: rgba(185,255,77,.1); }
+.smallButton { padding: 9px 10px; font-size: 11px; }
 #explanation { color: var(--muted); font-size: 13px; line-height: 1.6; }
 .sectionHeading { display: flex; align-items: flex-end; justify-content: space-between; gap: 14px; margin-bottom: 12px; }
 .sectionHeading h2 { margin: 0; font-size: 20px; letter-spacing: -.025em; }
@@ -129,16 +148,37 @@ details label { margin-top: 13px; }
 .candidateCard img { display: block; width: 100%; aspect-ratio: 7 / 9; object-fit: cover; background: #050506; }
 .candidateCard footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 10px; color: var(--muted); font-size: 11px; }
 .candidateCard footer a { color: var(--accent); font-weight: 800; text-decoration: none; }
+.candidateCardActions { display: flex; align-items: center; gap: 7px; }
+.candidateCardActions button { padding: 3px 6px; color: var(--muted); background: transparent; font-size: 13px; }
+.candidateCardActions button.active { color: var(--accent); }
 .finishBar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 13px; background: rgba(255,255,255,.035); color: var(--muted); font-size: 12px; }
+.finishBar > div { display: flex; gap: 8px; }
 .finishBar .primary { flex: 0 0 auto; }
 .finalResult { margin-bottom: 22px; padding-bottom: 22px; border-bottom: 1px solid var(--line); }
 .downloadButton { padding: 9px 12px; border-radius: 10px; color: var(--accent-dark); background: var(--accent); font-size: 12px; font-weight: 850; text-decoration: none; }
 .error { position: absolute; inset: auto 16px 16px; padding: 12px 14px; border: 1px solid rgba(255,102,122,.28); border-radius: 12px; color: #ffc2ca; background: rgba(100,10,25,.7); }
+.historyPanel { margin-top: 14px; padding: 20px; }
+.historyActions { display: flex; align-items: center; gap: 9px; }
+.favoriteFilter { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--muted); font-size: 11px; }
+.favoriteFilter input { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); }
+.preferenceSummary { margin-bottom: 14px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 12px; color: var(--muted); background: rgba(255,255,255,.03); font-size: 11px; line-height: 1.6; }
+.preferenceSummary strong { color: var(--accent); }
+.preferenceTags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+.preferenceTag { padding: 4px 7px; border-radius: 99px; color: #d9dce3; background: rgba(255,255,255,.055); font-size: 10px; }
+.historyGrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.historyCard { overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: rgba(0,0,0,.22); }
+.historyCard img { display: block; width: 100%; aspect-ratio: 7 / 9; object-fit: cover; background: #050506; }
+.historyCardBody { padding: 9px; }
+.historyCardBody strong { display: block; overflow: hidden; color: #d9dce3; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.historyCardBody span { display: block; margin-top: 4px; color: var(--muted); font-size: 9px; }
+.historyCardActions { display: grid; grid-template-columns: auto 1fr; gap: 6px; margin-top: 8px; }
+.historyCardActions button { padding: 7px 8px; font-size: 10px; }
 .hidden { display: none !important; }
 
 @media (max-width: 850px) {
   .layout { grid-template-columns: 1fr; }
   .result { min-height: 420px; }
+  .historyGrid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 @media (max-width: 520px) {
@@ -150,7 +190,11 @@ details label { margin-top: 13px; }
   .settingsGrid { grid-template-columns: 1fr; }
   .candidateGrid { grid-template-columns: 1fr; }
   .finishBar { align-items: stretch; flex-direction: column; }
+  .finishBar > div { flex-direction: column; }
   .loraCategories { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .loraRow { grid-template-columns: 1fr; }
   .loraProfileControls { grid-template-columns: 1fr; }
+  .historyGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .headerActions { flex-direction: column; }
+  .resultActions { align-items: stretch; flex-direction: column; }
 }

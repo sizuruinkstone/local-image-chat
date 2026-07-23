@@ -31,7 +31,7 @@ export async function refreshLoras(config) {
   return listLoras(config);
 }
 
-export async function generateImages(config, request) {
+export async function generateImages(config, request, { signal, onProgress } = {}) {
   const count = request.hiresEnabled ? 1 : request.candidateCount;
   const label = request.hiresEnabled ? "Hires.fix" : `${count} candidate(s)`;
   const startedAt = Date.now();
@@ -47,8 +47,15 @@ export async function generateImages(config, request) {
     for (let index = 0; index < count; index += 1) {
       const requestedSeed = effectiveRequest.seed === -1 ? -1 : (effectiveRequest.seed + index) >>> 0;
       if (count > 1) console.log(`[ReForge] Candidate ${index + 1}/${count}`);
-      const result = await generateOne(config, effectiveRequest, requestedSeed);
+      const result = await generateOne(config, effectiveRequest, requestedSeed, {
+        signal,
+        onProgress: (value, detail) => {
+          const combined = (index + value) / count;
+          onProgress?.(combined, detail || `候補 ${index + 1}/${count}`);
+        }
+      });
       images.push(result);
+      onProgress?.((index + 1) / count, `候補 ${index + 1}/${count} 完了`);
     }
 
     console.log(`[ReForge] ${label} completed in ${formatSeconds(startedAt)}s`);
@@ -86,7 +93,7 @@ async function resolveUpscaler(config, requestedName) {
   }
 }
 
-async function generateOne(config, request, seed) {
+async function generateOne(config, request, seed, { signal, onProgress } = {}) {
   const payload = {
     prompt: request.prompt,
     negative_prompt: request.negativePrompt,
@@ -113,12 +120,18 @@ async function generateOne(config, request, seed) {
     });
   }
 
-  const response = await fetch(`${config.url}/sdapi/v1/txt2img`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(config.timeoutMs ?? 900000)
-  });
+  const stopProgressPolling = startProgressPolling(config, signal, onProgress);
+  let response;
+  try {
+    response = await fetch(`${config.url}/sdapi/v1/txt2img`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: requestSignal(signal, config.timeoutMs ?? 900000)
+    });
+  } finally {
+    stopProgressPolling();
+  }
 
   if (!response.ok) {
     const detail = await response.text();
@@ -203,4 +216,40 @@ function normalizePath(value) {
 
 function formatSeconds(startedAt) {
   return ((Date.now() - startedAt) / 1000).toFixed(1);
+}
+
+function startProgressPolling(config, signal, onProgress) {
+  if (!onProgress) return () => {};
+  let stopped = false;
+  let timer = null;
+
+  const poll = async () => {
+    if (stopped || signal?.aborted) return;
+    try {
+      const response = await fetch(`${config.url}/sdapi/v1/progress?skip_current_image=true`, {
+        signal: requestSignal(signal, 3000)
+      });
+      if (response.ok) {
+        const body = await response.json();
+        const progress = Math.max(0, Math.min(0.99, Number(body.progress) || 0));
+        const eta = Number(body.eta_relative);
+        onProgress(progress, Number.isFinite(eta) && eta > 0
+          ? `ReForge生成中・残り約${Math.ceil(eta)}秒`
+          : "ReForge生成中");
+      }
+    } catch {
+      // ReForge本体の生成リクエストを優先し、進捗取得失敗は無視する。
+    }
+    if (!stopped) timer = setTimeout(poll, 1000);
+  };
+  timer = setTimeout(poll, 800);
+  return () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+  };
+}
+
+function requestSignal(signal, timeoutMs) {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
