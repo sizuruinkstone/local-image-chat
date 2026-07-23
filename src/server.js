@@ -580,8 +580,14 @@ function appendLoraNegatives(negativePrompt, loras) {
 }
 
 function appendUniqueTags(prompt, additions) {
-  const baseWords = splitTags(prompt);
-  const seen = new Set(baseWords.map(normalizeTag));
+  const baseWords = [];
+  const seen = new Set();
+  for (const tag of splitTags(prompt)) {
+    const normalized = normalizeTag(tag);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    baseWords.push(tag);
+  }
   for (const tag of additions.flatMap((value) => splitTags(value))) {
     const normalized = normalizeTag(tag);
     if (!normalized || seen.has(normalized)) continue;
