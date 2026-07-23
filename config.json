@@ -1,0 +1,30 @@
+{
+  "port": 3030,
+  "ollama": {
+    "url": "http://127.0.0.1:11434",
+    "model": "qwen3:1.7b",
+    "think": false,
+    "timeoutMs": 300000
+  },
+  "reforge": {
+    "url": "http://127.0.0.1:7860",
+    "timeoutMs": 900000
+  },
+  "lora": {
+    "defaultWeight": 0.7,
+    "maxSelected": 4
+  },
+  "defaults": {
+    "width": 896,
+    "height": 1152,
+    "steps": 25,
+    "cfgScale": 6,
+    "samplerName": "Euler a",
+    "scheduler": "Automatic",
+    "candidateCount": 1,
+    "hiresScale": 1.5,
+    "hiresSteps": 20,
+    "hiresDenoising": 0.4,
+    "hiresUpscaler": "R-ESRGAN 4x+ Anime6B"
+  }
+}
