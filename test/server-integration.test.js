@@ -55,6 +55,17 @@ test("生成キューからReForge、履歴、👍集計までAPIが往復する
 
   const baseUrl = `http://127.0.0.1:${appPort}`;
   await waitForServer(`${baseUrl}/api/config`, child);
+  const checkpoints = await (await fetch(`${baseUrl}/api/checkpoints`)).json();
+  assert.equal(checkpoints.activeCheckpoint, "mock.safetensors");
+  assert.deepEqual(checkpoints.checkpoints.map((item) => item.title), [
+    "mock.safetensors",
+    "waiNSFWIllustrious_v170.safetensors"
+  ]);
+  const switchedCheckpoint = await postJson(`${baseUrl}/api/checkpoints/select`, {
+    checkpoint: "waiNSFWIllustrious_v170.safetensors"
+  });
+  assert.equal(switchedCheckpoint.checkpoint, "waiNSFWIllustrious_v170.safetensors");
+
   const refreshRegistrations = await postJson(`${baseUrl}/api/civitai/refresh-registrations`, {});
   assert.deepEqual(refreshRegistrations, {
     total: 0,
@@ -224,7 +235,24 @@ function handleOllama(request, response) {
 }
 
 async function handleReforge(request, response, requests) {
-  if (request.url === "/sdapi/v1/options") return json(response, { sd_model_checkpoint: "mock.safetensors" });
+  if (request.url === "/sdapi/v1/options" && request.method === "POST") {
+    const body = JSON.parse(await readBody(request));
+    requests.activeCheckpoint = body.sd_model_checkpoint;
+    return json(response, {});
+  }
+  if (request.url === "/sdapi/v1/options") {
+    return json(response, { sd_model_checkpoint: requests.activeCheckpoint ?? "mock.safetensors" });
+  }
+  if (request.url === "/sdapi/v1/sd-models") {
+    return json(response, [
+      { title: "mock.safetensors", model_name: "mock", filename: "C:\\Models\\mock.safetensors" },
+      {
+        title: "waiNSFWIllustrious_v170.safetensors",
+        model_name: "waiNSFWIllustrious_v170",
+        filename: "C:\\Models\\waiNSFWIllustrious_v170.safetensors"
+      }
+    ]);
+  }
   if (request.url === "/sdapi/v1/loras") return json(response, []);
   if (request.url?.startsWith("/sdapi/v1/progress")) return json(response, { progress: 0.5, eta_relative: 1 });
   if (request.url === "/sdapi/v1/upscalers") return json(response, [{ name: "Mock" }]);
