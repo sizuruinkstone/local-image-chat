@@ -8,6 +8,22 @@ export const CHECKPOINT_PROFILES = [
     note: "普段使い向け。品質とRX 6700 XT 12GBでの扱いやすさを優先"
   },
   {
+    id: "chosen-mix-xl-v41",
+    name: "Chosen-mix XL v4.1",
+    family: "illustrious",
+    match: [/chosen.?mix.*xl.*v?4[._ -]?1/i],
+    settings: profileSettings(896, 1152, 32, 5, "Euler", "Automatic"),
+    note: "作者作例基準。Clip skip 2。通常生成は896×1152を安全側の初期値にする"
+  },
+  {
+    id: "rin-flanime-illustrious",
+    name: "RIN Flanime Illustrious",
+    family: "illustrious",
+    match: [/rin.*flanime/i, /flanime/i],
+    settings: profileSettings(896, 1152, 30, 5, "Euler a", "Automatic"),
+    note: "フラットアニメ向けの安定基準。Clip skip 2。Hiresは1.5倍・10〜15 Steps・Denoising 0.3前後から"
+  },
+  {
     id: "one-obsession-v23",
     name: "One Obsession v23",
     family: "illustrious",
