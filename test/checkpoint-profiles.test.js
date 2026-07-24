@@ -18,6 +18,36 @@ test("代表的なIllustrious Checkpointを個別プロフィールへ自動分�
   }).id, "nova-anime-xl-v19");
 });
 
+test("Chosen-mix XL v4.1とRIN Flanimeを専用プロフィールへ自動分類する", () => {
+  const chosen = inferCheckpointProfile({
+    title: "chosen-mix_XLV4.1.safetensors [bc3d335767]"
+  });
+  assert.equal(chosen.id, "chosen-mix-xl-v41");
+  assert.equal(chosen.family, "illustrious");
+  assert.deepEqual(chosen.settings, {
+    width: 896,
+    height: 1152,
+    steps: 32,
+    cfgScale: 5,
+    samplerName: "Euler",
+    scheduler: "Automatic"
+  });
+
+  const rin = inferCheckpointProfile({
+    filename: "C:\\Models\\Stable-diffusion\\RIN_Flanime_Illustrious_v1.0.safetensors"
+  });
+  assert.equal(rin.id, "rin-flanime-illustrious");
+  assert.equal(rin.family, "illustrious");
+  assert.deepEqual(rin.settings, {
+    width: 896,
+    height: 1152,
+    steps: 30,
+    cfgScale: 5,
+    samplerName: "Euler a",
+    scheduler: "Automatic"
+  });
+});
+
 test("追加Checkpointをバージョン別プロフィールへ自動分類する", () => {
   const realSkin = inferCheckpointProfile({
     filename: "C:\\Models\\Stable-diffusion\\miaomiaoRealskin_epsV14.safetensors"
