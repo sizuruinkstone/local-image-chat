@@ -11,6 +11,12 @@ import {
   getCheckpointProfile,
   inferCheckpointProfile
 } from "./checkpoint-profiles.js";
+import {
+  compatibilityFilterAllows,
+  hasLoraPreview,
+  isCompatibilityFilter,
+  resolveLoraPreviewUrl
+} from "./lora-preview.js";
 
 const PROFILE_STORAGE_VERSION = 3;
 const MAX_INIT_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -25,6 +31,7 @@ const elements = Object.fromEntries(
     "selectedSeedText", "finishButton", "finalResult", "resultImage", "seedText",
     "resolutionText", "downloadLink", "explanation", "error", "loraSearch",
     "loraList", "loraStatus", "loraSelectedCount", "selectedLoraSummary",
+    "loraCompatibilityFilter", "loraPreview",
     "refreshLorasButton", "loraCategories", "versionText", "jobBar", "jobMessage",
     "checkpointDetails", "checkpointSelect", "refreshCheckpointsButton", "checkpointStatus",
     "checkpointFamilyBadge", "checkpointProfileSelect", "checkpointAutoApply",
@@ -69,6 +76,8 @@ let updateInfo = null;
 let installedCheckpoints = [];
 let activeCheckpoint = null;
 let activeLoraCategory = loadLoraCategory();
+let pinnedLoraName = null;
+let displayedLoraName = null;
 let generationMode = "txt2img";
 let initImageReference = null;
 let defaultInpaintFullRes = true;
@@ -173,6 +182,11 @@ elements.description.addEventListener("input", handleDescriptionChange);
 elements.prompt.addEventListener("input", markPromptAsCurrent);
 elements.negativePrompt.addEventListener("input", markPromptAsCurrent);
 elements.loraSearch.addEventListener("input", renderLoras);
+elements.loraCompatibilityFilter.value = loadLoraCompatibilityFilter();
+elements.loraCompatibilityFilter.addEventListener("change", () => {
+  saveLoraCompatibilityFilter();
+  renderLoras();
+});
 elements.refreshLorasButton.addEventListener("click", () => loadLoras(true));
 elements.refreshCheckpointsButton.addEventListener("click", loadCheckpoints);
 elements.checkpointSelect.addEventListener("change", switchSelectedCheckpoint);
@@ -834,6 +848,198 @@ function getLoraCompatibility(lora) {
   return assessLoraCompatibility(resolveCheckpointProfile(), lora?.registry?.baseModel);
 }
 
+const LORA_SUBCATEGORY_LABELS = {
+  character: "キャラクター",
+  style: "画風",
+  body: "体型",
+  pose: "構図・ポーズ"
+};
+
+function loadLoraCompatibilityFilter() {
+  const stored = localStorage.getItem("localImageChat.loraCompatibilityFilter");
+  return isCompatibilityFilter(stored) ? stored : "all";
+}
+
+function saveLoraCompatibilityFilter() {
+  localStorage.setItem("localImageChat.loraCompatibilityFilter", elements.loraCompatibilityFilter.value);
+}
+
+function findLoraByName(name) {
+  return installedLoras.find((item) => item.name === name) ?? null;
+}
+
+// ホバー・フォーカス時は一時表示。lora未指定なら固定中へ戻す。
+function showTransientLoraPreview(lora) {
+  if (!lora) return restorePinnedLoraPreview();
+  renderLoraPreview(lora, { pinned: pinnedLoraName === lora.name });
+}
+
+// クリック時はプレビューを固定する（LoRAの有効化は行わない）。
+function pinLoraPreview(lora) {
+  if (!lora) return;
+  pinnedLoraName = lora.name;
+  renderLoraPreview(lora, { pinned: true });
+}
+
+function restorePinnedLoraPreview() {
+  const pinned = pinnedLoraName ? findLoraByName(pinnedLoraName) : null;
+  if (!pinned) pinnedLoraName = null;
+  renderLoraPreview(pinned, { pinned: Boolean(pinned) });
+}
+
+// 一覧再描画後にプレビュー欄を最新の状態へ同期する。
+function refreshLoraPreviewPane() {
+  restorePinnedLoraPreview();
+}
+
+function renderLoraPreview(lora, { pinned = false } = {}) {
+  const pane = elements.loraPreview;
+  pane.replaceChildren();
+  displayedLoraName = lora?.name ?? null;
+  if (!lora) {
+    const hint = document.createElement("p");
+    hint.className = "loraPreviewHint";
+    hint.textContent = "LoRAにカーソルを合わせるか選ぶと、作例画像と詳細をここに表示します。";
+    pane.append(hint);
+    return;
+  }
+
+  const profile = resolveProfile(lora);
+  const registry = lora.registry;
+  const compatibility = getLoraCompatibility(lora);
+
+  const figure = document.createElement("div");
+  figure.className = "loraPreviewImage";
+  const url = resolveLoraPreviewUrl(lora);
+  if (url) {
+    const img = document.createElement("img");
+    img.loading = "lazy";
+    img.decoding = "async";
+    img.alt = `${lora.displayName}の作例`;
+    img.src = url;
+    img.addEventListener("error", () => {
+      figure.replaceChildren(createThumbPlaceholder(lora));
+      figure.classList.add("noPreview");
+    });
+    figure.append(img);
+  } else {
+    figure.classList.add("noPreview");
+    figure.append(createThumbPlaceholder(lora));
+  }
+  pane.append(figure);
+
+  const header = document.createElement("div");
+  header.className = "loraPreviewHeader";
+  const title = document.createElement("strong");
+  title.className = "loraPreviewTitle";
+  title.textContent = lora.displayName;
+  header.append(title);
+  if (pinned) {
+    const badge = document.createElement("span");
+    badge.className = "loraPreviewPinned";
+    badge.textContent = "固定中";
+    header.append(badge);
+  }
+  pane.append(header);
+
+  const list = document.createElement("dl");
+  list.className = "loraPreviewFields";
+  const addField = (label, value) => {
+    if (value === null || value === undefined || value === "") return;
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    if (value instanceof Node) dd.append(value);
+    else dd.textContent = String(value);
+    list.append(dt, dd);
+  };
+
+  addField("Category", getLoraCategory(lora) === "character" ? "キャラクター" : "画風・体型・構図");
+  addField("Subcategory", LORA_SUBCATEGORY_LABELS[registry?.subcategory] ?? registry?.subcategory);
+  const baseModel = registry?.baseModel ?? profile?.baseModel;
+  addField("Base Model", baseModel);
+  if (baseModel && activeCheckpoint) {
+    const badge = document.createElement("span");
+    badge.className = `loraCompatibility ${compatibility.level}`;
+    badge.textContent = compatibility.label;
+    badge.title = compatibility.message;
+    addField("互換性", badge);
+  }
+  const recommendedWeight = registry?.recommendedWeight ?? profile?.recommendedWeight;
+  if (Number.isFinite(Number(recommendedWeight))) {
+    addField("Recommended Weight", Number(recommendedWeight).toFixed(2));
+  }
+  const presetCount = profile?.presets
+    ? profile.presets.filter((preset) => preset.id !== "identity").length
+    : (registry?.outfitPresets?.length ?? 0);
+  if (presetCount > 0) addField("衣装プリセット", `${presetCount}種`);
+  addField("Civitaiモデル", registry?.modelName);
+  addField("Civitaiバージョン", registry?.versionName);
+
+  // 実際に生成へ使う現在値（ユーザー編集後）を優先し、無ければ登録時の値。
+  const triggerWords = loraTriggers.get(lora.name) || registry?.triggerWords || "";
+  if (triggerWords) addField("Trigger Words", createTriggerWordsNode(triggerWords));
+  if (list.childElementCount) pane.append(list);
+
+  const actions = document.createElement("div");
+  actions.className = "loraPreviewActions";
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  const isSelected = selectedLoras.has(lora.name);
+  toggle.className = isSelected ? "secondary" : "primary";
+  toggle.textContent = isSelected ? "LoRAを解除" : "LoRAを選択";
+  toggle.addEventListener("click", () => toggleLoraSelectionFromPreview(lora));
+  actions.append(toggle);
+
+  const sourceUrl = profile?.sourceUrl || registry?.sourceUrl;
+  if (sourceUrl && sourceUrl !== "#") {
+    const link = document.createElement("a");
+    link.className = "loraPreviewLink";
+    link.href = sourceUrl;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = "Civitai";
+    actions.append(link);
+  }
+  pane.append(actions);
+}
+
+// Trigger Wordsは長い場合に折り返しつつ、展開できるようdetailsへ収める。
+function createTriggerWordsNode(triggerWords) {
+  if (triggerWords.length <= 60) {
+    const span = document.createElement("span");
+    span.textContent = triggerWords;
+    return span;
+  }
+  const details = document.createElement("details");
+  details.className = "loraTriggerWords";
+  const summary = document.createElement("summary");
+  summary.textContent = `${triggerWords.slice(0, 48)}…`;
+  const body = document.createElement("span");
+  body.textContent = triggerWords;
+  details.append(summary, body);
+  return details;
+}
+
+function toggleLoraSelectionFromPreview(lora) {
+  const isSelected = selectedLoras.has(lora.name);
+  if (!isSelected && selectedLoras.size >= loraConfig.maxSelected) {
+    showError(`LoRAは最大${loraConfig.maxSelected}個までです`);
+    return;
+  }
+  if (isSelected) {
+    selectedLoras.delete(lora.name);
+  } else {
+    const weight = loraWeights.get(lora.name) ?? lora.registry?.recommendedWeight ?? loraConfig.defaultWeight;
+    selectedLoras.set(lora.name, Number(weight));
+  }
+  clearError();
+  // 操作したLoRAを固定して詳細を表示したまま一覧を再描画する。
+  pinnedLoraName = lora.name;
+  renderSelectedLoraSummary();
+  renderLoras();
+}
+
 async function loadLoras(refresh = false) {
   elements.loraStatus.textContent = refresh ? "ReForgeでLoRAを再読込中…" : "LoRAを取得中…";
   elements.refreshLorasButton.disabled = true;
@@ -864,6 +1070,7 @@ async function loadLoras(refresh = false) {
 
 function renderLoras() {
   const query = elements.loraSearch.value.trim().toLowerCase();
+  const compatibilityFilter = elements.loraCompatibilityFilter.value;
   const matches = installedLoras
     .filter((item) => {
       const category = getLoraCategory(item);
@@ -873,7 +1080,11 @@ function renderLoras() {
       const matchesSearch = `${item.displayName} ${item.name} ${item.alias} ${item.folder ?? ""}`
         .toLowerCase()
         .includes(query);
-      return matchesCategory && matchesSearch;
+      const matchesCompatibility = compatibilityFilterAllows(compatibilityFilter, {
+        level: getLoraCompatibility(item).level,
+        hasPreview: hasLoraPreview(item)
+      });
+      return matchesCategory && matchesSearch && matchesCompatibility;
     })
     .sort((left, right) => {
       const leftSelected = selectedLoras.has(left.name) ? 0 : 1;
@@ -918,6 +1129,8 @@ function renderLoras() {
     empty.textContent = "一致するLoRAがありません";
     elements.loraList.append(empty);
   }
+
+  refreshLoraPreviewPane();
 }
 
 function createLoraRow(lora) {
@@ -1059,8 +1272,15 @@ function createLoraRow(lora) {
     else selectedLoras.delete(lora.name);
     clearError();
     renderSelectedLoraSummary();
-    if (activeLoraCategory === "selected" && !checkbox.checked) renderLoras();
-    else updateLoraCategoryButtons();
+    if (activeLoraCategory === "selected" && !checkbox.checked) {
+      renderLoras();
+    } else {
+      updateLoraCategoryButtons();
+      // 詳細欄がこのLoRAを表示中なら、選択/解除ボタンを現在の状態へ同期する。
+      if (displayedLoraName === lora.name) {
+        renderLoraPreview(lora, { pinned: pinnedLoraName === lora.name });
+      }
+    }
   });
 
   slider.addEventListener("input", () => {
@@ -1141,8 +1361,57 @@ function createLoraRow(lora) {
     renderSelectedLoraSummary();
   });
 
-  row.append(choice, weightWrap, advanced);
+  const thumb = createLoraThumb(lora);
+  const main = document.createElement("div");
+  main.className = "loraMain";
+  main.append(thumb, choice);
+
+  row.append(main, weightWrap, advanced);
+  // カードへのホバー・フォーカスで一時プレビュー、外れたら固定中へ戻す。
+  // 選択（有効化）はチェックボックスと詳細欄のボタンだけが行う。
+  row.addEventListener("mouseenter", () => showTransientLoraPreview(lora));
+  row.addEventListener("mouseleave", restorePinnedLoraPreview);
+  row.addEventListener("focusin", () => showTransientLoraPreview(lora));
+  // 行の外へフォーカスが移った時だけ固定中プレビューへ戻す。
+  row.addEventListener("focusout", (event) => {
+    if (!row.contains(event.relatedTarget)) restorePinnedLoraPreview();
+  });
   return row;
+}
+
+function createLoraThumb(lora) {
+  const thumb = document.createElement("button");
+  thumb.type = "button";
+  thumb.className = "loraThumb";
+  thumb.setAttribute("aria-label", `${lora.displayName}のプレビューを固定`);
+  const url = resolveLoraPreviewUrl(lora);
+  if (url) {
+    const img = document.createElement("img");
+    img.loading = "lazy";
+    img.decoding = "async";
+    img.alt = "";
+    img.src = url;
+    // 読み込み失敗時は壊れた画像アイコンを残さずプレースホルダーへ差し替える。
+    img.addEventListener("error", () => {
+      img.remove();
+      thumb.classList.add("noPreview");
+      thumb.append(createThumbPlaceholder(lora));
+    });
+    thumb.append(img);
+  } else {
+    thumb.classList.add("noPreview");
+    thumb.append(createThumbPlaceholder(lora));
+  }
+  thumb.addEventListener("click", () => pinLoraPreview(lora));
+  return thumb;
+}
+
+function createThumbPlaceholder(lora) {
+  const placeholder = document.createElement("span");
+  placeholder.className = "loraThumbPlaceholder";
+  placeholder.setAttribute("aria-hidden", "true");
+  placeholder.textContent = (lora?.displayName ?? "?").trim().charAt(0) || "?";
+  return placeholder;
 }
 
 function getLoraCategory(lora) {
