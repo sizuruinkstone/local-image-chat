@@ -12,7 +12,7 @@
         <div>
           <p class="eyebrow">LOCAL GENERATION</p>
           <h1>Local Image Chat</h1>
-          <p class="subtitle">日本語で話して、ReForgeで生成。<span id="versionText" class="version">v2.3</span></p>
+          <p class="subtitle">日本語で話して、ReForgeで生成。<span id="versionText" class="version">v2.4</span></p>
         </div>
         <div class="headerActions">
           <button id="updateStatusButton" class="ghost">最新版確認</button>
@@ -233,6 +233,30 @@
               <button id="clearPromptPartsButton" class="ghost" type="button">部品をクリア</button>
             </div>
             <p id="promptPartsSummary" class="hint">追加部品なし</p>
+          </details>
+
+          <details id="checkpointDetails" open>
+            <summary>Checkpoint <span id="checkpointFamilyBadge" class="summaryCount">確認中</span></summary>
+            <p class="hint">ReForgeのCheckpointを切り替えます。推奨設定の自動適用は幅・高さ・Steps・CFG・Sampler・Schedulerだけを変更します。</p>
+            <div class="checkpointToolbar">
+              <label>使用するCheckpoint
+                <select id="checkpointSelect" disabled>
+                  <option value="">取得中…</option>
+                </select>
+              </label>
+              <button id="refreshCheckpointsButton" class="secondary" type="button">再読込</button>
+            </div>
+            <div class="settingsGrid checkpointSettings">
+              <label>設定プロフィール
+                <select id="checkpointProfileSelect"></select>
+              </label>
+              <label class="checkpointAutoApply">
+                <input id="checkpointAutoApply" type="checkbox" checked />
+                切替時に推奨設定を適用
+              </label>
+            </div>
+            <div id="checkpointProfileSummary" class="checkpointProfileSummary"></div>
+            <p id="checkpointStatus" class="hint" aria-live="polite">Checkpointを取得中…</p>
           </details>
 
           <details>
