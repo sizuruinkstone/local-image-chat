@@ -114,6 +114,15 @@ details label { margin-top: 13px; }
 .settingsGrid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 12px; }
 .fullWidthField { grid-column: 1 / -1; }
 .hint { margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.checkpointToolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 8px; margin-top: 12px; }
+.checkpointToolbar label { margin: 0; }
+.checkpointToolbar select { margin-bottom: 0; }
+.checkpointToolbar button { margin-bottom: 0; padding: 11px 12px; }
+.checkpointSettings { align-items: end; }
+.checkpointAutoApply { display: flex; align-items: center; gap: 8px; min-height: 42px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); background: rgba(255,255,255,.025); font-size: 11px; }
+.checkpointAutoApply input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+.checkpointProfileSummary { margin-top: 9px; padding: 9px 10px; border-radius: 10px; color: #d9dce3; background: rgba(185,255,77,.055); font-size: 11px; line-height: 1.5; }
+.summaryCount.warning { color: #ffc56d; }
 .loraCategories { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin-top: 12px; }
 .loraCategory { min-width: 0; padding: 8px 7px; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); background: rgba(255,255,255,.035); font-size: 10px; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
 .loraCategory span { color: inherit; font-variant-numeric: tabular-nums; }
@@ -136,6 +145,13 @@ details label { margin-top: 13px; }
 .loraNames strong { font-size: 12px; }
 .loraNames small { margin-top: 2px; color: var(--muted); font-size: 10px; font-weight: 500; }
 .loraNames .loraRegistered { color: var(--accent); }
+.loraNames .loraCompatibility { width: fit-content; padding: 2px 5px; border-radius: 99px; font-weight: 750; }
+.loraNames .loraCompatibility.compatible { color: #aeea72; background: rgba(120,210,90,.1); }
+.loraNames .loraCompatibility.caution { color: #ffd177; background: rgba(255,177,55,.11); }
+.loraNames .loraCompatibility.incompatible { color: #ff9aaa; background: rgba(255,80,105,.12); }
+.loraNames .loraCompatibility.unknown { color: var(--muted); background: rgba(255,255,255,.05); }
+.loraRow.compatibility-caution { background: linear-gradient(90deg, rgba(255,177,55,.055), transparent 45%); }
+.loraRow.compatibility-incompatible { background: linear-gradient(90deg, rgba(255,80,105,.07), transparent 50%); }
 .loraWeight { display: grid; grid-template-columns: minmax(70px, 1fr) 38px; align-items: center; gap: 7px; margin: 0; }
 .loraWeight input { height: 22px; margin: 0; padding: 0; accent-color: var(--accent); }
 .loraWeight output { color: var(--accent); font-size: 11px; font-variant-numeric: tabular-nums; text-align: right; }
@@ -149,7 +165,8 @@ details label { margin-top: 13px; }
 .loraTrigger, .loraNegative { width: 100%; margin: 0; padding: 8px 10px; font-size: 11px; }
 .loraNegative { border-color: rgba(255, 102, 122, .22); color: #ffc2ca; }
 .loraNegative:focus { border-color: rgba(255, 102, 122, .5); box-shadow: 0 0 0 3px rgba(255, 102, 122, .08); }
-.selectedLoraSummary { margin-top: 9px; padding: 9px 10px; overflow-wrap: anywhere; border-radius: 10px; color: var(--muted); background: rgba(255,255,255,.035); font-size: 11px; line-height: 1.45; }
+.selectedLoraSummary { margin-top: 9px; padding: 9px 10px; overflow-wrap: anywhere; border-radius: 10px; color: var(--muted); background: rgba(255,255,255,.035); font-size: 11px; line-height: 1.45; white-space: pre-line; }
+.selectedLoraSummary.hasCompatibilityWarning { border: 1px solid rgba(255,177,55,.25); color: #ffd9a0; background: rgba(120,70,15,.13); }
 .integrationPreview { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px; margin-top: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 11px; background: rgba(255,255,255,.035); }
 .integrationPreview img { width: 72px; height: 92px; border-radius: 8px; object-fit: cover; background: #050506; }
 .integrationPreview strong, .integrationPreview span { display: block; }
@@ -224,6 +241,7 @@ details label { margin-top: 13px; }
   .quickCount { grid-template-columns: auto 1fr; }
   .quickCount span { grid-column: 1 / -1; }
   .settingsGrid { grid-template-columns: 1fr; }
+  .checkpointToolbar { grid-template-columns: 1fr; }
   .generationMode { grid-template-columns: 1fr; }
   .candidateGrid { grid-template-columns: 1fr; }
   .finishBar { align-items: stretch; flex-direction: column; }
