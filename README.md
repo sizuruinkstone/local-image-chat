@@ -2,8 +2,11 @@
 
 日本語の指示をOllamaでStable Diffusion向けタグに変換し、ReForge APIでローカル画像生成するツールです。
 
-## v2.3の主な機能
+## v2.4の主な機能
 
+- ReForgeの導入済みCheckpointを画面から一覧表示・切り替え
+- WAI Illustrious、One Obsession、Nova Anime XL、iLustMixなどを判定し、解像度・Steps・CFG・Samplerを自動適用
+- Civitai登録済みLoRAのベースモデルを現在のCheckpointと比較し、非対応や近縁モデルを警告
 - PNG・JPEG・WebPのアップロード、生成候補、完成画像、履歴からのimg2img・Inpaint
 - 元画像へ直接マスクを描き、白く塗った部分だけを変更する部分修正
 - マスクのペン・消しゴム・ブラシサイズ・Undo/Redo・全消去
@@ -34,7 +37,7 @@
 - Node.js 20以上
 - Ollamaと`qwen3:1.7b`
 - `--api`を付けて起動したReForge
-- ReForgeで使用したいチェックポイントを選択済み
+- ReForgeへ使用したいチェックポイントを導入済み
 
 ## 起動
 
@@ -56,6 +59,14 @@
 複数候補もGPUメモリに同時展開せず、ReForge APIを1枚ずつ呼び出して安全に処理します。
 元画像とHires.fix済み画像はすべて`outputs`にも保存されます。
 画面を閉じても生成はサーバー側のキューで継続します。再度開いた場合は履歴から結果を確認できます。
+
+## Checkpoint
+
+`Checkpoint`欄にはReForgeが認識しているモデルが表示されます。選択を変えるとReForge側でもモデルが切り替わり、`切替時に推奨設定を適用`が有効なら幅・高さ・Steps・CFG・Sampler・Schedulerをモデル別プロフィールへ合わせます。Prompt、Negative prompt、LoRA、Seedは変更しません。
+
+モデル名から判定できない場合は`設定プロフィール`を手動で選択できます。選択内容はCheckpointごとにブラウザへ保存されます。ReForgeで別のモデルへ切り替えてから画面を開いた場合は、ReForgeの実際の選択状態を優先します。
+
+Civitai URLから登録したLoRAにはベースモデル情報が保存されます。現在のCheckpointと一致しない場合はLoRA行と選択中一覧へ警告を表示します。警告があっても生成は止めないため、近縁モデルを試すことはできます。手動配置だけでベースモデル情報のないLoRAは判定対象外です。
 
 ## img2img
 
