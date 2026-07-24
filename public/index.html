@@ -270,10 +270,20 @@
             </div>
             <div class="loraToolbar">
               <input id="loraSearch" type="search" placeholder="LoRAを検索" aria-label="LoRAを検索" />
+              <select id="loraCompatibilityFilter" aria-label="現在のCheckpointとの互換性で絞り込み">
+                <option value="all">すべて</option>
+                <option value="compatible">対応のみ</option>
+                <option value="compatible-caution">対応・近縁</option>
+                <option value="hide-incompatible">非対応を隠す</option>
+                <option value="has-preview">プレビューありのみ</option>
+              </select>
               <button id="refreshLorasButton" class="secondary" type="button">再読込</button>
             </div>
             <p id="loraStatus" class="hint" aria-live="polite">LoRAを取得中…</p>
-            <div id="loraList" class="loraList"></div>
+            <div class="loraWorkspace">
+              <div id="loraList" class="loraList"></div>
+              <aside id="loraPreview" class="loraPreview" aria-live="polite" aria-label="LoRAプレビュー"></aside>
+            </div>
             <div id="selectedLoraSummary" class="selectedLoraSummary">LoRAなし</div>
           </details>
 

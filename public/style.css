@@ -127,10 +127,41 @@ details label { margin-top: 13px; }
 .loraCategory { min-width: 0; padding: 8px 7px; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); background: rgba(255,255,255,.035); font-size: 10px; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
 .loraCategory span { color: inherit; font-variant-numeric: tabular-nums; }
 .loraCategory.active { border-color: rgba(185,255,77,.42); color: var(--accent); background: rgba(185,255,77,.09); }
-.loraToolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-top: 12px; }
+.loraToolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; margin-top: 12px; }
 .loraToolbar input { margin: 0; }
+.loraToolbar select { min-width: 0; margin: 0; padding: 9px 10px; font-size: 11px; }
 .loraToolbar button { padding: 9px 12px; }
-.loraList { max-height: 440px; margin-top: 10px; overflow: auto; border: 1px solid var(--line); border-radius: 12px; }
+.loraWorkspace { display: grid; grid-template-columns: minmax(0, 1fr) minmax(190px, 230px); gap: 10px; align-items: start; margin-top: 10px; }
+.loraList { max-height: 460px; overflow: auto; border: 1px solid var(--line); border-radius: 12px; }
+.loraMain { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.loraThumb { flex: 0 0 auto; width: 44px; height: 44px; padding: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: rgba(255,255,255,.04); cursor: pointer; }
+.loraThumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.loraThumb.noPreview { display: grid; place-items: center; }
+.loraThumb:hover, .loraThumb:focus-visible { border-color: rgba(185,255,77,.5); }
+.loraThumbPlaceholder { color: var(--muted); font-size: 16px; font-weight: 800; text-transform: uppercase; }
+.loraPreview { position: sticky; top: 10px; align-self: start; display: grid; align-content: start; gap: 8px; max-height: 460px; overflow: auto; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.02); }
+.loraPreviewHint { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.loraPreviewImage { display: flex; align-items: center; justify-content: center; width: 100%; max-height: 300px; overflow: hidden; border-radius: 10px; background: rgba(0,0,0,.28); }
+.loraPreviewImage img { max-width: 100%; max-height: 300px; object-fit: contain; }
+.loraPreviewImage.noPreview { min-height: 120px; }
+.loraPreviewImage.noPreview .loraThumbPlaceholder { font-size: 40px; }
+.loraPreviewHeader { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.loraPreviewTitle { font-size: 12px; overflow-wrap: anywhere; }
+.loraPreviewPinned { padding: 1px 6px; border-radius: 99px; color: var(--accent); background: rgba(185,255,77,.1); font-size: 9px; font-weight: 800; }
+.loraPreviewFields { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 8px; margin: 0; font-size: 11px; }
+.loraPreviewFields dt { color: var(--muted); }
+.loraPreviewFields dd { margin: 0; overflow-wrap: anywhere; }
+.loraPreviewFields .loraCompatibility { width: fit-content; padding: 2px 6px; border-radius: 99px; font-size: 10px; font-weight: 750; }
+.loraPreviewFields .loraCompatibility.compatible { color: #aeea72; background: rgba(120,210,90,.1); }
+.loraPreviewFields .loraCompatibility.caution { color: #ffd177; background: rgba(255,177,55,.11); }
+.loraPreviewFields .loraCompatibility.incompatible { color: #ff9aaa; background: rgba(255,80,105,.12); }
+.loraPreviewFields .loraCompatibility.unknown { color: var(--muted); background: rgba(255,255,255,.05); }
+.loraTriggerWords summary { cursor: pointer; color: var(--muted); }
+.loraTriggerWords[open] summary { color: inherit; }
+.loraPreviewActions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.loraPreviewActions button { padding: 7px 12px; font-size: 11px; }
+.loraPreviewLink { color: var(--accent); font-size: 11px; font-weight: 700; text-decoration: none; }
+.loraPreviewLink:hover { text-decoration: underline; }
 .loraFolderGroup { margin: 0; padding: 0; border: 0; border-radius: 0; }
 .loraFolderGroup + .loraFolderGroup { border-top: 1px solid var(--line); }
 .loraFolderHeader { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 10px; color: #d9dce3; background: rgba(25,27,32,.97); font-size: 11px; }
@@ -247,6 +278,8 @@ details label { margin-top: 13px; }
   .finishBar { align-items: stretch; flex-direction: column; }
   .finishBar > div { flex-direction: column; }
   .loraCategories { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .loraWorkspace { grid-template-columns: 1fr; }
+  .loraPreview { position: static; max-height: none; }
   .loraRow { grid-template-columns: 1fr; }
   .loraProfileControls { grid-template-columns: 1fr; }
   .historyGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
