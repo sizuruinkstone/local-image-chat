@@ -5,6 +5,12 @@ import {
   getPreset,
   getProfile
 } from "./lora-profiles.js";
+import {
+  CHECKPOINT_PROFILES,
+  assessLoraCompatibility,
+  getCheckpointProfile,
+  inferCheckpointProfile
+} from "./checkpoint-profiles.js";
 
 const PROFILE_STORAGE_VERSION = 3;
 const MAX_INIT_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -20,6 +26,9 @@ const elements = Object.fromEntries(
     "resolutionText", "downloadLink", "explanation", "error", "loraSearch",
     "loraList", "loraStatus", "loraSelectedCount", "selectedLoraSummary",
     "refreshLorasButton", "loraCategories", "versionText", "jobBar", "jobMessage",
+    "checkpointDetails", "checkpointSelect", "refreshCheckpointsButton", "checkpointStatus",
+    "checkpointFamilyBadge", "checkpointProfileSelect", "checkpointAutoApply",
+    "checkpointProfileSummary",
     "jobProgressText", "jobProgress", "cancelJobButton", "stylePreset",
     "compositionPreset", "lightingPreset", "moodPreset", "outfitOverride", "applyPreferenceButton",
     "clearPromptPartsButton", "promptPartsSummary", "compositionLockStatus",
@@ -57,6 +66,8 @@ let preferenceData = { favoriteCount: 0, topTags: [], topLoras: [], topSettings:
 let preferenceBoosts = [];
 let inspectedCivitai = null;
 let updateInfo = null;
+let installedCheckpoints = [];
+let activeCheckpoint = null;
 let activeLoraCategory = loadLoraCategory();
 let generationMode = "txt2img";
 let initImageReference = null;
@@ -75,13 +86,15 @@ const loraNegativeWords = loadStringMap("localImageChat.loraNegativeWords");
 const loraProfileAssignments = loadStringMap("localImageChat.loraProfileAssignments");
 const loraPresetSelections = loadStringMap("localImageChat.loraPresetSelections");
 const loraAddonSelections = loadStringMap("localImageChat.loraAddonSelections");
+const checkpointProfileAssignments = loadStringMap("localImageChat.checkpointProfileAssignments");
 
 await loadConfig();
+initializeCheckpointControls();
 loadImg2ImgPreferences();
 loadInpaintPreferences();
 loadPromptPartSelections();
 restoreSessionSecrets();
-await Promise.all([checkHealth(), loadLoras(), loadHistory()]);
+await Promise.all([checkHealth(), loadCheckpoints(), loadLoras(), loadHistory()]);
 setGenerationMode("txt2img");
 updateGenerateButton();
 
@@ -161,6 +174,12 @@ elements.prompt.addEventListener("input", markPromptAsCurrent);
 elements.negativePrompt.addEventListener("input", markPromptAsCurrent);
 elements.loraSearch.addEventListener("input", renderLoras);
 elements.refreshLorasButton.addEventListener("click", () => loadLoras(true));
+elements.refreshCheckpointsButton.addEventListener("click", loadCheckpoints);
+elements.checkpointSelect.addEventListener("change", switchSelectedCheckpoint);
+elements.checkpointProfileSelect.addEventListener("change", handleCheckpointProfileChange);
+elements.checkpointAutoApply.addEventListener("change", () => {
+  localStorage.setItem("localImageChat.checkpointAutoApply", String(elements.checkpointAutoApply.checked));
+});
 elements.inspectCivitaiButton.addEventListener("click", inspectCivitai);
 elements.installCivitaiButton.addEventListener("click", installCivitai);
 elements.refreshCivitaiRegistrationsButton.addEventListener("click", refreshCivitaiRegistrations);
@@ -642,6 +661,179 @@ function clampRound(value, minimum, maximum, multiple) {
   return Math.min(maximum, Math.max(minimum, Math.round(value / multiple) * multiple));
 }
 
+function initializeCheckpointControls() {
+  elements.checkpointProfileSelect.replaceChildren(new Option("自動判定", "auto"));
+  for (const profile of CHECKPOINT_PROFILES) {
+    elements.checkpointProfileSelect.append(new Option(profile.name, profile.id));
+  }
+  const savedAutoApply = localStorage.getItem("localImageChat.checkpointAutoApply");
+  elements.checkpointAutoApply.checked = savedAutoApply !== "false";
+}
+
+async function loadCheckpoints() {
+  elements.checkpointStatus.textContent = "ReForgeからCheckpointを取得中…";
+  elements.checkpointSelect.disabled = true;
+  elements.refreshCheckpointsButton.disabled = true;
+  try {
+    const data = await getJson("/api/checkpoints");
+    installedCheckpoints = data.checkpoints ?? [];
+    activeCheckpoint = findCheckpoint(data.activeCheckpoint) ?? (
+      data.activeCheckpoint
+        ? { title: data.activeCheckpoint, modelName: data.activeCheckpoint, filename: "" }
+        : null
+    );
+    renderCheckpointControls();
+    localStorage.setItem("localImageChat.lastCheckpoint", activeCheckpoint?.title ?? "");
+    elements.checkpointStatus.textContent = activeCheckpoint
+      ? `使用中: ${activeCheckpoint.title}`
+      : "使用中のCheckpointを判定できません";
+    renderLoras();
+    renderSelectedLoraSummary();
+  } catch (error) {
+    elements.checkpointSelect.replaceChildren(new Option("取得失敗", ""));
+    elements.checkpointStatus.textContent = `Checkpoint一覧を取得できません: ${error.message}`;
+    renderCheckpointProfileSummary();
+  } finally {
+    elements.checkpointSelect.disabled = !installedCheckpoints.length;
+    elements.refreshCheckpointsButton.disabled = false;
+  }
+}
+
+function renderCheckpointControls() {
+  elements.checkpointSelect.replaceChildren();
+  for (const checkpoint of installedCheckpoints) {
+    elements.checkpointSelect.append(new Option(checkpoint.title, checkpoint.title));
+  }
+  if (
+    activeCheckpoint
+    && !installedCheckpoints.some((checkpoint) => checkpoint.title === activeCheckpoint.title)
+  ) {
+    elements.checkpointSelect.append(new Option(activeCheckpoint.title, activeCheckpoint.title));
+  }
+  elements.checkpointSelect.value = activeCheckpoint?.title ?? "";
+  elements.checkpointProfileSelect.value = getCheckpointProfileSelection(activeCheckpoint);
+  renderCheckpointProfileSummary();
+}
+
+async function switchSelectedCheckpoint() {
+  const selectedTitle = elements.checkpointSelect.value;
+  if (!selectedTitle || selectedTitle === activeCheckpoint?.title) return;
+  const previous = activeCheckpoint;
+  const selected = installedCheckpoints.find((checkpoint) => checkpoint.title === selectedTitle);
+  elements.checkpointSelect.disabled = true;
+  elements.refreshCheckpointsButton.disabled = true;
+  elements.checkpointStatus.textContent = `切替中: ${selectedTitle}（モデル読込に時間がかかる場合があります）`;
+  try {
+    const data = await postJson("/api/checkpoints/select", { checkpoint: selectedTitle });
+    activeCheckpoint = selected ?? findCheckpoint(data.checkpoint) ?? {
+      title: data.checkpoint || selectedTitle,
+      modelName: data.checkpoint || selectedTitle,
+      filename: ""
+    };
+    localStorage.setItem("localImageChat.lastCheckpoint", activeCheckpoint.title);
+    elements.checkpointProfileSelect.value = getCheckpointProfileSelection(activeCheckpoint);
+    const profile = resolveCheckpointProfile(activeCheckpoint);
+    if (elements.checkpointAutoApply.checked && profile.settings) applyCheckpointSettings(profile);
+    renderCheckpointProfileSummary();
+    renderLoras();
+    renderSelectedLoraSummary();
+    elements.checkpointStatus.textContent = `切替完了: ${activeCheckpoint.title}`;
+    void checkHealth();
+  } catch (error) {
+    activeCheckpoint = previous;
+    elements.checkpointSelect.value = previous?.title ?? "";
+    elements.checkpointStatus.textContent = `Checkpoint切替に失敗: ${error.message}`;
+  } finally {
+    elements.checkpointSelect.disabled = false;
+    elements.refreshCheckpointsButton.disabled = false;
+  }
+}
+
+function handleCheckpointProfileChange() {
+  if (!activeCheckpoint) return;
+  const selection = elements.checkpointProfileSelect.value;
+  if (selection === "auto") checkpointProfileAssignments.delete(activeCheckpoint.title);
+  else checkpointProfileAssignments.set(activeCheckpoint.title, selection);
+  localStorage.setItem(
+    "localImageChat.checkpointProfileAssignments",
+    JSON.stringify(Object.fromEntries(checkpointProfileAssignments))
+  );
+  const profile = resolveCheckpointProfile(activeCheckpoint);
+  if (elements.checkpointAutoApply.checked && profile.settings) applyCheckpointSettings(profile);
+  renderCheckpointProfileSummary();
+  renderLoras();
+  renderSelectedLoraSummary();
+}
+
+function renderCheckpointProfileSummary() {
+  const profile = resolveCheckpointProfile(activeCheckpoint);
+  const familyLabels = {
+    illustrious: "Illustrious",
+    noobai: "NoobAI",
+    pony: "Pony",
+    sdxl: "SDXL",
+    sd15: "SD 1.5",
+    unknown: "判定不明"
+  };
+  elements.checkpointFamilyBadge.textContent = familyLabels[profile.family] ?? profile.family;
+  elements.checkpointFamilyBadge.classList.toggle("warning", profile.family === "unknown");
+  if (!profile.settings) {
+    elements.checkpointProfileSummary.textContent = profile.note;
+    return;
+  }
+  const settings = profile.settings;
+  elements.checkpointProfileSummary.textContent = [
+    profile.name,
+    `${settings.width}×${settings.height}`,
+    `${settings.steps} Steps`,
+    `CFG ${settings.cfgScale}`,
+    settings.samplerName,
+    settings.scheduler,
+    profile.note
+  ].join("・");
+}
+
+function applyCheckpointSettings(profile) {
+  for (const key of ["width", "height", "steps", "cfgScale", "samplerName", "scheduler"]) {
+    if (profile.settings[key] !== undefined) elements[key].value = profile.settings[key];
+  }
+}
+
+function getCheckpointProfileSelection(checkpoint) {
+  return checkpointProfileAssignments.get(checkpoint?.title) ?? "auto";
+}
+
+function resolveCheckpointProfile(checkpoint = activeCheckpoint) {
+  const assigned = checkpointProfileAssignments.get(checkpoint?.title);
+  return getCheckpointProfile(assigned) ?? inferCheckpointProfile(checkpoint);
+}
+
+function findCheckpoint(name) {
+  const identity = checkpointIdentity(name);
+  return installedCheckpoints.find((checkpoint) =>
+    [checkpoint.title, checkpoint.modelName, checkpoint.filename]
+      .some((value) => checkpointIdentity(value) === identity)
+  ) ?? installedCheckpoints.find((checkpoint) => {
+    const candidate = checkpointIdentity(checkpoint.title);
+    return identity && candidate && (identity.includes(candidate) || candidate.includes(identity));
+  });
+}
+
+function checkpointIdentity(value) {
+  return String(value ?? "")
+    .replaceAll("\\", "/")
+    .split("/")
+    .at(-1)
+    .replace(/\s*\[[a-f0-9]+\]\s*$/i, "")
+    .replace(/\.(?:safetensors|ckpt|pt)$/i, "")
+    .trim()
+    .toLowerCase();
+}
+
+function getLoraCompatibility(lora) {
+  return assessLoraCompatibility(resolveCheckpointProfile(), lora?.registry?.baseModel);
+}
+
 async function loadLoras(refresh = false) {
   elements.loraStatus.textContent = refresh ? "ReForgeでLoRAを再読込中…" : "LoRAを取得中…";
   elements.refreshLorasButton.disabled = true;
@@ -731,10 +923,14 @@ function renderLoras() {
 function createLoraRow(lora) {
   const profile = resolveProfile(lora);
   const registry = lora.registry;
+  const compatibility = getLoraCompatibility(lora);
   const isCharacter = getLoraCategory(lora) === "character";
   const weight = loraWeights.get(lora.name) ?? registry?.recommendedWeight ?? loraConfig.defaultWeight;
   const row = document.createElement("div");
   row.className = "loraRow";
+  if (registry?.baseModel && ["caution", "incompatible"].includes(compatibility.level)) {
+    row.classList.add(`compatibility-${compatibility.level}`);
+  }
 
   const choice = document.createElement("label");
   choice.className = "loraChoice";
@@ -756,6 +952,13 @@ function createLoraRow(lora) {
     registered.className = "loraRegistered";
     registered.textContent = `Civitai登録済み・${registry.modelName}`;
     names.append(registered);
+  }
+  if (registry?.baseModel && activeCheckpoint) {
+    const compatibilityBadge = document.createElement("small");
+    compatibilityBadge.className = `loraCompatibility ${compatibility.level}`;
+    compatibilityBadge.textContent = `${compatibility.label}・${registry.baseModel}`;
+    compatibilityBadge.title = compatibility.message;
+    names.append(compatibilityBadge);
   }
   if (lora.displayName !== lora.name) {
     const canonical = document.createElement("small");
@@ -1168,8 +1371,19 @@ function renderSelectedLoraSummary() {
     const suppressesOutfit = Boolean(loraNegativeWords.get(name));
     return `${name} ${Number(weight).toFixed(2)}${triggerWords ? `・${triggerWords}` : ""}${suppressesOutfit ? "・標準衣装を抑制" : ""}`;
   });
+  const compatibilityWarnings = [...selectedLoras.keys()]
+    .map((name) => installedLoras.find((lora) => lora.name === name))
+    .filter(Boolean)
+    .map((lora) => ({ lora, compatibility: getLoraCompatibility(lora) }))
+    .filter(({ lora, compatibility }) =>
+      lora.registry?.baseModel && ["caution", "incompatible"].includes(compatibility.level)
+    )
+    .map(({ lora, compatibility }) => `${lora.displayName}: ${compatibility.message}`);
   elements.loraSelectedCount.textContent = `${items.length}個選択`;
-  elements.selectedLoraSummary.textContent = items.length ? `使用: ${items.join(" / ")}` : "LoRAなし";
+  elements.selectedLoraSummary.textContent = items.length
+    ? `使用: ${items.join(" / ")}${compatibilityWarnings.length ? `\n⚠ ${compatibilityWarnings.join(" / ")}` : ""}`
+    : "LoRAなし";
+  elements.selectedLoraSummary.classList.toggle("hasCompatibilityWarning", Boolean(compatibilityWarnings.length));
 }
 
 async function checkHealth() {
