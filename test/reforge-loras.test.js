@@ -1,6 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { normalizeLora } from "../src/reforge.js";
+import { normalizeCheckpoint, normalizeLora } from "../src/reforge.js";
+
+test("ReForgeのCheckpoint情報をUI向けに正規化する", () => {
+  assert.deepEqual(normalizeCheckpoint({
+    title: "waiNSFWIllustrious_v170.safetensors [abc123]",
+    model_name: "waiNSFWIllustrious_v170",
+    filename: "C:\\AI\\models\\Stable-diffusion\\waiNSFWIllustrious_v170.safetensors",
+    hash: "abc123"
+  }), {
+    title: "waiNSFWIllustrious_v170.safetensors [abc123]",
+    modelName: "waiNSFWIllustrious_v170",
+    filename: "C:\\AI\\models\\Stable-diffusion\\waiNSFWIllustrious_v170.safetensors",
+    hash: "abc123",
+    sha256: ""
+  });
+});
 
 test("WindowsのCharacterフォルダをキャラクター分類する", () => {
   const result = normalizeLora({
