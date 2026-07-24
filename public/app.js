@@ -917,10 +917,13 @@ function renderLoraPreview(lora, { pinned = false } = {}) {
     img.decoding = "async";
     img.alt = `${lora.displayName}の作例`;
     img.src = url;
+    img.title = "クリックで拡大";
     img.addEventListener("error", () => {
       figure.replaceChildren(createThumbPlaceholder(lora));
       figure.classList.add("noPreview");
     });
+    figure.classList.add("clickable");
+    figure.addEventListener("click", () => openLoraImageModal(url, `${lora.displayName}の作例`));
     figure.append(img);
   } else {
     figure.classList.add("noPreview");
@@ -942,20 +945,21 @@ function renderLoraPreview(lora, { pinned = false } = {}) {
   }
   pane.append(header);
 
-  const list = document.createElement("dl");
-  list.className = "loraPreviewFields";
-  const addField = (label, value) => {
+  const addFieldTo = (target) => (label, value) => {
     if (value === null || value === undefined || value === "") return;
     const dt = document.createElement("dt");
     dt.textContent = label;
     const dd = document.createElement("dd");
     if (value instanceof Node) dd.append(value);
     else dd.textContent = String(value);
-    list.append(dt, dd);
+    target.append(dt, dd);
   };
 
-  addField("Category", getLoraCategory(lora) === "character" ? "キャラクター" : "画風・体型・構図");
-  addField("Subcategory", LORA_SUBCATEGORY_LABELS[registry?.subcategory] ?? registry?.subcategory);
+  // 画像優先のため、主要情報だけを既定で表示する。
+  const list = document.createElement("dl");
+  list.className = "loraPreviewFields";
+  const addField = addFieldTo(list);
+
   const baseModel = registry?.baseModel ?? profile?.baseModel;
   addField("Base Model", baseModel);
   if (baseModel && activeCheckpoint) {
@@ -969,17 +973,31 @@ function renderLoraPreview(lora, { pinned = false } = {}) {
   if (Number.isFinite(Number(recommendedWeight))) {
     addField("Recommended Weight", Number(recommendedWeight).toFixed(2));
   }
-  const presetCount = profile?.presets
-    ? profile.presets.filter((preset) => preset.id !== "identity").length
-    : (registry?.outfitPresets?.length ?? 0);
-  if (presetCount > 0) addField("衣装プリセット", `${presetCount}種`);
-  addField("Civitaiモデル", registry?.modelName);
-  addField("Civitaiバージョン", registry?.versionName);
-
   // 実際に生成へ使う現在値（ユーザー編集後）を優先し、無ければ登録時の値。
   const triggerWords = loraTriggers.get(lora.name) || registry?.triggerWords || "";
   if (triggerWords) addField("Trigger Words", createTriggerWordsNode(triggerWords));
   if (list.childElementCount) pane.append(list);
+
+  // 補足情報は既定で折りたたみ、情報量を抑える。
+  const moreList = document.createElement("dl");
+  moreList.className = "loraPreviewFields";
+  const addMore = addFieldTo(moreList);
+  addMore("Category", getLoraCategory(lora) === "character" ? "キャラクター" : "画風・体型・構図");
+  addMore("Subcategory", LORA_SUBCATEGORY_LABELS[registry?.subcategory] ?? registry?.subcategory);
+  const presetCount = profile?.presets
+    ? profile.presets.filter((preset) => preset.id !== "identity").length
+    : (registry?.outfitPresets?.length ?? 0);
+  if (presetCount > 0) addMore("衣装プリセット", `${presetCount}種`);
+  addMore("Civitaiモデル", registry?.modelName);
+  addMore("Civitaiバージョン", registry?.versionName);
+  if (moreList.childElementCount) {
+    const more = document.createElement("details");
+    more.className = "loraPreviewMore";
+    const summary = document.createElement("summary");
+    summary.textContent = "詳細情報";
+    more.append(summary, moreList);
+    pane.append(more);
+  }
 
   const actions = document.createElement("div");
   actions.className = "loraPreviewActions";
@@ -1019,6 +1037,56 @@ function createTriggerWordsNode(triggerWords) {
   body.textContent = triggerWords;
   details.append(summary, body);
   return details;
+}
+
+// 作例画像の拡大モーダル。外部ライブラリを使わず、必要時に一度だけ生成する。
+let loraImageModalEl = null;
+
+function ensureLoraImageModal() {
+  if (loraImageModalEl) return loraImageModalEl;
+  const overlay = document.createElement("div");
+  overlay.className = "imageModal hidden";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-label", "作例画像の拡大表示");
+  const img = document.createElement("img");
+  img.className = "imageModalImg";
+  img.alt = "";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "imageModalClose";
+  close.setAttribute("aria-label", "閉じる");
+  close.textContent = "×";
+  close.addEventListener("click", closeLoraImageModal);
+  overlay.append(img, close);
+  // 背景（画像の外側）クリックで閉じる。
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) closeLoraImageModal();
+  });
+  document.body.append(overlay);
+  loraImageModalEl = overlay;
+  return overlay;
+}
+
+function openLoraImageModal(url, alt = "") {
+  if (!url) return;
+  const overlay = ensureLoraImageModal();
+  const img = overlay.querySelector(".imageModalImg");
+  img.src = url;
+  img.alt = alt;
+  overlay.classList.remove("hidden");
+  document.addEventListener("keydown", handleLoraImageModalKey);
+}
+
+function closeLoraImageModal() {
+  if (!loraImageModalEl || loraImageModalEl.classList.contains("hidden")) return;
+  loraImageModalEl.classList.add("hidden");
+  loraImageModalEl.querySelector(".imageModalImg").removeAttribute("src");
+  document.removeEventListener("keydown", handleLoraImageModalKey);
+}
+
+function handleLoraImageModalKey(event) {
+  if (event.key === "Escape") closeLoraImageModal();
 }
 
 function toggleLoraSelectionFromPreview(lora) {
@@ -1155,28 +1223,14 @@ function createLoraRow(lora) {
   const title = document.createElement("strong");
   title.textContent = lora.displayName;
   names.append(title);
-  if (profile) {
-    const registered = document.createElement("small");
-    registered.className = "loraRegistered";
-    registered.textContent = `登録済み・${profile.name}`;
-    names.append(registered);
-  } else if (registry) {
-    const registered = document.createElement("small");
-    registered.className = "loraRegistered";
-    registered.textContent = `Civitai登録済み・${registry.modelName}`;
-    names.append(registered);
-  }
+  // カードはサムネイル・名前・互換性・Weight・追加チェックのみ表示し、
+  // プロフィール名や正式名などの補足はプレビュー欄へ集約する。
   if (registry?.baseModel && activeCheckpoint) {
     const compatibilityBadge = document.createElement("small");
     compatibilityBadge.className = `loraCompatibility ${compatibility.level}`;
     compatibilityBadge.textContent = `${compatibility.label}・${registry.baseModel}`;
     compatibilityBadge.title = compatibility.message;
     names.append(compatibilityBadge);
-  }
-  if (lora.displayName !== lora.name) {
-    const canonical = document.createElement("small");
-    canonical.textContent = lora.name;
-    names.append(canonical);
   }
   choice.append(checkbox, names);
 
