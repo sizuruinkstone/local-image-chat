@@ -77,6 +77,7 @@ let installedCheckpoints = [];
 let activeCheckpoint = null;
 let activeLoraCategory = loadLoraCategory();
 let pinnedLoraName = null;
+let displayedLoraName = null;
 let generationMode = "txt2img";
 let initImageReference = null;
 let defaultInpaintFullRes = true;
@@ -894,6 +895,7 @@ function refreshLoraPreviewPane() {
 function renderLoraPreview(lora, { pinned = false } = {}) {
   const pane = elements.loraPreview;
   pane.replaceChildren();
+  displayedLoraName = lora?.name ?? null;
   if (!lora) {
     const hint = document.createElement("p");
     hint.className = "loraPreviewHint";
@@ -974,7 +976,8 @@ function renderLoraPreview(lora, { pinned = false } = {}) {
   addField("Civitaiモデル", registry?.modelName);
   addField("Civitaiバージョン", registry?.versionName);
 
-  const triggerWords = registry?.triggerWords || loraTriggers.get(lora.name) || "";
+  // 実際に生成へ使う現在値（ユーザー編集後）を優先し、無ければ登録時の値。
+  const triggerWords = loraTriggers.get(lora.name) || registry?.triggerWords || "";
   if (triggerWords) addField("Trigger Words", createTriggerWordsNode(triggerWords));
   if (list.childElementCount) pane.append(list);
 
@@ -1269,8 +1272,15 @@ function createLoraRow(lora) {
     else selectedLoras.delete(lora.name);
     clearError();
     renderSelectedLoraSummary();
-    if (activeLoraCategory === "selected" && !checkbox.checked) renderLoras();
-    else updateLoraCategoryButtons();
+    if (activeLoraCategory === "selected" && !checkbox.checked) {
+      renderLoras();
+    } else {
+      updateLoraCategoryButtons();
+      // 詳細欄がこのLoRAを表示中なら、選択/解除ボタンを現在の状態へ同期する。
+      if (displayedLoraName === lora.name) {
+        renderLoraPreview(lora, { pinned: pinnedLoraName === lora.name });
+      }
+    }
   });
 
   slider.addEventListener("input", () => {
@@ -1362,6 +1372,10 @@ function createLoraRow(lora) {
   row.addEventListener("mouseenter", () => showTransientLoraPreview(lora));
   row.addEventListener("mouseleave", restorePinnedLoraPreview);
   row.addEventListener("focusin", () => showTransientLoraPreview(lora));
+  // 行の外へフォーカスが移った時だけ固定中プレビューへ戻す。
+  row.addEventListener("focusout", (event) => {
+    if (!row.contains(event.relatedTarget)) restorePinnedLoraPreview();
+  });
   return row;
 }
 
