@@ -197,6 +197,10 @@ details label { margin-top: 13px; }
 .loraNames .loraCompatibility.caution { color: #ffd177; background: rgba(255,177,55,.11); }
 .loraNames .loraCompatibility.incompatible { color: #ff9aaa; background: rgba(255,80,105,.12); }
 .loraNames .loraCompatibility.unknown { color: var(--muted); background: rgba(255,255,255,.05); }
+.loraBadges { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; margin-top: 2px; }
+.loraBadges small { margin-top: 0; }
+.loraRecommendedBadge { width: fit-content; padding: 2px 6px; border: 1px solid rgba(185,255,77,.28); border-radius: 99px; color: var(--accent); background: rgba(185,255,77,.1); font-size: 10px; font-weight: 750; white-space: nowrap; }
+.loraPreviewActions .loraResetWeight { font-size: 11px; }
 .loraRow.compatibility-caution { background: linear-gradient(90deg, rgba(255,177,55,.055), transparent 45%); }
 .loraRow.compatibility-incompatible { background: linear-gradient(90deg, rgba(255,80,105,.07), transparent 50%); }
 .loraWeight { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr) 40px; align-items: center; gap: 8px; margin: 0; padding-left: 53px; }

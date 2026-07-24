@@ -13,9 +13,11 @@ import {
 } from "./checkpoint-profiles.js";
 import {
   compatibilityFilterAllows,
+  getRecommendedWeight,
   hasLoraPreview,
   isCompatibilityFilter,
-  resolveLoraPreviewUrl
+  resolveLoraPreviewUrl,
+  shouldApplyRecommendedWeight
 } from "./lora-preview.js";
 
 const PROFILE_STORAGE_VERSION = 3;
@@ -969,10 +971,15 @@ function renderLoraPreview(lora, { pinned = false } = {}) {
     badge.title = compatibility.message;
     addField("互換性", badge);
   }
-  const recommendedWeight = registry?.recommendedWeight ?? profile?.recommendedWeight;
-  if (Number.isFinite(Number(recommendedWeight))) {
-    addField("Recommended Weight", Number(recommendedWeight).toFixed(2));
+  // Civitaiから実際に抽出できた推奨値だけを表示する（fallbackは推奨扱いしない）。
+  const recommended = getRecommendedWeight(registry);
+  const currentWeight = loraWeights.get(lora.name)
+    ?? recommended?.weight ?? profile?.recommendedWeight ?? loraConfig.defaultWeight;
+  if (recommended) {
+    addField("Recommended Weight", recommended.weight.toFixed(2));
+    if (recommended.min != null) addField("Recommended Range", recommended.label);
   }
+  addField("現在値", Number(currentWeight).toFixed(2));
   // 実際に生成へ使う現在値（ユーザー編集後）を優先し、無ければ登録時の値。
   const triggerWords = loraTriggers.get(lora.name) || registry?.triggerWords || "";
   if (triggerWords) addField("Trigger Words", createTriggerWordsNode(triggerWords));
@@ -1008,6 +1015,18 @@ function renderLoraPreview(lora, { pinned = false } = {}) {
   toggle.textContent = isSelected ? "LoRAを解除" : "LoRAを選択";
   toggle.addEventListener("click", () => toggleLoraSelectionFromPreview(lora));
   actions.append(toggle);
+
+  // 推奨値へ戻すボタン（Civitai推奨がある場合だけ）。
+  if (recommended && Number(currentWeight).toFixed(2) !== recommended.weight.toFixed(2)) {
+    const reset = document.createElement("button");
+    reset.type = "button";
+    reset.className = "ghost loraResetWeight";
+    reset.textContent = recommended.min != null
+      ? `中央値${recommended.weight.toFixed(2)}へ戻す`
+      : `推奨${recommended.weight.toFixed(2)}へ戻す`;
+    reset.addEventListener("click", () => applyRecommendedWeight(lora));
+    actions.append(reset);
+  }
 
   const sourceUrl = profile?.sourceUrl || registry?.sourceUrl;
   if (sourceUrl && sourceUrl !== "#") {
@@ -1105,6 +1124,20 @@ function toggleLoraSelectionFromPreview(lora) {
   // 操作したLoRAを固定して詳細を表示したまま一覧を再描画する。
   pinnedLoraName = lora.name;
   renderSelectedLoraSummary();
+  renderLoras();
+}
+
+// Civitai推奨Weight（範囲なら中央値）へ、スライダー・保存値・選択中の値を同時に戻す。
+function applyRecommendedWeight(lora) {
+  const recommended = getRecommendedWeight(lora.registry);
+  if (!recommended) return;
+  loraWeights.set(lora.name, recommended.weight);
+  saveLoraWeights();
+  if (selectedLoras.has(lora.name)) {
+    selectedLoras.set(lora.name, recommended.weight);
+    renderSelectedLoraSummary();
+  }
+  pinnedLoraName = lora.name;
   renderLoras();
 }
 
@@ -1223,15 +1256,28 @@ function createLoraRow(lora) {
   const title = document.createElement("strong");
   title.textContent = lora.displayName;
   names.append(title);
-  // カードはサムネイル・名前・互換性・Weight・追加チェックのみ表示し、
+  // カードはサムネイル・名前・互換性・推奨Weight・追加チェックのみ表示し、
   // プロフィール名や正式名などの補足はプレビュー欄へ集約する。
+  const badges = document.createElement("div");
+  badges.className = "loraBadges";
   if (registry?.baseModel && activeCheckpoint) {
     const compatibilityBadge = document.createElement("small");
     compatibilityBadge.className = `loraCompatibility ${compatibility.level}`;
     compatibilityBadge.textContent = `${compatibility.label}・${registry.baseModel}`;
     compatibilityBadge.title = compatibility.message;
-    names.append(compatibilityBadge);
+    badges.append(compatibilityBadge);
   }
+  const recommended = getRecommendedWeight(registry);
+  if (recommended) {
+    const recommendedBadge = document.createElement("small");
+    recommendedBadge.className = "loraRecommendedBadge";
+    recommendedBadge.textContent = recommended.badge;
+    recommendedBadge.title = recommended.min != null
+      ? `Civitai推奨Weight範囲 ${recommended.label}`
+      : `Civitai推奨Weight ${recommended.display}`;
+    badges.append(recommendedBadge);
+  }
+  if (badges.childElementCount) names.append(badges);
   choice.append(checkbox, names);
 
   const weightWrap = document.createElement("label");
@@ -1564,7 +1610,8 @@ function registerCivitaiDefaults() {
   for (const lora of installedLoras) {
     const registry = lora.registry;
     if (!registry) continue;
-    if (!loraWeights.has(lora.name) && Number.isFinite(Number(registry.recommendedWeight))) {
+    // 未設定LoRAだけCivitai推奨Weightを初期適用（ユーザー保存済み・再解析では上書きしない）。
+    if (shouldApplyRecommendedWeight(loraWeights.has(lora.name), registry.recommendedWeight)) {
       loraWeights.set(lora.name, Number(registry.recommendedWeight));
       changed = true;
     }

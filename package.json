@@ -1,12 +1,12 @@
 {
   "name": "local-image-chat",
-  "version": "2.6.1",
+  "version": "2.7.0",
   "private": true,
   "description": "Japanese natural-language frontend for Ollama and ReForge",
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
-    "check": "node --check src/server.js && node --check src/ollama.js && node --check src/reforge.js && node --check src/json-store.js && node --check src/history.js && node --check src/job-manager.js && node --check src/civitai.js && node --check src/updater.js && node --check public/app.js && node --check public/lora-profiles.js && node --check public/checkpoint-profiles.js && node --check public/lora-preview.js",
+    "check": "node --check src/server.js && node --check src/ollama.js && node --check src/reforge.js && node --check src/json-store.js && node --check src/history.js && node --check src/job-manager.js && node --check src/civitai.js && node --check src/lora-weight.js && node --check src/updater.js && node --check public/app.js && node --check public/lora-profiles.js && node --check public/checkpoint-profiles.js && node --check public/lora-preview.js",
     "test": "node --test"
   },
   "engines": {

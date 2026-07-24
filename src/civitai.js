@@ -4,6 +4,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { JsonStore } from "./json-store.js";
+import { parseRecommendedWeight } from "./lora-weight.js";
 
 const CIVITAI_API = "https://civitai.com/api/v1";
 const CATEGORY_FOLDERS = {
@@ -90,6 +91,10 @@ export function createCivitaiService({
         triggerWords: metadata.trainedWords.join(", "),
         outfitPresets: metadata.outfitPresets,
         recommendedWeight: metadata.recommendedWeight,
+        recommendedWeightMin: metadata.recommendedWeightMin,
+        recommendedWeightMax: metadata.recommendedWeightMax,
+        recommendedWeightLabel: metadata.recommendedWeightLabel,
+        recommendedWeightSource: metadata.recommendedWeightSource,
         previewUrl: metadata.previewUrl,
         installedAt: new Date().toISOString()
       };
@@ -124,6 +129,10 @@ export function createCivitaiService({
             triggerWords: metadata.trainedWords.join(", "),
             outfitPresets: metadata.outfitPresets,
             recommendedWeight: metadata.recommendedWeight,
+            recommendedWeightMin: metadata.recommendedWeightMin,
+            recommendedWeightMax: metadata.recommendedWeightMax,
+            recommendedWeightLabel: metadata.recommendedWeightLabel,
+            recommendedWeightSource: metadata.recommendedWeightSource,
             previewUrl: metadata.previewUrl,
             metadataUpdatedAt: new Date().toISOString()
           });
@@ -198,6 +207,11 @@ export async function inspectCivitaiUrl(inputUrl, token = "") {
     `${model.description ?? ""}\n${version.description ?? ""}`
   );
 
+  const weightInfo = parseRecommendedWeight(
+    `${model.description ?? ""}\n${version.description ?? ""}`,
+    version.name
+  );
+
   return {
     modelId: Number(model.id ?? version.modelId ?? parsed.modelId),
     versionId: Number(version.id),
@@ -207,7 +221,11 @@ export async function inspectCivitaiUrl(inputUrl, token = "") {
     baseModel: String(version.baseModel ?? "不明"),
     trainedWords,
     outfitPresets,
-    recommendedWeight: inferRecommendedWeight(version),
+    recommendedWeight: weightInfo.recommendedWeight,
+    recommendedWeightMin: weightInfo.recommendedWeightMin,
+    recommendedWeightMax: weightInfo.recommendedWeightMax,
+    recommendedWeightLabel: weightInfo.recommendedWeightLabel,
+    recommendedWeightSource: weightInfo.recommendedWeightSource,
     previewUrl: version.images?.find((image) => image.type === "image")?.url ?? version.images?.[0]?.url ?? "",
     sourceUrl: `https://civitai.com/models/${model.id ?? parsed.modelId}?modelVersionId=${version.id}`,
     file: {
@@ -343,13 +361,6 @@ function selectModelFile(files) {
   if (!Array.isArray(files)) return null;
   return files.find((file) => file.primary && /\.safetensors$/i.test(file.name ?? ""))
     ?? files.find((file) => /\.safetensors$/i.test(file.name ?? ""));
-}
-
-function inferRecommendedWeight(version) {
-  const text = `${version.description ?? ""} ${version.name ?? ""}`;
-  const match = text.match(/(?:weight|strength|強度)\s*[:：]?\s*(0?\.\d+|1(?:\.0+)?)/i);
-  const value = match ? Number(match[1]) : 0.75;
-  return Math.max(0.05, Math.min(1.5, Number(value.toFixed(2))));
 }
 
 function collectTriggerTags(trigger, allTriggers, lines) {
