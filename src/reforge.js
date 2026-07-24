@@ -7,6 +7,68 @@ export async function checkReforge(config) {
   return { ok: true, checkpoint: body.sd_model_checkpoint ?? "不明" };
 }
 
+export async function listCheckpoints(config) {
+  const [modelsResponse, optionsResponse] = await Promise.all([
+    fetch(`${config.url}/sdapi/v1/sd-models`, {
+      signal: AbortSignal.timeout(15000)
+    }),
+    fetch(`${config.url}/sdapi/v1/options`, {
+      signal: AbortSignal.timeout(15000)
+    })
+  ]);
+  if (!modelsResponse.ok) throw new Error(`ReForge Checkpoint一覧 HTTP ${modelsResponse.status}`);
+  if (!optionsResponse.ok) throw new Error(`ReForge 設定取得 HTTP ${optionsResponse.status}`);
+
+  const [models, options] = await Promise.all([
+    modelsResponse.json(),
+    optionsResponse.json()
+  ]);
+  if (!Array.isArray(models)) throw new Error("ReForgeからCheckpoint一覧が返りませんでした");
+
+  return {
+    checkpoints: models
+      .map((item) => normalizeCheckpoint(item))
+      .filter(Boolean)
+      .sort((left, right) => left.title.localeCompare(right.title, "ja", { numeric: true })),
+    activeCheckpoint: String(options.sd_model_checkpoint ?? "")
+  };
+}
+
+export async function switchCheckpoint(config, checkpoint) {
+  const selected = String(checkpoint ?? "").trim();
+  if (!selected) throw new Error("Checkpointを選択してください");
+
+  const response = await fetch(`${config.url}/sdapi/v1/options`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sd_model_checkpoint: selected }),
+    signal: AbortSignal.timeout(Math.max(300000, config.timeoutMs ?? 0))
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`ReForge Checkpoint切替 HTTP ${response.status}: ${detail.slice(0, 300)}`);
+  }
+
+  const current = await checkReforge({
+    ...config,
+    timeoutMs: Math.max(300000, config.timeoutMs ?? 0)
+  });
+  return { checkpoint: current.checkpoint };
+}
+
+export function normalizeCheckpoint(item) {
+  if (!item || typeof item !== "object") return null;
+  const title = String(item.title ?? item.model_name ?? "").trim();
+  if (!title) return null;
+  return {
+    title,
+    modelName: String(item.model_name ?? title).trim(),
+    filename: String(item.filename ?? "").trim(),
+    hash: String(item.hash ?? "").trim(),
+    sha256: String(item.sha256 ?? "").trim()
+  };
+}
+
 export async function listLoras(config) {
   const response = await fetch(`${config.url}/sdapi/v1/loras`, {
     signal: AbortSignal.timeout(10000)
