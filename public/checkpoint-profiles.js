@@ -16,6 +16,30 @@ export const CHECKPOINT_PROFILES = [
     note: "立体感寄り。まず20 Steps・CFG 5から"
   },
   {
+    id: "miaomiao-realskin-eps-v14",
+    name: "MiaoMiao RealSkin EPS v1.4",
+    family: "illustrious",
+    match: [/miaomiao.*realskin.*eps.*v?1[._ -]?4/i],
+    settings: profileSettings(896, 1152, 30, 5, "Euler a", "Exponential"),
+    note: "公式推奨の中心値。CFG 3.8〜6、Clip skip 2。Hiresは2倍・10 Steps・Denoising 0.2〜0.3が目安"
+  },
+  {
+    id: "noobai-vpred-v10",
+    name: "NoobAI XL V-Pred 1.0",
+    family: "noobai",
+    match: [/noobai.*(?:v.?pred|vpred).*v?1[._ -]?0/i],
+    settings: profileSettings(832, 1216, 30, 4.5, "Euler", "Automatic"),
+    note: "Euler推奨。CFG 4〜5・28〜35 Steps。Karras系Schedulerは避ける"
+  },
+  {
+    id: "obsession-vpred-v20",
+    name: "Obsession V-Pred 2.0",
+    family: "noobai",
+    match: [/obsession.*(?:v.?pred|vpred).*v?2[._ -]?0/i],
+    settings: profileSettings(768, 1280, 30, 5, "Euler a", "SGM Uniform"),
+    note: "公式作例基準。Zero Terminal SNRを使用し、必要ならRescale CFG 0.2〜0.7を手動で有効化"
+  },
+  {
     id: "nova-anime-xl-v19",
     name: "Nova Anime XL v19",
     family: "illustrious",
