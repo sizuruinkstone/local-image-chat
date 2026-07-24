@@ -57,3 +57,34 @@ export function compatibilityFilterAllows(filter, { level, hasPreview } = {}) {
       return true;
   }
 }
+
+// Civitaiから実際に抽出できた推奨Weightだけを「推奨」として扱う。
+// fallback(0.75)や未解析の旧エントリはnullを返し、UIで推奨表示しない。
+const CIVITAI_WEIGHT_SOURCES = new Set(["civitai-description", "civitai-version-name"]);
+
+export function getRecommendedWeight(registry) {
+  if (!registry) return null;
+  if (!CIVITAI_WEIGHT_SOURCES.has(registry.recommendedWeightSource)) return null;
+  const weight = Number(registry.recommendedWeight);
+  if (!Number.isFinite(weight)) return null;
+  const min = Number(registry.recommendedWeightMin);
+  const max = Number(registry.recommendedWeightMax);
+  const hasRange = Number.isFinite(min) && Number.isFinite(max) && min !== max;
+  const label = hasRange
+    ? (registry.recommendedWeightLabel || `${min.toFixed(2)}～${max.toFixed(2)}`)
+    : null;
+  const display = hasRange ? label : weight.toFixed(2);
+  return {
+    weight,
+    min: hasRange ? min : null,
+    max: hasRange ? max : null,
+    label,
+    display,
+    badge: `推奨 ${display}`
+  };
+}
+
+// 初期適用の可否: ユーザー保存済みは上書きせず、未設定かつ有効値のときだけ適用する。
+export function shouldApplyRecommendedWeight(hasSavedWeight, recommendedWeight) {
+  return !hasSavedWeight && Number.isFinite(Number(recommendedWeight));
+}

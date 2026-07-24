@@ -3,9 +3,11 @@ import test from "node:test";
 import {
   LORA_COMPATIBILITY_FILTERS,
   compatibilityFilterAllows,
+  getRecommendedWeight,
   hasLoraPreview,
   isCompatibilityFilter,
-  resolveLoraPreviewUrl
+  resolveLoraPreviewUrl,
+  shouldApplyRecommendedWeight
 } from "../public/lora-preview.js";
 
 test("registry.previewUrlをプレビュー画像として保持する", () => {
@@ -59,6 +61,38 @@ test("互換性フィルターが対応・近縁・非対応・不明を正し�
 test("未知のフィルター値はすべて通す（allと同等）", () => {
   assert.equal(compatibilityFilterAllows("bogus", { level: "incompatible", hasPreview: false }), true);
   assert.equal(compatibilityFilterAllows(undefined, { level: "incompatible" }), true);
+});
+
+test("getRecommendedWeightは単一値をバッジ化する", () => {
+  const r = getRecommendedWeight({ recommendedWeight: 0.8, recommendedWeightSource: "civitai-description" });
+  assert.equal(r.weight, 0.8);
+  assert.equal(r.badge, "推奨 0.80");
+  assert.equal(r.min, null);
+});
+
+test("getRecommendedWeightは範囲をラベル化する", () => {
+  const r = getRecommendedWeight({
+    recommendedWeight: 0.85,
+    recommendedWeightMin: 0.7,
+    recommendedWeightMax: 1.0,
+    recommendedWeightLabel: "0.70～1.00",
+    recommendedWeightSource: "civitai-version-name"
+  });
+  assert.equal(r.badge, "推奨 0.70～1.00");
+  assert.equal(r.min, 0.7);
+  assert.equal(r.max, 1.0);
+});
+
+test("fallbackや旧エントリは推奨扱いしない（null）", () => {
+  assert.equal(getRecommendedWeight({ recommendedWeight: 0.75, recommendedWeightSource: "fallback" }), null);
+  assert.equal(getRecommendedWeight({ recommendedWeight: 0.7 }), null); // sourceなし旧エントリ
+  assert.equal(getRecommendedWeight(null), null);
+});
+
+test("shouldApplyRecommendedWeight: 未設定は適用・保存済みは維持", () => {
+  assert.equal(shouldApplyRecommendedWeight(false, 0.8), true);  // 未設定→初期適用
+  assert.equal(shouldApplyRecommendedWeight(true, 0.8), false);  // ユーザー保存済み→上書きしない（再解析でも維持）
+  assert.equal(shouldApplyRecommendedWeight(false, NaN), false); // 有効値なし→適用しない
 });
 
 test("isCompatibilityFilterは既知IDだけ真", () => {
