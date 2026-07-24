@@ -3,6 +3,10 @@ outputs/*.png
 outputs/*.jpg
 outputs/*.jpeg
 outputs/*.webp
+favorites/*.png
+favorites/*.jpg
+favorites/*.jpeg
+favorites/*.webp
 config.local.json
 data/
 .updates/
