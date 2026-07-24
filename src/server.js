@@ -32,7 +32,7 @@ const outputDir = process.env.LOCAL_IMAGE_CHAT_OUTPUT_DIR
   : path.join(rootDir, "outputs");
 const favoritesDir = process.env.LOCAL_IMAGE_CHAT_FAVORITES_DIR
   ? path.resolve(process.env.LOCAL_IMAGE_CHAT_FAVORITES_DIR)
-  : path.join(rootDir, "favorites");
+  : path.join(outputDir, "favorite");
 const dataDir = process.env.LOCAL_IMAGE_CHAT_DATA_DIR
   ? path.resolve(process.env.LOCAL_IMAGE_CHAT_DATA_DIR)
   : path.join(rootDir, "data");
