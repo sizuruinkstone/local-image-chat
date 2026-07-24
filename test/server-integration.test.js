@@ -42,8 +42,7 @@ test("生成キューからReForge、履歴、👍集計までAPIが往復する
       ...process.env,
       LOCAL_IMAGE_CHAT_CONFIG: configPath,
       LOCAL_IMAGE_CHAT_DATA_DIR: path.join(temporaryDir, "data"),
-      LOCAL_IMAGE_CHAT_OUTPUT_DIR: path.join(temporaryDir, "outputs"),
-      LOCAL_IMAGE_CHAT_FAVORITES_DIR: path.join(temporaryDir, "favorites")
+      LOCAL_IMAGE_CHAT_OUTPUT_DIR: path.join(temporaryDir, "outputs")
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -93,14 +92,14 @@ test("生成キューからReForge、履歴、👍集計までAPIが往復する
   assert.equal(preferences.favoriteCount, 1);
   assert.equal(preferences.topTags[0].name, "blue hair");
 
-  const favoritesDir = path.join(temporaryDir, "favorites");
+  const favoritesDir = path.join(temporaryDir, "outputs", "favorite");
   const favoritedFile = path.join(favoritesDir, path.basename(image.imageUrl));
-  assert.ok(await fileExists(favoritedFile), "お気に入りにするとfavoritesフォルダへ複製する");
+  assert.ok(await fileExists(favoritedFile), "お気に入りにするとoutputs/favoriteへ複製する");
   const favoriteResponse = await fetch(`${baseUrl}/favorites/${path.basename(image.imageUrl)}`);
   assert.equal(favoriteResponse.status, 200);
 
   await patchJson(`${baseUrl}/api/history/${image.id}/favorite`, { favorite: false });
-  assert.equal(await fileExists(favoritedFile), false, "お気に入り解除でfavoritesフォルダから削除する");
+  assert.equal(await fileExists(favoritedFile), false, "お気に入り解除でoutputs/favoriteから削除する");
 
   await patchJson(`${baseUrl}/api/history/${image.id}/favorite`, { favorite: true });
 
