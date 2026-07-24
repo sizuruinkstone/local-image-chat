@@ -18,6 +18,50 @@ test("代表的なIllustrious Checkpointを個別プロフィールへ自動分�
   }).id, "nova-anime-xl-v19");
 });
 
+test("追加Checkpointをバージョン別プロフィールへ自動分類する", () => {
+  const realSkin = inferCheckpointProfile({
+    filename: "C:\\Models\\Stable-diffusion\\miaomiaoRealskin_epsV14.safetensors"
+  });
+  assert.equal(realSkin.id, "miaomiao-realskin-eps-v14");
+  assert.equal(realSkin.family, "illustrious");
+  assert.deepEqual(realSkin.settings, {
+    width: 896,
+    height: 1152,
+    steps: 30,
+    cfgScale: 5,
+    samplerName: "Euler a",
+    scheduler: "Exponential"
+  });
+
+  const noobai = inferCheckpointProfile({
+    title: "noobai-xl-vpred-v1.0.safetensors [ea349eeae8]"
+  });
+  assert.equal(noobai.id, "noobai-vpred-v10");
+  assert.equal(noobai.family, "noobai");
+  assert.deepEqual(noobai.settings, {
+    width: 832,
+    height: 1216,
+    steps: 30,
+    cfgScale: 4.5,
+    samplerName: "Euler",
+    scheduler: "Automatic"
+  });
+
+  const obsession = inferCheckpointProfile({
+    modelName: "Obsession_vPred-V2.0"
+  });
+  assert.equal(obsession.id, "obsession-vpred-v20");
+  assert.equal(obsession.family, "noobai");
+  assert.deepEqual(obsession.settings, {
+    width: 768,
+    height: 1280,
+    steps: 30,
+    cfgScale: 5,
+    samplerName: "Euler a",
+    scheduler: "SGM Uniform"
+  });
+});
+
 test("個別登録がないIllustriousも汎用プロフィールへ分類する", () => {
   const profile = inferCheckpointProfile({
     title: "my_custom_illustrious_mix.safetensors"
