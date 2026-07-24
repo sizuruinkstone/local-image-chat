@@ -30,11 +30,15 @@ const config = deepMerge(baseConfig, localConfig);
 const outputDir = process.env.LOCAL_IMAGE_CHAT_OUTPUT_DIR
   ? path.resolve(process.env.LOCAL_IMAGE_CHAT_OUTPUT_DIR)
   : path.join(rootDir, "outputs");
+const favoritesDir = process.env.LOCAL_IMAGE_CHAT_FAVORITES_DIR
+  ? path.resolve(process.env.LOCAL_IMAGE_CHAT_FAVORITES_DIR)
+  : path.join(rootDir, "favorites");
 const dataDir = process.env.LOCAL_IMAGE_CHAT_DATA_DIR
   ? path.resolve(process.env.LOCAL_IMAGE_CHAT_DATA_DIR)
   : path.join(rootDir, "data");
 await Promise.all([
   fs.mkdir(outputDir, { recursive: true }),
+  fs.mkdir(favoritesDir, { recursive: true }),
   fs.mkdir(dataDir, { recursive: true })
 ]);
 
@@ -56,6 +60,7 @@ const app = express();
 app.use(express.json({ limit: "50mb" }));
 app.use(express.static(path.join(rootDir, "public")));
 app.use("/outputs", express.static(outputDir));
+app.use("/favorites", express.static(favoritesDir));
 
 app.get("/api/config", (_request, response) => {
   response.json({
@@ -204,10 +209,9 @@ app.get("/api/history/:imageId/recipe", async (request, response) => {
 
 app.patch("/api/history/:imageId/favorite", async (request, response) => {
   try {
-    const image = await history.setFavorite(
-      requireId(request.params.imageId),
-      request.body.favorite !== false
-    );
+    const favorite = request.body.favorite !== false;
+    const image = await history.setFavorite(requireId(request.params.imageId), favorite);
+    await syncFavoriteFile(image, favorite);
     response.json({ image, preferences: await history.getPreferences() });
   } catch (error) {
     response.status(404).json({ error: readableError(error) });
@@ -270,6 +274,8 @@ app.post("/api/generate", async (request, response) => {
 app.listen(config.port, "127.0.0.1", () => {
   console.log(`Local Image Chat v${packageJson.version}: http://127.0.0.1:${config.port}`);
 });
+
+backfillFavorites();
 
 async function performGeneration(body, { signal, report }) {
   const description = requireText(body.description, "生成したい内容");
@@ -522,6 +528,38 @@ function outputDimensions(mode, settings) {
     };
   }
   return img2imgRefineDimensions(settings.width, settings.height, settings.hiresScale);
+}
+
+async function syncFavoriteFile(image, favorite) {
+  const filename = image?.filename;
+  // 履歴の生成画像はoutputs直下に保存されるため、パス区切りを含む名前は対象外にする
+  if (!filename || path.basename(filename) !== filename) return;
+  const destination = path.join(favoritesDir, filename);
+  try {
+    if (favorite) {
+      await fs.copyFile(path.join(outputDir, filename), destination);
+    } else {
+      await fs.rm(destination, { force: true });
+    }
+  } catch (error) {
+    // お気に入りフォルダは履歴フラグのミラーなので、失敗しても👍操作自体は妨げない
+    if (error?.code !== "ENOENT") {
+      console.warn(`[Favorites] ${filename} の同期に失敗: ${error.message}`);
+    }
+  }
+}
+
+async function backfillFavorites() {
+  try {
+    const generations = await history.list({ favoritesOnly: true, limit: 500 });
+    for (const generation of generations) {
+      for (const image of generation.images) {
+        await syncFavoriteFile(image, true);
+      }
+    }
+  } catch (error) {
+    console.warn(`[Favorites] 既存お気に入りの同期に失敗: ${error.message}`);
+  }
 }
 
 async function saveContentAddressedImage(prefix, image) {

@@ -42,7 +42,8 @@ test("生成キューからReForge、履歴、👍集計までAPIが往復する
       ...process.env,
       LOCAL_IMAGE_CHAT_CONFIG: configPath,
       LOCAL_IMAGE_CHAT_DATA_DIR: path.join(temporaryDir, "data"),
-      LOCAL_IMAGE_CHAT_OUTPUT_DIR: path.join(temporaryDir, "outputs")
+      LOCAL_IMAGE_CHAT_OUTPUT_DIR: path.join(temporaryDir, "outputs"),
+      LOCAL_IMAGE_CHAT_FAVORITES_DIR: path.join(temporaryDir, "favorites")
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -91,6 +92,17 @@ test("生成キューからReForge、履歴、👍集計までAPIが往復する
   const preferences = await (await fetch(`${baseUrl}/api/history/preferences`)).json();
   assert.equal(preferences.favoriteCount, 1);
   assert.equal(preferences.topTags[0].name, "blue hair");
+
+  const favoritesDir = path.join(temporaryDir, "favorites");
+  const favoritedFile = path.join(favoritesDir, path.basename(image.imageUrl));
+  assert.ok(await fileExists(favoritedFile), "お気に入りにするとfavoritesフォルダへ複製する");
+  const favoriteResponse = await fetch(`${baseUrl}/favorites/${path.basename(image.imageUrl)}`);
+  assert.equal(favoriteResponse.status, 200);
+
+  await patchJson(`${baseUrl}/api/history/${image.id}/favorite`, { favorite: false });
+  assert.equal(await fileExists(favoritedFile), false, "お気に入り解除でfavoritesフォルダから削除する");
+
+  await patchJson(`${baseUrl}/api/history/${image.id}/favorite`, { favorite: true });
 
   const img2imgQueued = await postJson(`${baseUrl}/api/jobs`, {
     mode: "img2img",
@@ -323,6 +335,15 @@ async function waitForJob(baseUrl, id) {
     await new Promise((resolve) => setTimeout(resolve, 30));
   }
   throw new Error("job timeout");
+}
+
+async function fileExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function postJson(url, body) {
