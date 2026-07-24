@@ -4,7 +4,14 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkOllama, createPrompt, unloadOllama } from "./ollama.js";
-import { checkReforge, generateImages, listLoras, refreshLoras } from "./reforge.js";
+import {
+  checkReforge,
+  generateImages,
+  listCheckpoints,
+  listLoras,
+  refreshLoras,
+  switchCheckpoint
+} from "./reforge.js";
 import { createHistoryService } from "./history.js";
 import { createJobManager } from "./job-manager.js";
 import { createCivitaiService } from "./civitai.js";
@@ -94,6 +101,28 @@ app.post("/api/prompt", async (request, response) => {
 app.get("/api/loras", async (_request, response) => {
   try {
     response.json({ loras: await getInstalledLoras() });
+  } catch (error) {
+    response.status(500).json({ error: readableError(error) });
+  }
+});
+
+app.get("/api/checkpoints", async (_request, response) => {
+  try {
+    response.json(await listCheckpoints(config.reforge));
+  } catch (error) {
+    response.status(500).json({ error: readableError(error) });
+  }
+});
+
+app.post("/api/checkpoints/select", async (request, response) => {
+  try {
+    const selected = requireText(request.body.checkpoint, "Checkpoint");
+    const available = await listCheckpoints(config.reforge);
+    const checkpoint = available.checkpoints.find((item) =>
+      [item.title, item.modelName, item.filename].some((value) => value === selected)
+    );
+    if (!checkpoint) throw new Error("選択したCheckpointがReForgeに見つかりません");
+    response.json(await switchCheckpoint(config.reforge, checkpoint.title));
   } catch (error) {
     response.status(500).json({ error: readableError(error) });
   }
