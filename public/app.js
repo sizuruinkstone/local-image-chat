@@ -116,6 +116,10 @@ elements.generateButton.addEventListener("click", generateCandidates);
 elements.finishButton.addEventListener("click", finishSelected);
 elements.resultTabButton.addEventListener("click", () => setResultTab("result"));
 elements.galleryTabButton.addEventListener("click", () => setResultTab("gallery"));
+// 生成結果（Hires仕上げ）画像のクリックで拡大モーダルを開く。
+elements.resultImage.addEventListener("click", () => {
+  if (finalImage) openImageModal(finalImage.imageUrl, elements.finalTitle.textContent || `Seed ${finalImage.seed}`);
+});
 elements.txt2imgModeButton.addEventListener("click", () => setGenerationMode("txt2img"));
 elements.img2imgModeButton.addEventListener("click", () => setGenerationMode("img2img"));
 elements.inpaintModeButton.addEventListener("click", () => setGenerationMode("inpaint"));
@@ -2092,7 +2096,17 @@ function renderCandidates(images) {
       event.stopPropagation();
       useImageForInpaint(candidate);
     });
-    actions.append(favorite, toImg2Img, toInpaint, download);
+    const zoom = document.createElement("button");
+    zoom.type = "button";
+    zoom.className = "candidateImg2ImgButton";
+    zoom.textContent = "拡大";
+    zoom.title = "画像を拡大表示";
+    // 候補カードのクリックは選択なので、拡大はボタンで（stopPropagationで選択を誤発火させない）。
+    zoom.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openImageModal(candidate.imageUrl, `候補 ${index + 1} · Seed ${candidate.seed}`);
+    });
+    actions.append(favorite, toImg2Img, toInpaint, zoom, download);
     footer.append(label, actions);
     card.append(image, footer);
 
