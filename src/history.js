@@ -73,6 +73,41 @@ export function createHistoryService(dataDir, { limit = 500 } = {}) {
       return removed;
     },
 
+    // 実験IDに属する世代だけを取り出す（実験カード・比較画面用）。
+    async listByExperiment(experimentId) {
+      const data = await store.read();
+      return data.generations.filter((generation) => generation.experimentId === experimentId);
+    },
+
+    async deleteGeneration(generationId) {
+      let removed = null;
+      await store.update((data) => {
+        const index = data.generations.findIndex((item) => item.id === generationId);
+        if (index < 0) throw new Error("指定された世代が履歴にありません");
+        removed = data.generations.splice(index, 1)[0];
+        return data;
+      });
+      return removed;
+    },
+
+    // A/B比較の投票結果を画像へ記録する。将来の好み分析に使う。
+    async setImageVote(imageId, vote) {
+      let matched = null;
+      await store.update((data) => {
+        for (const generation of data.generations) {
+          const image = generation.images.find((item) => item.id === imageId);
+          if (!image) continue;
+          image.vote = vote;
+          image.votedAt = new Date().toISOString();
+          matched = { generationId: generation.id, ...image };
+          break;
+        }
+        if (!matched) throw new Error("指定された画像が履歴にありません");
+        return data;
+      });
+      return matched;
+    },
+
     async getRecipe(imageId) {
       const data = await store.read();
       for (const generation of data.generations) {
@@ -132,6 +167,17 @@ function normalizeGeneration(input) {
     kind: input.kind === "hires" ? "hires" : "candidates",
     mode,
     parentImageId: input.parentImageId ?? null,
+    // 実験グループ・派生生成のメタデータ（未使用時はnull）
+    experimentId: input.experimentId ?? null,
+    experimentName: input.experimentName ?? null,
+    experimentType: input.experimentType ?? null,
+    comparedParameter: input.comparedParameter ?? null,
+    comparedValue: input.comparedValue ?? null,
+    baseSeed: input.baseSeed ?? null,
+    parentGenerationId: input.parentGenerationId ?? null,
+    derivationType: input.derivationType ?? null,
+    derivationInstruction: input.derivationInstruction ?? null,
+    retryInfo: input.retryInfo ?? null,
     sourceImageId: input.sourceImageId ?? null,
     sourceImageUrl: input.sourceImageUrl ?? null,
     maskImageUrl: input.maskImageUrl ?? null,
@@ -149,7 +195,8 @@ function normalizeGeneration(input) {
       seed: image.seed,
       width: image.width ?? input.settings?.width ?? null,
       height: image.height ?? input.settings?.height ?? null,
-      favorite: Boolean(image.favorite)
+      favorite: Boolean(image.favorite),
+      vote: image.vote ?? null
     }))
   };
 }

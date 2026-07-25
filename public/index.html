@@ -351,6 +351,33 @@
             <p class="hint">V-Pred系Checkpoint（NoobAI V-Pred、Obsession vPredなど）は「Zero Terminal SNR」を選びます。Checkpoint切替時の推奨設定自動反映でも切り替わります。</p>
           </details>
 
+          <details id="experimentDetails">
+            <summary>パラメータ比較 <span id="experimentBadge" class="summaryCount">未実行</span></summary>
+            <p class="hint">Prompt・Checkpoint・LoRAはそのままに、1項目だけ値を変えて1枚ずつ順番に生成し、ひとつの実験としてまとめます。</p>
+            <div class="settingsGrid">
+              <label>比較対象
+                <select id="experimentParameter"></select>
+              </label>
+              <label id="experimentTargetRow">対象LoRA
+                <select id="experimentTarget"></select>
+              </label>
+              <label class="fullWidthField">試す値（カンマ区切り）
+                <input id="experimentValues" type="text" placeholder="0.5, 0.6, 0.7, 0.8" />
+              </label>
+              <label class="fullWidthField autoSizeChoice">
+                <input id="experimentFixSeed" type="checkbox" checked />
+                Seedを固定する（-1のときは実行直前にランダム値へ確定します）
+              </label>
+            </div>
+            <div class="buttonRow compactButtons">
+              <button id="runExperimentButton" class="primary" type="button">比較生成</button>
+              <button id="cancelExperimentButton" class="dangerButton" type="button" disabled>中断</button>
+              <button id="openExperimentsButton" class="ghost" type="button">実験一覧</button>
+            </div>
+            <p id="experimentStatus" class="hint" aria-live="polite"></p>
+            <div id="experimentProgress" class="experimentProgress hidden"></div>
+          </details>
+
           <details>
             <summary>Hires.fix設定</summary>
             <p class="hint">新規生成はHires.fix、img2img・部分修正は選択候補を参照画像にして高解像度化します。Upscalerは新規生成だけで使用します。</p>
@@ -446,10 +473,16 @@
                 <button id="refreshHistoryButton" class="secondary" type="button">再読込</button>
               </div>
             </div>
+            <div class="galleryViewTabs" role="group" aria-label="ギャラリー表示切替">
+              <button id="galleryViewImagesButton" class="galleryViewTab active" type="button" aria-pressed="true">画像一覧</button>
+              <button id="galleryViewExperimentsButton" class="galleryViewTab" type="button" aria-pressed="false">実験ごと</button>
+              <button id="compareSelectionButton" class="secondary smallButton" type="button" disabled>比較する</button>
+            </div>
             <div id="preferenceSummary" class="preferenceSummary">
               画像に👍を付けると、好きなタグ・LoRA・設定をここへ集計します。
             </div>
             <div id="historyGrid" class="historyGrid"></div>
+            <div id="experimentGrid" class="experimentGrid hidden"></div>
           </div>
         </section>
       </div>

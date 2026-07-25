@@ -419,3 +419,80 @@ details label { margin-top: 13px; }
 .duplicateRename { display: grid; gap: 5px; margin-top: 12px; color: var(--muted); font-size: 11px; }
 .duplicateRename input { padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: rgba(255,255,255,.04); color: var(--text); font-size: 12px; }
 .uiCheckboxField { display: flex !important; flex-direction: row; align-items: center; gap: 8px; color: var(--text) !important; font-size: 12px; }
+
+/* ===== パラメータ比較 ===== */
+.experimentProgress { display: grid; gap: 5px; margin-top: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 11px; background: rgba(255,255,255,.03); font-size: 11px; }
+.experimentProgress > strong { font-size: 12px; }
+.experimentRun { display: flex; justify-content: space-between; gap: 10px; padding: 5px 7px; border-radius: 7px; background: rgba(255,255,255,.03); }
+.experimentRun span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.experimentRun span:last-child { flex: 0 0 auto; color: var(--muted); }
+.experimentRun.status-running { border: 1px solid rgba(185,255,77,.3); }
+.experimentRun.status-running span:last-child { color: var(--accent); }
+.experimentRun.status-done span:last-child { color: var(--accent); }
+.experimentRun.status-failed span:last-child, .experimentRun.status-cancelled span:last-child { color: var(--danger); }
+
+/* ===== ギャラリー表示切替・実験カード ===== */
+.galleryViewTabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 10px; }
+.galleryViewTab { padding: 7px 12px; border: 1px solid var(--line); border-radius: 9px; color: var(--muted); background: rgba(255,255,255,.04); font-size: 11px; font-weight: 700; cursor: pointer; }
+.galleryViewTab.active { border-color: rgba(185,255,77,.42); color: var(--accent); background: rgba(185,255,77,.09); }
+.galleryViewTabs .smallButton { margin-left: auto; }
+.experimentGrid { display: grid; gap: 10px; }
+.experimentCard { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 13px; background: rgba(255,255,255,.03); }
+.experimentCardHeader { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.experimentCardHeader strong { font-size: 13px; overflow-wrap: anywhere; }
+.experimentCardStatus { flex: 0 0 auto; padding: 2px 8px; border: 1px solid var(--line); border-radius: 99px; font-size: 10px; }
+.experimentCardStatus.running { border-color: rgba(185,255,77,.4); color: var(--accent); }
+.experimentCardStatus.cancelled { border-color: rgba(255,102,122,.4); color: var(--danger); }
+.experimentCardMeta { display: grid; gap: 2px; color: var(--muted); font-size: 11px; }
+.experimentCardThumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); gap: 6px; }
+.experimentCardThumbs img { width: 100%; aspect-ratio: 3 / 4; object-fit: cover; border-radius: 8px; cursor: zoom-in; }
+.experimentCardActions { display: flex; flex-wrap: wrap; gap: 6px; }
+.experimentCardActions button { padding: 6px 10px; font-size: 11px; }
+.experimentDetailGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
+.experimentDetailCell { display: grid; gap: 6px; margin: 0; }
+.experimentDetailCell img { width: 100%; border-radius: 9px; cursor: zoom-in; }
+.experimentDetailPlaceholder { display: grid; place-items: center; aspect-ratio: 3 / 4; border: 1px dashed var(--line); border-radius: 9px; color: var(--muted); font-size: 11px; }
+.experimentDetailCell figcaption { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 11px; }
+.historyExperimentBadge { overflow: hidden; padding: 2px 6px; border: 1px solid rgba(185,255,77,.3); border-radius: 99px; color: var(--accent); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.compareToggle.active { border-color: rgba(185,255,77,.5); color: var(--accent); }
+
+/* ===== 画像比較 ===== */
+.compareGrid { display: grid; gap: 10px; }
+.compareGrid.count-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.compareGrid.count-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.compareGrid.count-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.comparePane { display: grid; gap: 6px; margin: 0; }
+.compareStage { overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: #000; touch-action: none; cursor: grab; }
+.compareStage img { display: block; width: 100%; transform-origin: center center; transition: transform .05s linear; user-select: none; }
+.comparePane figcaption { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 11px; }
+.compareBadge { padding: 2px 7px; border: 1px solid rgba(185,255,77,.3); border-radius: 99px; color: var(--accent); font-size: 10px; }
+.compareMeta { color: var(--muted); font-size: 10px; }
+.compareReset { margin: 10px 0 0; }
+.compareDiff { margin-top: 14px; }
+.compareDiff > strong { display: block; margin-bottom: 6px; font-size: 12px; }
+.compareDiffTable { display: grid; gap: 2px; font-size: 11px; }
+.compareDiffRow { display: grid; grid-template-columns: minmax(90px, 1.2fr) repeat(var(--compare-count), minmax(0, 1fr)); gap: 6px; padding: 4px 6px; border-radius: 6px; background: rgba(255,255,255,.03); }
+.compareDiffRow.head { color: var(--muted); background: none; }
+.compareDiffRow > div { overflow-wrap: anywhere; }
+.comparePromptDiff { display: grid; gap: 3px; margin: 4px 0; font-size: 11px; }
+.diffAdded { color: var(--accent); overflow-wrap: anywhere; }
+.diffRemoved { color: var(--danger); overflow-wrap: anywhere; }
+.compareVote { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+.compareVoteRow { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.compareVoteRow button { padding: 8px 14px; font-size: 12px; }
+.promptModalField { width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px; background: rgba(255,255,255,.04); color: var(--text); font-size: 12px; }
+.loraSwapList { display: grid; gap: 6px; max-height: 46vh; overflow: auto; }
+.loraSwapRow { display: grid; grid-template-columns: auto minmax(0, 1fr) 90px; gap: 10px; align-items: center; padding: 7px 9px; border: 1px solid var(--line); border-radius: 9px; font-size: 12px; }
+.loraSwapRow input[type="number"] { padding: 5px 7px; border: 1px solid var(--line); border-radius: 7px; background: rgba(255,255,255,.04); color: var(--text); font-size: 11px; }
+
+@media (max-width: 760px) {
+  .compareGrid.count-3, .compareGrid.count-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 520px) {
+  .compareGrid { grid-template-columns: 1fr !important; }
+  .compareDiffRow { grid-template-columns: 1fr; }
+  .experimentCardActions button { flex: 1 1 calc(50% - 6px); }
+  .loraSwapRow { grid-template-columns: auto minmax(0, 1fr); }
+  .loraSwapRow input[type="number"] { grid-column: 2; }
+  .toastHost { top: 8px; right: 8px; left: 8px; width: auto; }
+}

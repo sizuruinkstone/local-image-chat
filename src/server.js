@@ -6,6 +6,12 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { AMBIGUOUS_ROOT_MESSAGE } from "./lora-root.js";
 import { migrateDataFiles } from "./migrations.js";
+import {
+  COMPARABLE_PARAMETERS,
+  MAX_EXPERIMENT_IMAGES,
+  createExperimentService,
+  isComparableParameter
+} from "./experiments.js";
 import { checkOllama, createPrompt, unloadOllama } from "./ollama.js";
 import {
   checkReforge,
@@ -61,6 +67,10 @@ const updater = createUpdater(rootDir, {
   branch: config.github?.branch ?? "main"
 }, packageJson.version);
 const jobs = createJobManager(performGeneration);
+const experiments = createExperimentService(dataDir, {
+  jobs,
+  maxImages: config.experiments?.maxImages ?? MAX_EXPERIMENT_IMAGES
+});
 
 const app = express();
 app.use(express.json({ limit: "50mb" }));
@@ -361,6 +371,123 @@ app.delete("/api/jobs/:jobId", (request, response) => {
   }
 });
 
+// ---- パラメータ比較（実験） ----
+
+app.get("/api/experiments", async (request, response) => {
+  try {
+    response.json({
+      experiments: await experiments.list({ limit: request.query.limit }),
+      limits: experiments.limits(),
+      parameters: COMPARABLE_PARAMETERS
+    });
+  } catch (error) {
+    response.status(500).json({ error: readableError(error) });
+  }
+});
+
+app.post("/api/experiments", async (request, response) => {
+  try {
+    const body = request.body ?? {};
+    if (!isComparableParameter(body.parameter)) throw new Error("比較できないパラメータです");
+    const experiment = await experiments.create({
+      baseRequest: body.baseRequest ?? {},
+      parameter: body.parameter,
+      target: typeof body.target === "string" ? body.target : "",
+      values: body.values,
+      fixedSeed: body.fixedSeed,
+      name: typeof body.name === "string" ? body.name : ""
+    });
+    response.status(202).json({ experiment });
+  } catch (error) {
+    response.status(400).json({ error: readableError(error) });
+  }
+});
+
+app.get("/api/experiments/:experimentId", async (request, response) => {
+  try {
+    response.json({ experiment: await experiments.get(requireId(request.params.experimentId)) });
+  } catch (error) {
+    response.status(404).json({ error: readableError(error) });
+  }
+});
+
+app.patch("/api/experiments/:experimentId", async (request, response) => {
+  try {
+    const experiment = await experiments.patch(requireId(request.params.experimentId), {
+      name: request.body?.name,
+      bestImageId: request.body?.bestImageId,
+      note: request.body?.note
+    });
+    response.json({ experiment });
+  } catch (error) {
+    response.status(404).json({ error: readableError(error) });
+  }
+});
+
+app.post("/api/experiments/:experimentId/cancel", async (request, response) => {
+  try {
+    response.json({ experiment: await experiments.cancel(requireId(request.params.experimentId)) });
+  } catch (error) {
+    response.status(404).json({ error: readableError(error) });
+  }
+});
+
+// 実験の一括削除。画像も消すかどうかはクライアントで選ばせる。
+app.delete("/api/experiments/:experimentId", async (request, response) => {
+  try {
+    const experimentId = requireId(request.params.experimentId);
+    const deleteImages = request.query.deleteImages === "1";
+    const generations = await history.listByExperiment(experimentId);
+    let removedImages = 0;
+    for (const generation of generations) {
+      const removed = await history.deleteGeneration(generation.id).catch(() => null);
+      if (!removed) continue;
+      for (const image of removed.images) {
+        await syncFavoriteFile(image, false);
+        if (deleteImages) {
+          await deleteOutputImage(image.filename ?? image.imageUrl);
+          removedImages += 1;
+        }
+      }
+    }
+    await experiments.remove(experimentId);
+    response.json({ ok: true, removedGenerations: generations.length, removedImages });
+  } catch (error) {
+    response.status(404).json({ error: readableError(error) });
+  }
+});
+
+app.get("/api/comparisons", async (_request, response) => {
+  try {
+    response.json({ comparisons: await experiments.listComparisons({}) });
+  } catch (error) {
+    response.status(500).json({ error: readableError(error) });
+  }
+});
+
+// A/B比較の投票。履歴の画像側にも結果を残す。
+app.post("/api/comparisons", async (request, response) => {
+  try {
+    const imageIds = validateImageIds(request.body?.imageIds);
+    const winnerImageId = request.body?.winnerImageId ? requireId(request.body.winnerImageId) : null;
+    if (winnerImageId && !imageIds.includes(winnerImageId)) throw new Error("勝ち画像が比較対象に含まれていません");
+    const comparison = await experiments.addComparison({
+      imageIds,
+      winnerImageId,
+      result: request.body?.result,
+      parameter: request.body?.parameter,
+      note: request.body?.note
+    });
+    for (const imageId of imageIds) {
+      const vote = comparison.result === "draw" ? "draw" : imageId === winnerImageId ? "win" : "lose";
+      await history.setImageVote(imageId, vote).catch(() => {});
+    }
+    response.json({ comparison });
+  } catch (error) {
+    response.status(400).json({ error: readableError(error) });
+  }
+});
+
 app.post("/api/update/check", async (request, response) => {
   try {
     response.json(await updater.check(sanitizeSecret(request.body.token)));
@@ -455,10 +582,22 @@ async function performGeneration(body, { signal, report }) {
     };
   }));
 
+  const experiment = validateExperimentMeta(body.experiment);
+  const derivation = validateDerivation(body.derivation);
   const stored = await history.addGeneration({
     kind: settings.hiresEnabled ? "hires" : "candidates",
     mode,
     parentImageId: body.parentImageId,
+    parentGenerationId: passthroughText(body.parentGenerationId, 80) || null,
+    experimentId: experiment?.id ?? null,
+    experimentName: experiment?.name ?? null,
+    experimentType: experiment?.type ?? null,
+    comparedParameter: experiment?.parameter ?? null,
+    comparedValue: experiment?.value ?? null,
+    baseSeed: experiment?.baseSeed ?? null,
+    derivationType: derivation?.type ?? null,
+    derivationInstruction: derivation?.instruction ?? null,
+    retryInfo: body.retryInfo ?? null,
     sourceImageId: sourceImage?.imageId,
     sourceImageUrl,
     maskImageUrl,
@@ -472,9 +611,17 @@ async function performGeneration(body, { signal, report }) {
     images: savedImages
   });
 
+  if (experiment) {
+    await experiments.recordRun(experiment.id, experiment.value, {
+      generationId: stored.id,
+      imageIds: stored.images.map((image) => image.id)
+    }).catch((error) => console.warn(`[Experiment] 記録に失敗: ${error.message}`));
+  }
+
   report(99, "完了");
   return {
     generationId: stored.id,
+    experimentId: stored.experimentId,
     mode,
     sourceImageId: stored.sourceImageId,
     sourceImageUrl: stored.sourceImageUrl,
@@ -512,6 +659,15 @@ function openDirectory(directory) {
 function requireText(value, label) {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${label}を入力してください`);
   return value.trim().slice(0, 4000);
+}
+
+function validateImageIds(value) {
+  if (!Array.isArray(value) || value.length < 2 || value.length > 4) {
+    throw new Error("比較は2〜4枚で行ってください");
+  }
+  const ids = [...new Set(value.map((item) => requireId(item)))];
+  if (ids.length < 2) throw new Error("比較は異なる2枚以上を選んでください");
+  return ids;
 }
 
 function requireId(value) {
@@ -576,6 +732,31 @@ function validateSettings(input) {
 
 function passthroughText(value, max = 400) {
   return typeof value === "string" ? value.slice(0, max) : "";
+}
+
+// 実験メタデータはサーバー内部（experiments.create）で組み立てた形だけ受け付ける。
+function validateExperimentMeta(value) {
+  if (!isPlainObject(value)) return null;
+  if (!/^[a-z0-9-]{8,80}$/i.test(String(value.id ?? ""))) return null;
+  if (!isComparableParameter(value.parameter)) return null;
+  return {
+    id: String(value.id),
+    name: passthroughText(value.name, 120),
+    type: passthroughText(value.type, 40) || "parameter",
+    parameter: String(value.parameter),
+    target: passthroughText(value.target, 200),
+    value: typeof value.value === "number" ? value.value : passthroughText(value.value, 100),
+    baseSeed: Number.isFinite(Number(value.baseSeed)) ? Number(value.baseSeed) : null
+  };
+}
+
+const DERIVATION_TYPES = ["same-seed", "lora", "outfit", "background", "expression", "duplicate"];
+
+function validateDerivation(value) {
+  if (!isPlainObject(value)) return null;
+  const type = DERIVATION_TYPES.includes(value.type) ? value.type : null;
+  if (!type) return null;
+  return { type, instruction: passthroughText(value.instruction, 500) };
 }
 
 const INSTALL_MODES = ["auto", "reuse", "metadata", "rename", "move"];

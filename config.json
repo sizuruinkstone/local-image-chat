@@ -25,6 +25,9 @@
   "storage": {
     "historyLimit": 500
   },
+  "experiments": {
+    "maxImages": 8
+  },
   "github": {
     "repository": "sizuruinkstone/local-image-chat",
     "branch": "main"
