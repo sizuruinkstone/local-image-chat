@@ -498,3 +498,6 @@ details label { margin-top: 13px; }
 }
 .recoveryChanges { margin: 0; padding-left: 20px; font-size: 12px; line-height: 1.7; }
 .recoveryChanges li { color: var(--text); }
+.experimentVote { padding: 2px 7px; border: 1px solid var(--line); border-radius: 99px; font-size: 10px; }
+.experimentVote.vote-win { border-color: rgba(185,255,77,.4); color: var(--accent); }
+.experimentVote.vote-lose { color: var(--muted); }

@@ -3031,6 +3031,13 @@ function openExperimentDetail(experiment) {
         }
         const caption = document.createElement("figcaption");
         caption.textContent = `${run.value}`;
+        if (entry?.image.vote) {
+          // A/B比較の結果を実験詳細でも確認できるようにする。
+          const vote = document.createElement("span");
+          vote.className = `experimentVote vote-${entry.image.vote}`;
+          vote.textContent = { win: "A/B勝ち", lose: "A/B負け", draw: "引き分け" }[entry.image.vote] ?? entry.image.vote;
+          caption.append(vote);
+        }
         if (entry) {
           const favorite = document.createElement("button");
           favorite.type = "button";
