@@ -29,6 +29,7 @@ const elements = Object.fromEntries(
     "prompt", "negativePrompt", "width", "height", "steps", "cfgScale", "seed",
     "samplerName", "scheduler", "noiseSchedule", "candidateCount", "hiresScale", "hiresSteps",
     "hiresDenoising", "hiresUpscaler", "emptyState", "loading", "loadingText",
+    "resultTabButton", "galleryTabButton", "resultTab", "galleryTab",
     "resultContent", "candidateSection", "candidateGrid", "candidateSummary",
     "selectedSeedText", "finishButton", "finalResult", "resultImage", "seedText",
     "resolutionText", "downloadLink", "explanation", "error", "loraSearch",
@@ -113,6 +114,8 @@ elements.healthButton.addEventListener("click", checkHealth);
 elements.promptButton.addEventListener("click", buildPrompt);
 elements.generateButton.addEventListener("click", generateCandidates);
 elements.finishButton.addEventListener("click", finishSelected);
+elements.resultTabButton.addEventListener("click", () => setResultTab("result"));
+elements.galleryTabButton.addEventListener("click", () => setResultTab("gallery"));
 elements.txt2imgModeButton.addEventListener("click", () => setGenerationMode("txt2img"));
 elements.img2imgModeButton.addEventListener("click", () => setGenerationMode("img2img"));
 elements.inpaintModeButton.addEventListener("click", () => setGenerationMode("inpaint"));
@@ -262,6 +265,17 @@ function setGenerationMode(mode) {
   elements.inpaintPanel.classList.toggle("hidden", !isInpaint);
   if (isInpaint && initImageReference) void initializeInpaintEditor(initImageReference);
   updateGenerateButton();
+}
+
+// 右パネルの「生成結果 / ギャラリー」タブ切替。左の設定パネルは触らない。
+function setResultTab(tab) {
+  const gallery = tab === "gallery";
+  elements.resultTab.classList.toggle("hidden", gallery);
+  elements.galleryTab.classList.toggle("hidden", !gallery);
+  elements.resultTabButton.classList.toggle("active", !gallery);
+  elements.galleryTabButton.classList.toggle("active", gallery);
+  elements.resultTabButton.setAttribute("aria-selected", String(!gallery));
+  elements.galleryTabButton.setAttribute("aria-selected", String(gallery));
 }
 
 async function loadInitImageFile(file) {
@@ -1805,6 +1819,7 @@ async function generateCandidates() {
     return showError("修正したい範囲を白く塗ってください");
   }
 
+  setResultTab("result");
   elements.emptyState.classList.add("hidden");
   elements.finalResult.classList.add("hidden");
   finalImage = null;
@@ -1896,38 +1911,92 @@ async function finishSelected() {
       }
     });
 
-    const finished = data.images[0];
-    finalImage = finished;
-    finalGeneration = {
-      mode: data.mode,
-      sourceImageId: data.sourceImageId,
-      sourceImageUrl: data.sourceImageUrl,
-      maskImageUrl: data.maskImageUrl,
-      description: lastGeneration.description,
-      prompt: data.prompt,
-      negativePrompt: data.negativePrompt,
-      settings: data.settings,
-      loras: data.loras,
-      images: data.images
-    };
-    elements.finalEyebrow.textContent = isInpaint
-      ? "INPAINT REFINE COMPLETE"
-      : isImg2Img
-        ? "IMG2IMG REFINE COMPLETE"
-        : "HIRES.FIX COMPLETE";
-    elements.finalTitle.textContent = isInpaint
-      ? "部分修正・高解像度版"
-      : isImg2Img
-        ? "img2img高解像度版"
-        : "高解像度版";
-    elements.resultImage.src = `${finished.imageUrl}?t=${Date.now()}`;
-    elements.seedText.textContent = `Seed ${finished.seed}`;
-    elements.resolutionText.textContent = `${finished.width} × ${finished.height}`;
-    elements.downloadLink.href = finished.imageUrl;
-    elements.downloadLink.download = finished.filename;
-    elements.favoriteFinalButton.classList.toggle("active", finished.favorite);
-    elements.finalResult.classList.remove("hidden");
-    elements.finalResult.scrollIntoView({ behavior: "smooth", block: "start" });
+    presentHiresResult(
+      data,
+      lastGeneration.description,
+      isInpaint ? "INPAINT REFINE COMPLETE" : isImg2Img ? "IMG2IMG REFINE COMPLETE" : "HIRES.FIX COMPLETE",
+      isInpaint ? "部分修正・高解像度版" : isImg2Img ? "img2img高解像度版" : "高解像度版"
+    );
+    await loadHistory();
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+// 高解像度仕上げの結果を「生成結果」タブへ表示する共通処理。
+function presentHiresResult(data, description, eyebrow, title) {
+  const finished = data.images[0];
+  finalImage = finished;
+  finalGeneration = {
+    mode: data.mode,
+    sourceImageId: data.sourceImageId,
+    sourceImageUrl: data.sourceImageUrl,
+    maskImageUrl: data.maskImageUrl,
+    description,
+    prompt: data.prompt,
+    negativePrompt: data.negativePrompt,
+    settings: data.settings,
+    loras: data.loras,
+    images: data.images
+  };
+  elements.finalEyebrow.textContent = eyebrow;
+  elements.finalTitle.textContent = title;
+  elements.resultImage.src = `${finished.imageUrl}?t=${Date.now()}`;
+  elements.seedText.textContent = `Seed ${finished.seed}`;
+  elements.resolutionText.textContent = `${finished.width} × ${finished.height}`;
+  elements.downloadLink.href = finished.imageUrl;
+  elements.downloadLink.download = finished.filename;
+  elements.favoriteFinalButton.classList.toggle("active", finished.favorite);
+  elements.emptyState.classList.add("hidden");
+  elements.resultContent.classList.remove("hidden");
+  elements.finalResult.classList.remove("hidden");
+  elements.finalResult.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// ギャラリー画像を起点に、元画像ベース(img2img)で高解像度仕上げする。
+// GPUタイムアウトを避けるため、Hiresの初期値は安全寄りの固定値を使う。
+const GALLERY_HIRES_DEFAULTS = { scale: 1.5, steps: 12, denoising: 0.28 };
+
+async function hiresFromGallery(generation, image) {
+  const settings = generation.settings ?? {};
+  const scale = GALLERY_HIRES_DEFAULTS.scale;
+  const steps = GALLERY_HIRES_DEFAULTS.steps;
+  const denoising = GALLERY_HIRES_DEFAULTS.denoising;
+  const confirmed = await confirmDialog(
+    `この画像を高解像度仕上げします（${scale}倍・${steps} steps・Denoising ${denoising}）。よろしいですか？`,
+    { confirmText: "Hiresする", cancelText: "キャンセル" }
+  );
+  if (!confirmed) return;
+
+  clearError();
+  setResultTab("result");
+  elements.emptyState.classList.add("hidden");
+  elements.finalResult.classList.add("hidden");
+  setBusy(true, `Seed ${image.seed} を高解像度仕上げ中…`);
+  try {
+    const data = await submitGeneration({
+      mode: "img2img",
+      description: generation.description ?? "",
+      prompt: generation.prompt ?? "",
+      negativePrompt: generation.negativePrompt ?? "",
+      loras: generation.loras ?? [],
+      promptBoosts: [],
+      parentImageId: image.id,
+      initImageId: image.id,
+      settings: {
+        ...settings,
+        candidateCount: 1,
+        seed: image.seed,
+        hiresEnabled: true,
+        hiresScale: scale,
+        hiresSteps: steps,
+        hiresDenoising: denoising,
+        hiresUpscaler: settings.hiresUpscaler || elements.hiresUpscaler.value
+      }
+    });
+    presentHiresResult(data, generation.description ?? "", "GALLERY HIRES COMPLETE", "高解像度版");
     await loadHistory();
   } catch (error) {
     showError(error.message);
@@ -2434,7 +2503,13 @@ function openHistoryDetail(generation, image) {
   toInpaint.className = "secondary";
   toInpaint.textContent = "部分修正";
   toInpaint.addEventListener("click", () => { closeDetail(); useImageForInpaint(image); });
-  footer.append(toImg2Img, toInpaint);
+  const hires = document.createElement("button");
+  hires.type = "button";
+  hires.className = "primary";
+  hires.textContent = "Hiresする";
+  hires.title = "この画像を元に高解像度仕上げ";
+  hires.addEventListener("click", () => { closeDetail(); void hiresFromGallery(generation, image); });
+  footer.append(toImg2Img, toInpaint, hires);
 
   overlay.addEventListener("click", (event) => { if (event.target === overlay) closeDetail(); });
   document.addEventListener("keydown", onKey);

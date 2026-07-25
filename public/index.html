@@ -361,6 +361,12 @@
         </section>
 
         <section class="panel result">
+          <div class="resultTabs" role="tablist" aria-label="右パネル切替">
+            <button id="resultTabButton" class="resultTab active" type="button" role="tab" aria-selected="true">生成結果</button>
+            <button id="galleryTabButton" class="resultTab" type="button" role="tab" aria-selected="false">ギャラリー</button>
+          </div>
+
+          <div id="resultTab" class="tabPanel" role="tabpanel" aria-label="生成結果">
           <div id="emptyState" class="emptyState">
             <div class="spark">✦</div>
             <p>生成した画像がここに表示されます</p>
@@ -411,25 +417,26 @@
             <p id="explanation"></p>
           </div>
           <p id="error" class="error hidden"></p>
+          </div>
+
+          <div id="galleryTab" class="tabPanel hidden" role="tabpanel" aria-label="ギャラリー">
+            <div class="sectionHeading">
+              <div>
+                <p class="eyebrow">RECIPE LIBRARY</p>
+                <h2>生成履歴と好み</h2>
+              </div>
+              <div class="historyActions">
+                <label class="favoriteFilter"><input id="favoritesOnly" type="checkbox" /> 👍だけ</label>
+                <button id="refreshHistoryButton" class="secondary" type="button">再読込</button>
+              </div>
+            </div>
+            <div id="preferenceSummary" class="preferenceSummary">
+              画像に👍を付けると、好きなタグ・LoRA・設定をここへ集計します。
+            </div>
+            <div id="historyGrid" class="historyGrid"></div>
+          </div>
         </section>
       </div>
-
-      <section class="panel historyPanel">
-        <div class="sectionHeading">
-          <div>
-            <p class="eyebrow">RECIPE LIBRARY</p>
-            <h2>生成履歴と好み</h2>
-          </div>
-          <div class="historyActions">
-            <label class="favoriteFilter"><input id="favoritesOnly" type="checkbox" /> 👍だけ</label>
-            <button id="refreshHistoryButton" class="secondary" type="button">再読込</button>
-          </div>
-        </div>
-        <div id="preferenceSummary" class="preferenceSummary">
-          画像に👍を付けると、好きなタグ・LoRA・設定をここへ集計します。
-        </div>
-        <div id="historyGrid" class="historyGrid"></div>
-      </section>
     </main>
     <script type="module" src="/app.js"></script>
   </body>
