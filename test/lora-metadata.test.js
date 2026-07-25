@@ -61,6 +61,14 @@ test("Trigger Words・weight・分類を編集して保存する", async (t) => 
   // 旧形式のcategoryも同時更新される
   assert.equal(updated.category, "direction");
   assert.equal(updated.subcategory, "style");
+  // 実際に変更した項目だけを手動編集として記録する
+  assert.deepEqual(updated.manualFields.sort(), [
+    "category", "checkpointFamilies", "displayName", "favorite", "note",
+    "recommendedWeight", "recommendedWeightMax", "recommendedWeightMin",
+    "subcategory", "triggerWords"
+  ]);
+  assert.equal(updated.manualFields.includes("negativeWords"), false, "未入力の項目は固定しない");
+  assert.equal(updated.manualFields.includes("previewUrl"), false, "未入力の項目は固定しない");
 });
 
 test("手動編集がCivitai再解析で消えない", async (t) => {
@@ -178,6 +186,9 @@ test("編集フィールドの正規化と手動編集記録", () => {
 
   const edited = applyManualEdit({ uid: "x", triggerWords: "old" }, patch);
   assert.ok(edited.manualFields.includes("triggerWords"));
+  // 値が変わっていない項目は手動編集として記録しない
+  assert.equal(edited.manualFields.includes("note"), false);
+  assert.equal(edited.manualFields.includes("favorite"), false);
   const merged = mergeRegistryEntry(edited, { triggerWords: "fromCivitai", modelName: "new" });
   assert.equal(merged.triggerWords, "a, b, script");
   assert.equal(merged.modelName, "new");

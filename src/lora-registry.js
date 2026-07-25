@@ -69,23 +69,37 @@ export function normalizeEditableFields(input = {}) {
   return patch;
 }
 
-// 編集されたフィールドをmanualFieldsへ記録し、再解析で消えないようにする。
+// 編集されたフィールドだけをmanualFieldsへ記録し、再解析で消えないようにする。
+// 値が変わっていない項目は記録しない（1回編集しただけで全項目が固定されるのを防ぐ）。
 export function applyManualEdit(entry, patch) {
   const base = ensureEntryUid(entry ?? {});
   const manualFields = new Set(Array.isArray(base.manualFields) ? base.manualFields : []);
   const next = { ...base };
+  let changedSubcategory = false;
   for (const [key, value] of Object.entries(patch)) {
+    if (isSameFieldValue(base[key], value)) continue;
     next[key] = value;
     manualFields.add(key);
+    if (key === "subcategory") changedSubcategory = true;
   }
-  if (patch.subcategory !== undefined) {
+  if (changedSubcategory) {
     // 旧形式のcategoryも同時に更新して互換を保つ。
-    next.category = toLegacyCategory(patch.subcategory);
+    next.category = toLegacyCategory(next.subcategory);
     manualFields.add("category");
   }
   next.manualFields = [...manualFields];
   next.metadataEditedAt = new Date().toISOString();
   return next;
+}
+
+function isSameFieldValue(current, next) {
+  const normalize = (value) => {
+    // 未設定・空文字・false（チェックを入れていないお気に入り）は同じ扱いにする。
+    if (value === undefined || value === null || value === "" || value === false) return "";
+    if (Array.isArray(value)) return value.join(",");
+    return String(value);
+  };
+  return normalize(current) === normalize(next);
 }
 
 function trimText(value, limit) {

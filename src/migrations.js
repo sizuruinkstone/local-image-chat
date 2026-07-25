@@ -12,7 +12,13 @@ export async function backupDataFile(dataDir, filename) {
   if (raw === null) return "";
   const backupsDir = path.join(dataDir, "backups");
   await fs.mkdir(backupsDir, { recursive: true });
-  const stamp = new Date().toISOString().slice(0, 10).replaceAll("-", "");
+  // ローカル日付で命名する（UTCだと日本時間の深夜に前日付になるため）。
+  const now = new Date();
+  const stamp = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0")
+  ].join("");
   const target = path.join(backupsDir, `${path.basename(filename, ".json")}-${stamp}.json`);
   // 同日に複数回移行しても、最初のバックアップを上書きしない。
   try {

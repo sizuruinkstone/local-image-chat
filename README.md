@@ -2,6 +2,20 @@
 
 日本語の指示をOllamaでStable Diffusion向けタグに変換し、ReForge APIでローカル画像生成するツールです。
 
+## v2.12の主な機能
+
+- LoRAルート誤認の修正: `models/Lora`などの既知フォルダ名から判定し、`Anime`や`Characters`をルートと誤認しない。特定できない場合はインストールを停止する
+- Civitai保存先UIの改善: 実在フォルダと推奨フォルダを分離し、前回使用・お気に入り・推奨・既存フォルダの順で1つのリストから選択できる
+- LoRA重複チェック: インストール前に導入済みかを確認し、既存を使う／メタデータだけ更新／別名で保存／指定フォルダへ移動 を選べる
+- LoRAメタデータ編集: 表示名・分類・Trigger Words・推奨Weight・対応Checkpoint・メモなどを編集し、Civitai再解析でも上書きされない
+- パラメータ一括比較生成: LoRA weightやCFGなどを複数値まとめて1枚ずつ生成し、ひとつの実験としてまとめる
+- 画像比較モード: 2〜4枚を並べてズーム同期・設定差分・Prompt差分を確認し、A/B投票を記録する
+- ギャラリーからの派生生成: 同じSeedで再生成／LoRAだけ変更／衣装・背景・表情だけ変更／設定を複製
+- Checkpoint別LoRAセット: Checkpointごとによく使うLoRAと生成設定を保存し、切替時に自動適用できる
+- 生成失敗時の自動リカバリ: VRAM不足やタイムアウトを検出し、安全側の設定で1回だけ再試行する
+- 履歴の実験グループ化: ギャラリーを「画像一覧 / 実験ごと」で切り替え、実験単位で比較・名前変更・一括削除できる
+- トースト通知と共通モーダル（Escで閉じる、Enterで主操作、Tabがモーダル外へ抜けない）
+
 ## v2.11の主な機能
 
 - Civitaiリンク導入時にLoRAの保存先フォルダを選択（左でジャンル、右でサブフォルダの2段選択＋新規フォルダ作成、例: `characters/Blue Archive`）
@@ -210,21 +224,199 @@ Trigger WordsはブラウザへLoRA名ごとに自動保存され、次回その
 1. `Civitai URLからLoRAを追加`を開く。
 2. `https://civitai.com/models/...`形式のモデルページURLを貼る。
 3. キャラクター・画風・体型・構図の分類を選ぶ。
-4. `保存先フォルダ`を選ぶ。既存フォルダ（例: `characters/Blue Archive`）から選ぶか、`新しいフォルダを作成`で相対フォルダ名を入力する。未選択なら分類のデフォルト（キャラクター→Characters など）を使う。
+4. `保存先フォルダ`を選ぶ。前回使用・お気に入り・推奨・既存フォルダから選ぶか、`＋ 新しいフォルダを作成`で相対フォルダ名を入力する。
 5. `内容を確認`でベースモデル、ファイル名、Trigger Words、保存先を確認する。
-6. `ダウンロードして登録`を押す。
+6. `ダウンロードして登録`を押す。すでに導入済みなら重複確認画面が出る。
 
 保存先フォルダはLoRAルート配下の任意の既存フォルダまたは新規サブフォルダを指定できます。分類と保存先は別項目で、分類ごとに前回の保存先を記憶します。保存先は必ずLoRAルート配下に限定され、`../`や絶対パス、Windows予約名（CON等）、禁止文字（`< > : " | ? *`）はサーバー側で拒否します。同名ファイルが別フォルダに既にある場合は移動せず、その場所を再利用して通知します。
-既存LoRAのパスから保存ルートを自動検出し、分類に応じて`Characters`、`Style`、`Body`、`Pose`へ配置します。
-検出できない場合は`config.local.example.json`を`config.local.json`へコピーし、`lora.installDir`へStability MatrixのLoRAフォルダを設定してください。
+LoRAルートの判定順と、検出できない場合の対処は「LoRAルートの設定方法」を参照してください。
 
 閲覧制限付きモデルでCivitai APIキーが必要な場合だけ、画面のAPIキー欄へ入力します。
 キーは現在のブラウザタブのセッションにのみ保持され、履歴やGitHubには保存しません。
+
+### LoRAルートの設定方法
+
+`Civitai URLからLoRAを追加`の上部に、現在認識しているLoRAルートを表示します。
+
+```text
+LoRAルート: C:\StableDiffusion\ReForge\models\Lora   [設定済み]
+```
+
+バッジは`設定済み`（`config.local.json`で明示）、`ReForge設定`（ReForgeの`/sdapi/v1/cmd-flags`から取得）、`自動検出`（既存LoRAのパスから推定）のいずれかです。
+`LoRAフォルダを開く`でエクスプローラーが開きます。開く対象はサーバー側で確定したLoRAルートだけで、任意パスは渡せません。
+
+判定は次の優先順です。
+
+1. `config.local.json`（または`config.json`）の`lora.installDir`
+2. ReForgeの設定APIから取得できるLoRAディレクトリ
+3. 既存LoRAのパス中の`models/Lora`・`models/Loras`・`models/LyCORIS`（大文字小文字は区別しない）
+4. 安全に特定できない場合は自動インストールを停止
+
+`Anime`・`Character`・`Characters`・`Style`・`Body`・`Pose`・`Illustrious`・`NoobAI`・`SDXL`・`Pony`などの整理用サブフォルダは、ルート候補として採用しません。
+特定できない場合は次のメッセージを表示し、フォルダを勝手に作りません。
+
+```text
+LoRA保存先を安全に特定できません。
+config.local.json の lora.installDir にReForgeのLoRAルートを設定してください
+```
+
+`config.local.example.json`を`config.local.json`へコピーして、実際のパスへ書き換えてください。
+
+```json
+{
+  "lora": {
+    "installDir": "C:\\StableDiffusion\\ReForge\\models\\Lora"
+  }
+}
+```
+
+パスはお使いの環境に合わせて変更してください（Stability Matrixなら`...\Data\Models\Lora`など）。
+
+### 保存先フォルダの選び方
+
+保存先は1つのリストから選びます。並び順は次のとおりです。
+
+1. 前回使用した保存先（分類ごとに直近3件を記憶）
+2. お気に入り保存先（☆を押すと登録、★で解除）
+3. 推奨保存先（キャラクター→Characters、画風→Style、体型→Body、構図・ポーズ→Pose）
+4. 既存フォルダ（実在するフォルダだけ）
+5. ＋ 新しいフォルダを作成
+
+実在しない推奨フォルダは`推奨: Characters（新規作成）`と表示し、既存フォルダ一覧へは混ぜません。
+選択中の相対パス全体と、新規作成されるかどうかは常に画面下へ表示します。
+
+### 重複していた場合
+
+すでに導入済みのLoRAを入れようとすると、インストール前に確認画面が出ます。
+
+```text
+既に導入済みです
+保存場所: Anime/Style/FlatPainting.safetensors
+登録バージョン: v1.0
+Civitaiバージョン: v1.1
+```
+
+選べる操作は次の4つです。
+
+- 既存を使う: ダウンロードせず、登録情報だけ現在の保存場所へ紐付ける
+- メタデータだけ更新: ファイルに触れず、Trigger Wordsや推奨Weightなどを更新する
+- 別名で保存: `FlatPainting-v1.1.safetensors`のような候補名でダウンロードする
+- 指定フォルダへ移動: 既存ファイルを選んだフォルダへ移動する（確認ダイアログあり）
+
+上書き・削除・自動移動は行いません。移動では`.safetensors`と、存在する`.preview.png`・`.png`・`.json`も一緒に扱い、移動先に同名ファイルがあれば何も動かさずに中止します。
+
+### LoRAメタデータの編集
+
+プレビュー欄の`編集`から、表示名・分類・サブ分類・Trigger Words・Negative Words・推奨weight（値／最小／最大）・対応Checkpointファミリー・メモ・お気に入り・保存先・プレビュー画像URLを編集できます。
+内容は`data/lora-registry.json`へ保存します。編集した項目は`manualFields`として記録し、`登録済みを一括再解析`を実行してもユーザーの編集を上書きしません。
+保存先を変更した場合だけ実ファイル移動の確認を出し、移動後はregistry更新・ReForgeのLoRA再読込・UI再取得まで行います。
+Civitai経由でないLoRAも、編集を開いた時点で登録が作られるので同じように扱えます。
+
+## パラメータ比較と実験グループ
+
+`パラメータ比較`を開き、比較対象・試す値（カンマ区切り）・Seed固定を指定して`比較生成`を押します。
+
+```text
+比較対象: LoRA weight
+対象LoRA: Flat Painting
+試す値:   0.5, 0.6, 0.7, 0.8
+Seed固定: ON
+```
+
+- 比較できるのは LoRA weight / CFG / Steps / Seed / Denoising / Sampler / Scheduler / Hires倍率 / Hires Denoising のうち1項目です
+- 生成は並列ではなく1枚ずつ直列に実行し、`2 / 4 生成中・Flat Painting: 0.6`のように進捗を表示します
+- 既定は最大8枚、`config.json`の`experiments.maxImages`で最大12枚まで許可できます。5枚以上は確認ダイアログが出ます
+- `中断`で途中キャンセルできます。完了済みの画像は履歴に残ります
+
+生成結果は`experimentId`でひとまとまりになり、ギャラリーの`実験ごと`タブに実験カードとして表示されます。
+
+```text
+Flat Painting LoRA weight test   完了
+4枚（完了 4） / Seed 1753486420 / 0.5 / 0.6 / 0.7 / 0.8
+[開く] [比較] [名前変更] [削除]
+```
+
+`削除`では「履歴だけ削除」と「履歴と画像を削除」を選べます。どちらも確認が必要です。
+
+### 画像比較
+
+ギャラリーの各カードの`比較`（または詳細の`比較対象へ追加`）で2〜4枚を選び、上部の`比較する`を押します。実験カードの`比較`からも開けます。
+
+- 画像を横に並べ、ホイールで拡大・ドラッグで移動。倍率と位置は全画像で同期します
+- Seed・比較パラメータ・設定差分・LoRA weight差分・Prompt差分（Aを基準に追加/削除）を表示します
+- `Aが良い` / `Bが良い` / `引き分け` を選ぶと結果を保存します。勝敗は履歴画像の`vote`と`data/experiments.json`へ残り、実験の最良画像としても記録されます
+
+### ギャラリーからの派生生成
+
+履歴カードの`詳細`から次の操作ができます。
+
+- 同じSeedで再生成: Prompt・Negative・Seed・Checkpoint・LoRA・Sampler・Scheduler・Steps・CFG・解像度を復元して生成画面へ読み込む
+- LoRAだけ変更: 元レシピを読み込んだうえで、専用モーダルからLoRAの追加・解除・weight変更を行う
+- 衣装だけ変更 / 背景だけ変更 / 表情だけ変更: 指示（例`夜の東京の屋上`）を入力すると、元Promptへ追加指示を加えて読み込む
+- 設定を複製: Seedはランダムのまま設定だけ複製する
+- 比較対象へ追加: 比較画面の対象に加える
+
+追加した指示は履歴へ`derivationType`・`derivationInstruction`として保存します。
+
+## Checkpoint別LoRAセット
+
+`Checkpoint`欄の`LoRAセット`から、Checkpointごとによく使うLoRAと生成設定をまとめて保存できます。
+
+- 保存内容: Checkpoint / LoRA一覧と各weight / Trigger Words / Negative Words / Sampler / Scheduler / Noise Schedule / Steps / CFG / Width / Height / Hires設定 / Promptプリセット
+- 操作: 現在の設定を保存・読込・名前変更・複製・削除・自動適用ON/OFF
+- 自動適用は同じCheckpointにつき1つだけ有効です
+- Checkpoint切替時、自動適用ONのセットがあれば読み込み、`NoobAI 基本セットを適用しました`と通知します
+- 設定を編集していた場合は確認ダイアログを出し、勝手に上書きしません
+- 未導入のLoRAはスキップし、警告で知らせます
+
+保存先は`data/checkpoint-lora-sets.json`です。既存のCheckpointプロフィール・LoRAプロフィールとは別管理で、互換性に影響しません。
+
+## 生成失敗時の自動リカバリ
+
+VRAM不足・タイムアウト・接続断・一時的なHTTP 5xxを検出すると、安全側の設定で**1回だけ**再試行できます。
+
+```text
+VRAM不足のため、以下の設定で1回だけ再試行します
+- 候補枚数: 4 → 1
+- Hires倍率: 1.8 → 1.6
+- Hires Steps: 20 → 12
+[再試行する] [中止]
+```
+
+調整の優先順は 候補枚数を1へ → Hires倍率を0.2下げる → Hires Stepsを減らす → 解像度を64単位で縮小 → Hiresを無効化 です。
+タイムアウトや接続断は同じ設定のまま1回だけ再接続します。
+`生成設定`の`VRAM不足・タイムアウト時に、安全設定で1回だけ自動再試行する`をONにすると、確認なしで再試行します。
+再試行は必ず1回で打ち切り、無限に繰り返しません。履歴には`originalSettings`・`retrySettings`・`retryReason`・`retryCount`を保存します。
+OllamaのVRAM解放に失敗しても、ReForgeの生成が可能なら警告扱いで続行します。
+
+## バックアップ
+
+起動時に`data/`のデータ形式を確認し、必要ならschemaVersionを上げます。書き換える前に必ずバックアップを作成します。
+
+```text
+data/backups/history-20260726.json
+data/backups/lora-registry-20260726.json
+```
+
+同じ日に複数回移行しても、最初のバックアップは上書きしません。
+手動でバックアップしたい場合は、`data/`フォルダ（`history.json`・`lora-registry.json`・`experiments.json`・`checkpoint-lora-sets.json`）と`outputs/`をコピーしてください。
+`config.local.json`はGit管理外なので、更新前に別途控えておくと安全です。
 
 ## 設定
 
 接続先、Ollamaモデル、既定の生成設定は`config.json`で変更できます。
 個人PC固有のパスはGit管理されない`config.local.json`へ書くと、`config.json`を上書きせず設定できます。
+
+```json
+{
+  "lora": {
+    "installDir": "C:\\StableDiffusion\\ReForge\\models\\Lora"
+  }
+}
+```
+
+実際のパスはお使いの環境に合わせて変更してください。
+比較生成の最大枚数は`experiments.maxImages`（既定8、上限12）で変更できます。
 
 Ollamaはプロンプト変換後にアンロードするため、画像生成時にVRAMを占有し続けません。
 標準設定ではQwenのThinkingとJSON構造化出力を使わず、Illustrious/NoobAI向けの軽量なタグ変換だけを行います。Ollamaを5分、ReForgeを15分でタイムアウトします。

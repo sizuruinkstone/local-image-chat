@@ -107,6 +107,13 @@ const CIVITAI_NEW_FOLDER = NEW_FOLDER_VALUE;
 let updateInfo = null;
 let loraRootInfo = { root: "", source: "", label: "", warning: "" };
 let knownExperiments = [];
+let experimentParameters = {};
+let experimentLimits = { maxImages: 8, hardLimit: 12 };
+let activeExperimentId = null;
+let experimentPolling = false;
+let checkpointSets = [];
+// 「ユーザーが編集中か」を判定するための、最後に適用した設定のスナップショット。
+let appliedSettingsFingerprint = null;
 let historyEntries = [];
 let galleryView = localStorage.getItem("localImageChat.galleryView") === "experiments" ? "experiments" : "images";
 const compareSelection = new Map();
@@ -934,10 +941,6 @@ function checkpointIdentity(value) {
 }
 
 // ---- Checkpoint別LoRAセット ----
-
-let checkpointSets = [];
-// 「ユーザーが編集中か」を判定するための、最後に適用した設定のスナップショット。
-let appliedSettingsFingerprint = null;
 
 function settingsFingerprint() {
   return JSON.stringify({
@@ -2367,11 +2370,6 @@ async function hiresFromGallery(generation, image) {
 }
 
 // ---- パラメータ比較（実験） ----
-
-let experimentParameters = {};
-let experimentLimits = { maxImages: 8, hardLimit: 12 };
-let activeExperimentId = null;
-let experimentPolling = false;
 
 async function loadExperiments() {
   try {
@@ -3986,6 +3984,7 @@ function describeInstallResult(result, folder) {
 // 既に導入済みの場合に、何が起きるかを見せてから操作を選ばせる。
 function openDuplicateDialog(duplicate, folder) {
   const options = [];
+  let renameField = null;
   const existingLocation = duplicate.registeredVersion?.relativeName
     ?? duplicate.installed[0]?.relativeName
     ?? (duplicate.targetExists ? `${duplicate.targetFolder}/${duplicate.filename}` : "");
@@ -4065,8 +4064,7 @@ function openDuplicateDialog(duplicate, folder) {
       };
       for (const radio of options) radio.addEventListener("change", sync);
       sync();
-      body.dataset.ready = "true";
-      body.renameInput = renameInput;
+      renameField = renameInput;
     },
     actions: [
       { label: "キャンセル", value: null, variant: "secondary" },
@@ -4075,8 +4073,7 @@ function openDuplicateDialog(duplicate, folder) {
         primary: true,
         onSelect: async (close) => {
           const mode = options.find((radio) => radio.checked)?.value ?? "reuse";
-          const container = document.querySelector(".uiModalBody .duplicateRename input");
-          const filename = mode === "rename" ? (container?.value ?? "").trim() : "";
+          const filename = mode === "rename" ? (renameField?.value ?? "").trim() : "";
           if (mode === "rename" && !/\.safetensors$/i.test(filename)) {
             toast.warning("別名は .safetensors で終わるファイル名にしてください");
             return false;

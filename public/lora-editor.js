@@ -66,8 +66,10 @@ export function openLoraEditor({
       const folderLabel = document.createElement("span");
       folderLabel.textContent = "保存先（変更すると実ファイルを移動します）";
       fields.folder = document.createElement("select");
-      const folderValues = [...new Set([currentFolder, ...folders].filter(Boolean))];
-      for (const folder of folderValues) fields.folder.append(new Option(folder, folder));
+      // 現在地（ルート直下を含む）を必ず先頭へ入れ、既定で選択しておく。
+      // これを省くと、ルート直下のLoRAで意図しない移動が提案されてしまう。
+      const folderValues = [...new Set([currentFolder, ...folders])];
+      for (const folder of folderValues) fields.folder.append(new Option(folder || "（ルート直下）", folder));
       fields.folder.value = currentFolder;
       folderWrap.append(folderLabel, fields.folder);
       grid.append(folderWrap);
@@ -110,7 +112,9 @@ export function openLoraEditor({
           }
 
           const nextFolder = fields.folder.value;
-          if (nextFolder && nextFolder !== currentFolder) {
+          if (!nextFolder && nextFolder !== currentFolder) {
+            toast.warning("LoRAルート直下への移動には対応していません");
+          } else if (nextFolder && nextFolder !== currentFolder) {
             const confirmed = await confirmModal(
               `LoRAの保存先を「${currentFolder || "（ルート直下）"}」から「${nextFolder}」へ移動します。`,
               {
