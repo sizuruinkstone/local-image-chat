@@ -408,3 +408,13 @@ details label { margin-top: 13px; }
 .loraRootBadge.configured { border-color: rgba(185,255,77,.35); color: var(--accent); }
 .loraRootBadge.detected { border-color: rgba(255,196,77,.35); color: #ffc44d; }
 .loraRootBadge.missing { border-color: rgba(255,102,122,.4); color: var(--danger); }
+
+/* ===== LoRA重複確認 ===== */
+.duplicateChoices { display: grid; gap: 8px; margin: 12px 0 0; }
+.duplicateChoice { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: start; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: rgba(255,255,255,.03); cursor: pointer; }
+.duplicateChoice:hover { border-color: rgba(185,255,77,.35); }
+.duplicateChoice span { display: grid; gap: 3px; min-width: 0; }
+.duplicateChoice strong { font-size: 12px; }
+.duplicateChoice small { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.duplicateRename { display: grid; gap: 5px; margin-top: 12px; color: var(--muted); font-size: 11px; }
+.duplicateRename input { padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: rgba(255,255,255,.04); color: var(--text); font-size: 12px; }

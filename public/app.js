@@ -2851,6 +2851,7 @@ async function installCivitai() {
   const folder = selectedCivitaiFolder();
   if (!folder) {
     elements.civitaiStatus.textContent = "保存先を選択してください";
+    toast.warning("保存先を選択してください");
     return;
   }
   const category = elements.civitaiCategory.value;
@@ -2858,30 +2859,179 @@ async function installCivitai() {
   rememberSessionSecrets();
   elements.inspectCivitaiButton.disabled = true;
   elements.installCivitaiButton.disabled = true;
-  elements.civitaiStatus.textContent = "LoRAをダウンロード中です。大きいファイルは数分かかります…";
   try {
-    const result = await postJson("/api/civitai/install", {
+    elements.civitaiStatus.textContent = "既に導入済みかを確認中…";
+    const duplicate = await postJson("/api/civitai/check-duplicate", {
       url: elements.civitaiUrl.value.trim(),
       token: elements.civitaiToken.value,
       category,
       folder
     });
-    rememberCivitaiFolder(category, result.folder ?? folder);
-    let message = result.reusedExisting
-      ? `${inspectedCivitai.modelName}の既存ファイルを再利用し、分類・全衣装プリセットを更新しました。`
-      : `${inspectedCivitai.modelName}を保存先「${result.folder}」へ配置し、全衣装プリセットを登録しました。`;
-    if (result.existingInOtherFolder) {
-      message += `（既存ファイルは別フォルダにあります: ${result.existingInOtherFolder}。移動はしていません）`;
+
+    let choice = { mode: "auto", filename: "", confirmMove: false };
+    if (duplicate.duplicate) {
+      choice = await openDuplicateDialog(duplicate, folder);
+      if (!choice) {
+        elements.civitaiStatus.textContent = "インストールを中止しました。";
+        return;
+      }
     }
+
+    elements.civitaiStatus.textContent = choice.mode === "auto" || choice.mode === "rename"
+      ? "LoRAをダウンロード中です。大きいファイルは数分かかります…"
+      : "既存ファイルの情報を更新中…";
+    const result = await postJson("/api/civitai/install", {
+      url: elements.civitaiUrl.value.trim(),
+      token: elements.civitaiToken.value,
+      category,
+      folder,
+      mode: choice.mode,
+      filename: choice.filename,
+      confirmMove: choice.confirmMove
+    });
+    rememberCivitaiFolder(category, result.folder ?? folder);
+    const message = describeInstallResult(result, folder);
     elements.civitaiStatus.textContent = message;
+    toast.success(message);
     await loadCivitaiFolders();
     await loadLoras();
   } catch (error) {
     elements.civitaiStatus.textContent = error.message;
+    toast.error(error.message);
   } finally {
     elements.inspectCivitaiButton.disabled = false;
     elements.installCivitaiButton.disabled = false;
   }
+}
+
+function describeInstallResult(result, folder) {
+  const name = result.entry?.modelName ?? inspectedCivitai?.modelName ?? "LoRA";
+  if (result.mode === "move") {
+    return `${name}を「${result.folder}」へ移動しました（${result.movedFiles.length}ファイル）。`;
+  }
+  if (result.mode === "metadata") return `${name}のメタデータだけを更新しました。`;
+  if (result.reusedExisting) {
+    const suffix = result.existingInOtherFolder
+      ? `（既存ファイルは ${result.existingInOtherFolder} にあります。移動はしていません）`
+      : "";
+    return `${name}の既存ファイルを再利用し、分類・全衣装プリセットを更新しました。${suffix}`;
+  }
+  return `${name}を保存先「${result.folder ?? folder}」へ配置し、全衣装プリセットを登録しました。`;
+}
+
+// 既に導入済みの場合に、何が起きるかを見せてから操作を選ばせる。
+function openDuplicateDialog(duplicate, folder) {
+  const options = [];
+  const existingLocation = duplicate.registeredVersion?.relativeName
+    ?? duplicate.installed[0]?.relativeName
+    ?? (duplicate.targetExists ? `${duplicate.targetFolder}/${duplicate.filename}` : "");
+
+  return openModal({
+    title: "既に導入済みです",
+    subtitle: duplicate.metadata ? `${duplicate.metadata.modelName} / ${duplicate.metadata.versionName}` : "",
+    dismissValue: null,
+    build: (body) => {
+      const list = document.createElement("dl");
+      list.className = "detailFields";
+      const add = (label, value) => {
+        if (!value) return;
+        const dt = document.createElement("dt");
+        dt.textContent = label;
+        const dd = document.createElement("dd");
+        dd.textContent = value;
+        list.append(dt, dd);
+      };
+      add("保存場所", existingLocation ? `${existingLocation}.safetensors` : "不明");
+      add("登録バージョン", duplicate.registeredVersion?.versionName);
+      add("Civitaiバージョン", duplicate.metadata?.versionName);
+      if (duplicate.registeredModelVersions?.length) {
+        add("同じモデルの別バージョン", duplicate.registeredModelVersions
+          .map((item) => item.versionName || item.relativeName).join(" / "));
+      }
+      if (duplicate.installedElsewhere?.length) {
+        add("別フォルダの同名ファイル", duplicate.installedElsewhere.map((item) => item.folder || "（ルート直下）").join(" / "));
+      }
+      add("今回の保存先", `${folder}/${duplicate.filename}`);
+      body.append(list);
+
+      const choices = document.createElement("div");
+      choices.className = "duplicateChoices";
+      const definitions = [
+        { mode: "reuse", label: "既存を使う", hint: "ダウンロードせず、登録情報だけ現在の保存場所へ紐付けます。" },
+        { mode: "metadata", label: "メタデータだけ更新", hint: "ファイルは触らず、Trigger Wordsや推奨Weightなどを更新します。" },
+        { mode: "rename", label: "別名で保存", hint: `新しいファイル名でダウンロードします。` },
+        ...(duplicate.movableSource
+          ? [{ mode: "move", label: "指定フォルダへ移動", hint: `既存ファイルを ${folder} へ移動します（確認あり）。` }]
+          : [])
+      ];
+      for (const [index, definition] of definitions.entries()) {
+        const row = document.createElement("label");
+        row.className = "duplicateChoice";
+        const radio = document.createElement("input");
+        radio.type = "radio";
+        radio.name = "duplicateMode";
+        radio.value = definition.mode;
+        radio.checked = index === 0;
+        if (index === 0) radio.setAttribute("data-autofocus", "true");
+        const text = document.createElement("span");
+        const strong = document.createElement("strong");
+        strong.textContent = definition.label;
+        const hint = document.createElement("small");
+        hint.textContent = definition.hint;
+        text.append(strong, hint);
+        row.append(radio, text);
+        choices.append(row);
+        options.push(radio);
+      }
+      body.append(choices);
+
+      const renameRow = document.createElement("label");
+      renameRow.className = "duplicateRename hidden";
+      const renameLabel = document.createElement("span");
+      renameLabel.textContent = "別名で保存するファイル名";
+      const renameInput = document.createElement("input");
+      renameInput.type = "text";
+      renameInput.value = duplicate.suggestedFilename ?? "";
+      renameRow.append(renameLabel, renameInput);
+      body.append(renameRow);
+
+      const sync = () => {
+        const selected = options.find((radio) => radio.checked)?.value;
+        renameRow.classList.toggle("hidden", selected !== "rename");
+      };
+      for (const radio of options) radio.addEventListener("change", sync);
+      sync();
+      body.dataset.ready = "true";
+      body.renameInput = renameInput;
+    },
+    actions: [
+      { label: "キャンセル", value: null, variant: "secondary" },
+      {
+        label: "実行する",
+        primary: true,
+        onSelect: async (close) => {
+          const mode = options.find((radio) => radio.checked)?.value ?? "reuse";
+          const container = document.querySelector(".uiModalBody .duplicateRename input");
+          const filename = mode === "rename" ? (container?.value ?? "").trim() : "";
+          if (mode === "rename" && !/\.safetensors$/i.test(filename)) {
+            toast.warning("別名は .safetensors で終わるファイル名にしてください");
+            return false;
+          }
+          if (mode === "move") {
+            const confirmed = await confirmModal(
+              `既存ファイルを ${folder} へ移動します。関連する preview 画像やjsonも一緒に移動します。よろしいですか？`,
+              { title: "移動の確認", confirmText: "移動する", danger: true }
+            );
+            if (!confirmed) return false;
+            close({ mode, filename: "", confirmMove: true });
+            return;
+          }
+          close({ mode, filename, confirmMove: false });
+        },
+        keepOpen: true
+      }
+    ]
+  }).promise;
 }
 
 async function refreshCivitaiRegistrations() {

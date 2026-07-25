@@ -185,6 +185,19 @@ app.get("/api/civitai/install-folders", async (_request, response) => {
   }
 });
 
+app.post("/api/civitai/check-duplicate", async (request, response) => {
+  try {
+    response.json(await civitai.checkDuplicate({
+      url: requireText(request.body.url, "Civitai URL"),
+      token: sanitizeSecret(request.body.token),
+      category: textOrDefault(request.body.category, "style"),
+      folder: typeof request.body.folder === "string" ? request.body.folder : ""
+    }));
+  } catch (error) {
+    response.status(500).json({ error: readableError(error) });
+  }
+});
+
 app.post("/api/civitai/install", async (request, response) => {
   try {
     const result = await civitai.install({
@@ -192,7 +205,10 @@ app.post("/api/civitai/install", async (request, response) => {
       token: sanitizeSecret(request.body.token),
       category: textOrDefault(request.body.category, "style"),
       folder: typeof request.body.folder === "string" ? request.body.folder : "",
-      overwrite: request.body.overwrite === true
+      overwrite: request.body.overwrite === true,
+      mode: validateInstallMode(request.body.mode),
+      filename: typeof request.body.filename === "string" ? request.body.filename : "",
+      confirmMove: request.body.confirmMove === true
     });
     const loras = await refreshLoras(config.reforge);
     response.json({
@@ -503,6 +519,12 @@ function validateSettings(input) {
 
 function passthroughText(value, max = 400) {
   return typeof value === "string" ? value.slice(0, max) : "";
+}
+
+const INSTALL_MODES = ["auto", "reuse", "metadata", "rename", "move"];
+
+function validateInstallMode(value) {
+  return INSTALL_MODES.includes(value) ? value : "auto";
 }
 
 function validateGenerationMode(value) {

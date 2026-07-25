@@ -7,6 +7,8 @@ import { JsonStore } from "./json-store.js";
 import { parseRecommendedWeight } from "./lora-weight.js";
 import { normalizeInstallFolder, resolveInstallTarget } from "./lora-folder.js";
 import { AMBIGUOUS_ROOT_MESSAGE, resolveLoraRoot } from "./lora-root.js";
+import { moveLoraFileSet, stripLoraExtension, suggestAlternateFilename } from "./lora-files.js";
+import { mergeRegistryEntry, normalizeSubcategory, toLegacyCategory } from "./lora-registry.js";
 import { fetchLoraDirectory } from "./reforge.js";
 
 const CIVITAI_API = "https://civitai.com/api/v1";
@@ -40,6 +42,36 @@ export function createCivitaiService({
     return { ...resolveLoraRoot({ installDir: configured, reforgeLoraDir, rawLoras: loras }), rawLoras: loras };
   }
 
+  // 保存先・ファイル名を決定する共通処理。ファイルには触れない。
+  async function prepareInstall({ metadata, category, folder, requestedFilename = "", allowMissingRoot = false }) {
+    const defaultFolder = CATEGORY_FOLDERS[category];
+    if (!defaultFolder) throw new Error("LoRAの分類が不正です");
+    const rawLoras = await fetchRawLoras(reforgeConfig).catch((error) => {
+      if (allowMissingRoot) return [];
+      throw error;
+    });
+    const { root: installRoot } = await resolveRoot(rawLoras);
+    if (!installRoot && !allowMissingRoot) throw new Error(AMBIGUOUS_ROOT_MESSAGE);
+
+    // 保存先フォルダ: 指定があれば正規化・検証、なければ分類デフォルト。
+    // サーバー側でも必ず検証し、LoRAルート外・パストラバーサルを拒否する。
+    const requestedFolder = typeof folder === "string" && folder.trim() ? folder : defaultFolder;
+    const relativeFolder = normalizeInstallFolder(requestedFolder);
+    const destinationDir = installRoot
+      ? resolveInstallTarget(installRoot, relativeFolder).absolute
+      : "";
+    const filename = sanitizeFilename(requestedFilename || metadata.file.name);
+    return {
+      installRoot,
+      rawLoras,
+      relativeFolder,
+      destinationDir,
+      filename,
+      destinationPath: destinationDir ? path.join(destinationDir, filename) : "",
+      metadata
+    };
+  }
+
   return {
     inspect: (url, token) => inspectCivitai(url, token),
 
@@ -49,97 +81,101 @@ export function createCivitaiService({
       return { root, source, label, warning, configured: source === "config" };
     },
 
-    async install({ url, token, category = "style", folder = "", overwrite = false }) {
+    // インストール前の重複確認。ファイルは一切変更しない。
+    async checkDuplicate({ url, token, category = "style", folder = "" }) {
+      const metadata = await inspectCivitai(url, token);
+      const context = await prepareInstall({ metadata, category, folder, allowMissingRoot: true });
+      return { metadata, ...await describeDuplicates(context, await registry.read()) };
+    },
+
+    // mode: auto | reuse | metadata | rename | move
+    async install({
+      url,
+      token,
+      category = "style",
+      folder = "",
+      overwrite = false,
+      mode = "auto",
+      filename: requestedFilename = "",
+      confirmMove = false
+    }) {
       const metadata = await inspectCivitai(url, token);
       if (metadata.modelType.toLowerCase() !== "lora") {
         throw new Error(`このモデルはLoRAではありません（種類: ${metadata.modelType}）`);
       }
-      const defaultFolder = CATEGORY_FOLDERS[category];
-      if (!defaultFolder) throw new Error("LoRAの分類が不正です");
-
-      const rawLoras = await fetchRawLoras(reforgeConfig);
-      const { root: installRoot } = await resolveRoot(rawLoras);
-      // 安全に特定できない場合は自動インストールを行わない（誤った場所へフォルダを作らない）。
-      if (!installRoot) throw new Error(AMBIGUOUS_ROOT_MESSAGE);
-
-      // 保存先フォルダ: 指定があれば正規化・検証、なければ分類デフォルト。
-      // サーバー側でも必ず検証し、LoRAルート外・パストラバーサルを拒否する。
-      const requestedFolder = typeof folder === "string" && folder.trim() ? folder : defaultFolder;
-      const { absolute: destinationDir, relative: relativeFolder } = resolveInstallTarget(installRoot, requestedFolder);
-      const filename = sanitizeFilename(metadata.file.name);
-      const destinationPath = path.join(destinationDir, filename);
-      const baseName = filename.replace(/\.(?:safetensors|ckpt|pt)$/i, "");
-
+      const context = await prepareInstall({ metadata, category, folder, requestedFilename });
+      const { installRoot, destinationDir, relativeFolder, filename, destinationPath, rawLoras } = context;
       const currentRegistry = await registry.read();
-      const existingRegistration = currentRegistry.entries.find((item) =>
-        item.id === `${metadata.modelId}:${metadata.versionId}`
-      );
-      const targetExists = await exists(destinationPath);
-      // 同名ファイルが別フォルダに既にある場合は、勝手に移動せずその場所を再利用する。
-      const otherLora = rawLoras.find((lora) => sameLoraFilename(lora, filename));
-      const otherFolder = otherLora ? loraFolderOf(otherLora) : "";
-      const inOtherFolder = Boolean(otherLora) && !targetExists
-        && otherFolder.toLowerCase() !== relativeFolder.toLowerCase();
+      const duplicates = await describeDuplicates(context, currentRegistry);
+      const existingRegistration = duplicates.registeredVersion;
+      const otherLora = duplicates.installedElsewhere[0] ?? null;
+      const targetExists = duplicates.targetExists;
+
       const alreadyInstalled = Boolean(existingRegistration) || targetExists || Boolean(otherLora);
-      const reusedExisting = !overwrite && alreadyInstalled;
-
-      let relativeName = `${relativeFolder}/${baseName}`;
+      let relativeName = `${relativeFolder}/${stripLoraExtension(filename)}`;
       let existingInOtherFolder = null;
-      if (reusedExisting && inOtherFolder) {
-        relativeName = loraRelativeName(otherLora);
-        existingInOtherFolder = otherFolder;
-      }
+      let reusedExisting = false;
+      let movedFiles = [];
 
-      if (!reusedExisting) {
-        await fsp.mkdir(destinationDir, { recursive: true });
-        const temporaryPath = `${destinationPath}.${process.pid}.download`;
-        try {
-          const response = await fetch(metadata.file.downloadUrl, {
-            headers: civitaiHeaders(token, "application/octet-stream"),
-            signal: AbortSignal.timeout(60 * 60 * 1000)
-          });
-          if (!response.ok || !response.body) {
-            const detail = await response.text().catch(() => "");
-            throw new Error(`Civitaiダウンロード HTTP ${response.status}: ${detail.slice(0, 300)}`);
-          }
-          await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(temporaryPath));
-          await fsp.rename(temporaryPath, destinationPath);
-        } catch (error) {
-          await fsp.rm(temporaryPath, { force: true }).catch(() => {});
-          throw error;
+      if (mode === "metadata" || mode === "reuse") {
+        if (!alreadyInstalled) throw new Error("既存のLoRAが見つからないため、ダウンロードを選んでください");
+        reusedExisting = true;
+        const existingRelative = existingRegistration?.relativeName
+          ?? (otherLora ? otherLora.relativeName : "");
+        if (existingRelative) {
+          relativeName = existingRelative;
+          const existingFolder = relativeName.includes("/") ? relativeName.slice(0, relativeName.lastIndexOf("/")) : "";
+          if (existingFolder.toLowerCase() !== relativeFolder.toLowerCase()) existingInOtherFolder = existingFolder;
+        }
+      } else if (mode === "move") {
+        if (!confirmMove) throw new Error("移動には確認が必要です");
+        const source = duplicates.movableSource;
+        if (!source) throw new Error("移動できる既存ファイルが見つかりません");
+        const result = await moveLoraFileSet({
+          sourceDir: path.dirname(source.absolutePath),
+          baseName: path.basename(source.absolutePath),
+          destinationDir,
+          newBaseName: stripLoraExtension(filename)
+        });
+        movedFiles = result.moved;
+        reusedExisting = true;
+      } else {
+        // rename / auto: 既存があり上書き指定がなければ再利用、それ以外はダウンロード。
+        reusedExisting = mode !== "rename" && !overwrite && alreadyInstalled;
+        if (reusedExisting && otherLora && !targetExists) {
+          relativeName = otherLora.relativeName;
+          existingInOtherFolder = otherLora.folder;
+        }
+        if (!reusedExisting) {
+          if (!installRoot) throw new Error(AMBIGUOUS_ROOT_MESSAGE);
+          await downloadLoraFile(metadata, token, destinationDir, destinationPath);
         }
       }
 
-      const entry = {
-        id: `${metadata.modelId}:${metadata.versionId}`,
-        modelId: metadata.modelId,
-        versionId: metadata.versionId,
-        modelName: metadata.modelName,
-        versionName: metadata.versionName,
-        baseModel: metadata.baseModel,
-        sourceUrl: metadata.sourceUrl,
-        filename,
-        relativeName,
-        category: category === "character" ? "character" : "direction",
-        subcategory: category,
-        triggerWords: metadata.trainedWords.join(", "),
-        outfitPresets: metadata.outfitPresets,
-        recommendedWeight: metadata.recommendedWeight,
-        recommendedWeightMin: metadata.recommendedWeightMin,
-        recommendedWeightMax: metadata.recommendedWeightMax,
-        recommendedWeightLabel: metadata.recommendedWeightLabel,
-        recommendedWeightSource: metadata.recommendedWeightSource,
-        previewUrl: metadata.previewUrl,
-        installedAt: new Date().toISOString()
-      };
+      const incoming = buildRegistryEntry(metadata, { filename, relativeName, category });
+      const previous = currentRegistry.entries.find((item) =>
+        item.id === incoming.id || normalizeName(item.relativeName) === normalizeName(relativeName)
+      );
+      const entry = mergeRegistryEntry(previous, incoming);
 
       await registry.update((data) => {
-        data.entries = data.entries.filter((item) => item.id !== entry.id && item.relativeName !== entry.relativeName);
+        data.entries = data.entries.filter((item) =>
+          item.id !== entry.id && normalizeName(item.relativeName) !== normalizeName(entry.relativeName)
+        );
         data.entries.unshift(entry);
         return data;
       });
 
-      return { metadata, entry, destinationPath, reusedExisting, folder: relativeFolder, existingInOtherFolder };
+      return {
+        metadata,
+        entry,
+        destinationPath,
+        reusedExisting,
+        mode,
+        movedFiles,
+        folder: relativeFolder,
+        existingInOtherFolder
+      };
     },
 
     // foldersは「実在するフォルダ」だけを返す。分類デフォルト（Characters等）は
@@ -384,6 +420,120 @@ export function deriveCivitaiOutfitPresets(trainedWords, description = "") {
   }
 
   return presets;
+}
+
+// インストール前後で共有する重複判定。modelId/versionId・ファイル名・
+// registryのrelativeName・ReForgeのLoRA一覧・保存先の実ファイルを突き合わせる。
+async function describeDuplicates(context, registryData) {
+  const { installRoot, rawLoras, relativeFolder, filename, destinationPath, metadata } = context;
+  const entries = Array.isArray(registryData?.entries) ? registryData.entries : [];
+  const targetExists = destinationPath ? await exists(destinationPath) : false;
+
+  const versionKey = `${metadata.modelId}:${metadata.versionId}`;
+  const registeredVersion = entries.find((item) => String(item.id) === versionKey) ?? null;
+  const registeredModelVersions = entries.filter((item) =>
+    item !== registeredVersion && Number(item.modelId) === Number(metadata.modelId)
+  );
+  const registeredFilenames = entries.filter((item) =>
+    item !== registeredVersion
+    && !registeredModelVersions.includes(item)
+    && normalizeName(item.filename) === normalizeName(filename)
+  );
+
+  const installed = rawLoras
+    .filter((lora) => sameLoraFilename(lora, filename))
+    .map((lora) => ({
+      name: lora.name,
+      relativeName: loraRelativeName(lora),
+      folder: loraFolderOf(lora),
+      path: typeof lora.path === "string" ? lora.path : ""
+    }));
+  const sameFolder = relativeFolder.toLowerCase();
+  const installedElsewhere = installed.filter((item) => item.folder.toLowerCase() !== sameFolder);
+
+  const taken = [
+    ...entries.map((item) => item.filename),
+    ...rawLoras.map((lora) => `${loraRelativeName(lora).split("/").at(-1)}.safetensors`)
+  ].filter(Boolean);
+
+  return {
+    duplicate: Boolean(registeredVersion || targetExists || installed.length),
+    installRoot,
+    filename,
+    targetFolder: relativeFolder,
+    targetPath: destinationPath,
+    targetExists,
+    registeredVersion,
+    registeredModelVersions,
+    registeredFilenames,
+    installed,
+    installedElsewhere,
+    movableSource: resolveMovableSource({ installRoot, installed, registeredVersion, destinationPath }),
+    suggestedFilename: suggestAlternateFilename(filename, { versionName: metadata.versionName, taken })
+  };
+}
+
+// 「指定フォルダへ移動」で動かせる既存ファイルの絶対パスを求める。
+function resolveMovableSource({ installRoot, installed, registeredVersion, destinationPath }) {
+  const candidates = [];
+  for (const item of installed) {
+    if (item.path && path.isAbsolute(item.path)) candidates.push({ absolutePath: item.path, relativeName: item.relativeName });
+    else if (installRoot && item.relativeName) {
+      candidates.push({ absolutePath: path.join(installRoot, `${item.relativeName}.safetensors`), relativeName: item.relativeName });
+    }
+  }
+  if (!candidates.length && installRoot && registeredVersion?.relativeName) {
+    candidates.push({
+      absolutePath: path.join(installRoot, `${registeredVersion.relativeName}.safetensors`),
+      relativeName: registeredVersion.relativeName
+    });
+  }
+  return candidates.find((item) => path.resolve(item.absolutePath) !== path.resolve(destinationPath || "")) ?? null;
+}
+
+function buildRegistryEntry(metadata, { filename, relativeName, category }) {
+  return {
+    id: `${metadata.modelId}:${metadata.versionId}`,
+    modelId: metadata.modelId,
+    versionId: metadata.versionId,
+    modelName: metadata.modelName,
+    versionName: metadata.versionName,
+    baseModel: metadata.baseModel,
+    sourceUrl: metadata.sourceUrl,
+    filename,
+    relativeName,
+    category: toLegacyCategory(category),
+    subcategory: normalizeSubcategory(category),
+    triggerWords: metadata.trainedWords.join(", "),
+    outfitPresets: metadata.outfitPresets,
+    recommendedWeight: metadata.recommendedWeight,
+    recommendedWeightMin: metadata.recommendedWeightMin,
+    recommendedWeightMax: metadata.recommendedWeightMax,
+    recommendedWeightLabel: metadata.recommendedWeightLabel,
+    recommendedWeightSource: metadata.recommendedWeightSource,
+    previewUrl: metadata.previewUrl,
+    installedAt: new Date().toISOString()
+  };
+}
+
+async function downloadLoraFile(metadata, token, destinationDir, destinationPath) {
+  await fsp.mkdir(destinationDir, { recursive: true });
+  const temporaryPath = `${destinationPath}.${process.pid}.download`;
+  try {
+    const response = await fetch(metadata.file.downloadUrl, {
+      headers: civitaiHeaders(token, "application/octet-stream"),
+      signal: AbortSignal.timeout(60 * 60 * 1000)
+    });
+    if (!response.ok || !response.body) {
+      const detail = await response.text().catch(() => "");
+      throw new Error(`Civitaiダウンロード HTTP ${response.status}: ${detail.slice(0, 300)}`);
+    }
+    await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(temporaryPath));
+    await fsp.rename(temporaryPath, destinationPath);
+  } catch (error) {
+    await fsp.rm(temporaryPath, { force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 async function fetchRawLoras(config) {
