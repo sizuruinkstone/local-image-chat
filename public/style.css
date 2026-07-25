@@ -49,7 +49,15 @@ h1 { margin: 0; font-size: clamp(32px, 5vw, 60px); letter-spacing: -.045em; }
 .layout { display: grid; grid-template-columns: minmax(660px, 1.38fr) minmax(460px, 1fr); gap: 14px; }
 .panel { border: 1px solid var(--line); border-radius: 20px; background: var(--panel); box-shadow: 0 18px 70px rgba(0,0,0,.28); backdrop-filter: blur(20px); }
 .controls { padding: 22px; }
-.result { position: relative; min-height: 650px; padding: 16px; display: grid; place-items: center; overflow: hidden; }
+.result { position: relative; min-height: 650px; padding: 16px; display: flex; flex-direction: column; overflow: hidden; }
+.resultTabs { display: flex; gap: 8px; margin-bottom: 14px; }
+.resultTab { flex: 1 1 0; min-width: 0; padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); background: rgba(255,255,255,.04); font-size: 12px; font-weight: 700; cursor: pointer; }
+.resultTab.active { border-color: rgba(185,255,77,.42); color: var(--accent); background: rgba(185,255,77,.09); }
+.tabPanel { flex: 1 1 auto; min-height: 0; width: 100%; }
+#resultTab { display: grid; place-items: center; }
+#galleryTab { overflow-y: auto; max-height: 74vh; }
+#galleryTab .sectionHeading { position: sticky; top: 0; z-index: 1; padding-bottom: 8px; background: var(--panel); }
+#galleryTab .historyGrid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
 
 label { display: block; margin: 0 0 8px; color: #d9dce3; font-size: 13px; font-weight: 700; }
 textarea, input, select {
