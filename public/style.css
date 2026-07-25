@@ -230,6 +230,7 @@ details label { margin-top: 13px; }
 .integrationPreview img { width: 72px; height: 92px; border-radius: 8px; object-fit: cover; background: #050506; }
 .integrationPreview strong, .integrationPreview span { display: block; }
 .integrationPreview span { margin-top: 4px; color: var(--muted); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+.integrationPreview .civitaiPreviewLocation { color: var(--accent); font-weight: 700; }
 
 .emptyState { text-align: center; color: var(--muted); }
 .spark { color: var(--accent); font-size: 52px; }

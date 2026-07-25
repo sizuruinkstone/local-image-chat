@@ -5,6 +5,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { JsonStore } from "./json-store.js";
 import { parseRecommendedWeight } from "./lora-weight.js";
+import { normalizeInstallFolder, resolveInstallTarget } from "./lora-folder.js";
 
 const CIVITAI_API = "https://civitai.com/api/v1";
 const CATEGORY_FOLDERS = {
@@ -28,13 +29,13 @@ export function createCivitaiService({
   return {
     inspect: (url, token) => inspectCivitai(url, token),
 
-    async install({ url, token, category = "style", overwrite = false }) {
+    async install({ url, token, category = "style", folder = "", overwrite = false }) {
       const metadata = await inspectCivitai(url, token);
       if (metadata.modelType.toLowerCase() !== "lora") {
         throw new Error(`このモデルはLoRAではありません（種類: ${metadata.modelType}）`);
       }
-      const folderName = CATEGORY_FOLDERS[category];
-      if (!folderName) throw new Error("LoRAの分類が不正です");
+      const defaultFolder = CATEGORY_FOLDERS[category];
+      if (!defaultFolder) throw new Error("LoRAの分類が不正です");
 
       const rawLoras = await fetchRawLoras(reforgeConfig);
       const installRoot = resolveLoraInstallRoot(loraConfig?.installDir, rawLoras);
@@ -42,21 +43,36 @@ export function createCivitaiService({
         throw new Error("LoRA保存先を自動検出できません。config.jsonのlora.installDirへReForgeのLoRAフォルダを設定してください");
       }
 
-      const destinationDir = path.join(installRoot, folderName);
+      // 保存先フォルダ: 指定があれば正規化・検証、なければ分類デフォルト。
+      // サーバー側でも必ず検証し、LoRAルート外・パストラバーサルを拒否する。
+      const requestedFolder = typeof folder === "string" && folder.trim() ? folder : defaultFolder;
+      const { absolute: destinationDir, relative: relativeFolder } = resolveInstallTarget(installRoot, requestedFolder);
       const filename = sanitizeFilename(metadata.file.name);
       const destinationPath = path.join(destinationDir, filename);
-      await fsp.mkdir(destinationDir, { recursive: true });
+      const baseName = filename.replace(/\.(?:safetensors|ckpt|pt)$/i, "");
 
       const currentRegistry = await registry.read();
       const existingRegistration = currentRegistry.entries.find((item) =>
         item.id === `${metadata.modelId}:${metadata.versionId}`
       );
-      const alreadyInstalled = Boolean(existingRegistration)
-        || await exists(destinationPath)
-        || rawLoras.some((lora) => sameLoraFilename(lora, filename));
+      const targetExists = await exists(destinationPath);
+      // 同名ファイルが別フォルダに既にある場合は、勝手に移動せずその場所を再利用する。
+      const otherLora = rawLoras.find((lora) => sameLoraFilename(lora, filename));
+      const otherFolder = otherLora ? loraFolderOf(otherLora) : "";
+      const inOtherFolder = Boolean(otherLora) && !targetExists
+        && otherFolder.toLowerCase() !== relativeFolder.toLowerCase();
+      const alreadyInstalled = Boolean(existingRegistration) || targetExists || Boolean(otherLora);
       const reusedExisting = !overwrite && alreadyInstalled;
 
+      let relativeName = `${relativeFolder}/${baseName}`;
+      let existingInOtherFolder = null;
+      if (reusedExisting && inOtherFolder) {
+        relativeName = loraRelativeName(otherLora);
+        existingInOtherFolder = otherFolder;
+      }
+
       if (!reusedExisting) {
+        await fsp.mkdir(destinationDir, { recursive: true });
         const temporaryPath = `${destinationPath}.${process.pid}.download`;
         try {
           const response = await fetch(metadata.file.downloadUrl, {
@@ -75,7 +91,6 @@ export function createCivitaiService({
         }
       }
 
-      const relativeName = `${folderName}/${filename.replace(/\.(?:safetensors|ckpt|pt)$/i, "")}`;
       const entry = {
         id: `${metadata.modelId}:${metadata.versionId}`,
         modelId: metadata.modelId,
@@ -105,7 +120,42 @@ export function createCivitaiService({
         return data;
       });
 
-      return { metadata, entry, destinationPath, reusedExisting };
+      return { metadata, entry, destinationPath, reusedExisting, folder: relativeFolder, existingInOtherFolder };
+    },
+
+    async listInstallFolders() {
+      const rawLoras = await fetchRawLoras(reforgeConfig).catch(() => []);
+      const installRoot = resolveLoraInstallRoot(loraConfig?.installDir, rawLoras);
+      const set = new Set(Object.values(CATEGORY_FOLDERS));
+      for (const lora of rawLoras) {
+        const folder = loraFolderOf(lora);
+        if (folder) set.add(folder);
+      }
+      if (installRoot) {
+        for (const dir of await listSubdirectories(installRoot)) set.add(dir);
+      }
+      const seen = new Set();
+      const folders = [];
+      const normalized = [...set]
+        .map((value) => String(value).replaceAll("\\", "/").replace(/^\/+|\/+$/g, ""))
+        .filter(Boolean)
+        .sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" }));
+      for (const value of normalized) {
+        const key = value.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        folders.push(value);
+      }
+      return {
+        folders,
+        defaults: {
+          character: CATEGORY_FOLDERS.character,
+          style: CATEGORY_FOLDERS.style,
+          body: CATEGORY_FOLDERS.body,
+          pose: CATEGORY_FOLDERS.pose
+        },
+        installDirConfigured: Boolean(installRoot)
+      };
     },
 
     async refreshRegistrations(token = "") {
@@ -566,4 +616,40 @@ async function exists(filePath) {
   } catch {
     return false;
   }
+}
+
+// ReForgeのLoRA名（サブフォルダ込み）から拡張子を除いた相対名を得る。
+function loraRelativeName(lora) {
+  return String(lora?.name ?? "")
+    .replaceAll("\\", "/")
+    .replace(/^\/+/, "")
+    .replace(/\.(?:safetensors|ckpt|pt)$/i, "");
+}
+
+function loraFolderOf(lora) {
+  const relative = loraRelativeName(lora);
+  const index = relative.lastIndexOf("/");
+  return index > 0 ? relative.slice(0, index) : "";
+}
+
+// LoRAルート配下のサブフォルダを相対パス（/区切り）で列挙する。空フォルダも含む。
+async function listSubdirectories(root, maxDepth = 4) {
+  const results = [];
+  async function walk(dir, prefix, depth) {
+    if (depth > maxDepth) return;
+    let entries;
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+      const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+      results.push(relative);
+      await walk(path.join(dir, entry.name), relative, depth + 1);
+    }
+  }
+  await walk(root, "", 1);
+  return results;
 }

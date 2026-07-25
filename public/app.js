@@ -44,6 +44,7 @@ const elements = Object.fromEntries(
     "clearPromptPartsButton", "promptPartsSummary", "compositionLockStatus",
     "unlockCompositionButton", "lockCompositionButton", "favoriteFinalButton",
     "reuseFinalButton", "civitaiDetails", "civitaiUrl", "civitaiCategory",
+    "civitaiFolder", "civitaiNewFolder", "civitaiNewFolderRow",
     "civitaiToken", "inspectCivitaiButton", "installCivitaiButton",
     "refreshCivitaiRegistrationsButton",
     "civitaiPreview", "civitaiStatus", "updateStatusButton", "updateDetails",
@@ -75,6 +76,9 @@ let finalGeneration = null;
 let preferenceData = { favoriteCount: 0, topTags: [], topLoras: [], topSettings: [] };
 let preferenceBoosts = [];
 let inspectedCivitai = null;
+let civitaiFolders = [];
+let civitaiFolderDefaults = { character: "Characters", style: "Style", body: "Body", pose: "Pose" };
+const CIVITAI_NEW_FOLDER = "__new__";
 let updateInfo = null;
 let installedCheckpoints = [];
 let activeCheckpoint = null;
@@ -106,7 +110,7 @@ loadImg2ImgPreferences();
 loadInpaintPreferences();
 loadPromptPartSelections();
 restoreSessionSecrets();
-await Promise.all([checkHealth(), loadCheckpoints(), loadLoras(), loadHistory()]);
+await Promise.all([checkHealth(), loadCheckpoints(), loadLoras(), loadHistory(), loadCivitaiFolders()]);
 setGenerationMode("txt2img");
 updateGenerateButton();
 
@@ -210,6 +214,9 @@ elements.civitaiUrl.addEventListener("input", () => {
   inspectedCivitai = null;
   elements.installCivitaiButton.disabled = true;
 });
+elements.civitaiCategory.addEventListener("change", () => applyCategoryFolder(elements.civitaiCategory.value));
+elements.civitaiFolder.addEventListener("change", onCivitaiFolderChange);
+elements.civitaiNewFolder.addEventListener("input", refreshCivitaiFolderHint);
 elements.checkUpdateButton.addEventListener("click", checkForUpdate);
 elements.applyUpdateButton.addEventListener("click", applyUpdate);
 elements.updateStatusButton.addEventListener("click", () => {
@@ -2705,13 +2712,90 @@ function renderCivitaiPreview(metadata) {
     : "衣装プリセット候補: 1種類";
   const filename = document.createElement("span");
   filename.textContent = metadata.file.name;
-  text.append(heading, base, triggers, outfits, filename);
+  const location = document.createElement("span");
+  location.className = "civitaiPreviewLocation";
+  const categoryLabel = elements.civitaiCategory.selectedOptions[0]?.textContent ?? elements.civitaiCategory.value;
+  const folder = selectedCivitaiFolder();
+  location.textContent = `分類: ${categoryLabel} ／ 保存先: ${folder || "保存先を選択してください"}`;
+  text.append(heading, base, triggers, outfits, filename, location);
   elements.civitaiPreview.append(text);
   elements.civitaiPreview.classList.remove("hidden");
 }
 
+async function loadCivitaiFolders() {
+  try {
+    const data = await getJson("/api/civitai/install-folders");
+    civitaiFolders = Array.isArray(data.folders) ? data.folders : [];
+    if (data.defaults && typeof data.defaults === "object") civitaiFolderDefaults = data.defaults;
+  } catch {
+    civitaiFolders = [...new Set(Object.values(civitaiFolderDefaults))];
+  }
+  populateCivitaiFolderSelect();
+  applyCategoryFolder(elements.civitaiCategory.value);
+}
+
+function populateCivitaiFolderSelect() {
+  const select = elements.civitaiFolder;
+  const current = select.value;
+  select.replaceChildren();
+  for (const folder of civitaiFolders) select.append(new Option(folder, folder));
+  select.append(new Option("新しいフォルダを作成", CIVITAI_NEW_FOLDER));
+  if ([...select.options].some((option) => option.value === current)) select.value = current;
+}
+
+function loadCivitaiFolderMemory() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem("localImageChat.civitaiInstallFolder") ?? "{}");
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function rememberCivitaiFolder(category, folder) {
+  if (!folder) return;
+  const memory = loadCivitaiFolderMemory();
+  memory[category] = folder;
+  localStorage.setItem("localImageChat.civitaiInstallFolder", JSON.stringify(memory));
+}
+
+// 分類に応じた保存先へ切り替える。前回手動選択（記憶）があればそれを、なければ分類デフォルトを使う。
+// 記憶先が存在しない場合は分類デフォルトへ戻す。
+function applyCategoryFolder(category) {
+  const options = [...elements.civitaiFolder.options].map((option) => option.value);
+  const remembered = loadCivitaiFolderMemory()[category];
+  const fallback = civitaiFolderDefaults[category] ?? civitaiFolders[0] ?? "";
+  const target = remembered && options.includes(remembered) ? remembered : fallback;
+  elements.civitaiFolder.value = options.includes(target) ? target : CIVITAI_NEW_FOLDER;
+  refreshCivitaiFolderHint();
+}
+
+function onCivitaiFolderChange() {
+  if (elements.civitaiFolder.value !== CIVITAI_NEW_FOLDER) {
+    rememberCivitaiFolder(elements.civitaiCategory.value, elements.civitaiFolder.value);
+  }
+  refreshCivitaiFolderHint();
+}
+
+function selectedCivitaiFolder() {
+  return elements.civitaiFolder.value === CIVITAI_NEW_FOLDER
+    ? elements.civitaiNewFolder.value.trim()
+    : elements.civitaiFolder.value;
+}
+
+function refreshCivitaiFolderHint() {
+  elements.civitaiNewFolderRow.classList.toggle("hidden", elements.civitaiFolder.value !== CIVITAI_NEW_FOLDER);
+  if (inspectedCivitai) renderCivitaiPreview(inspectedCivitai);
+}
+
 async function installCivitai() {
   if (!inspectedCivitai) return inspectCivitai();
+  const folder = selectedCivitaiFolder();
+  if (!folder) {
+    elements.civitaiStatus.textContent = "保存先を選択してください";
+    return;
+  }
+  const category = elements.civitaiCategory.value;
   clearError();
   rememberSessionSecrets();
   elements.inspectCivitaiButton.disabled = true;
@@ -2721,11 +2805,18 @@ async function installCivitai() {
     const result = await postJson("/api/civitai/install", {
       url: elements.civitaiUrl.value.trim(),
       token: elements.civitaiToken.value,
-      category: elements.civitaiCategory.value
+      category,
+      folder
     });
-    elements.civitaiStatus.textContent = result.reusedExisting
+    rememberCivitaiFolder(category, result.folder ?? folder);
+    let message = result.reusedExisting
       ? `${inspectedCivitai.modelName}の既存ファイルを再利用し、分類・全衣装プリセットを更新しました。`
-      : `${inspectedCivitai.modelName}を配置し、全衣装プリセットを登録しました。`;
+      : `${inspectedCivitai.modelName}を保存先「${result.folder}」へ配置し、全衣装プリセットを登録しました。`;
+    if (result.existingInOtherFolder) {
+      message += `（既存ファイルは別フォルダにあります: ${result.existingInOtherFolder}。移動はしていません）`;
+    }
+    elements.civitaiStatus.textContent = message;
+    await loadCivitaiFolders();
     await loadLoras();
   } catch (error) {
     elements.civitaiStatus.textContent = error.message;

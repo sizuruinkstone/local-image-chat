@@ -302,10 +302,16 @@
                   <option value="pose">構図・ポーズ</option>
                 </select>
               </label>
+              <label>保存先フォルダ
+                <select id="civitaiFolder"></select>
+              </label>
               <label>APIキー（必要な場合だけ）
                 <input id="civitaiToken" type="password" autocomplete="off" placeholder="非公開・制限付きモデル用" />
               </label>
             </div>
+            <label id="civitaiNewFolderRow" class="hidden">新規フォルダ名
+              <input id="civitaiNewFolder" type="text" placeholder="characters/Blue Archive" />
+            </label>
             <div class="buttonRow">
               <button id="inspectCivitaiButton" class="secondary" type="button">内容を確認</button>
               <button id="installCivitaiButton" class="primary" type="button" disabled>ダウンロードして登録</button>

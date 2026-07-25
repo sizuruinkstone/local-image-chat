@@ -152,12 +152,21 @@ app.post("/api/civitai/inspect", async (request, response) => {
   }
 });
 
+app.get("/api/civitai/install-folders", async (_request, response) => {
+  try {
+    response.json(await civitai.listInstallFolders());
+  } catch (error) {
+    response.status(500).json({ error: readableError(error) });
+  }
+});
+
 app.post("/api/civitai/install", async (request, response) => {
   try {
     const result = await civitai.install({
       url: requireText(request.body.url, "Civitai URL"),
       token: sanitizeSecret(request.body.token),
       category: textOrDefault(request.body.category, "style"),
+      folder: typeof request.body.folder === "string" ? request.body.folder : "",
       overwrite: request.body.overwrite === true
     });
     const loras = await refreshLoras(config.reforge);

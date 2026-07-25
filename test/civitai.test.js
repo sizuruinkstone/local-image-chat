@@ -186,3 +186,94 @@ test("登録済みLoRAを再ダウンロードせず一括再解析する", asyn
   assert.equal(stored.entries[0].filename, "example.safetensors");
   assert.equal(stored.entries[1].triggerWords, "keepMe");
 });
+
+test("保存先フォルダ一覧をLoRAルートのサブフォルダから列挙する", async (t) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "local-image-chat-civitai-fld-"));
+  const loraRoot = await fs.mkdtemp(path.join(os.tmpdir(), "local-image-chat-lora-root-"));
+  t.after(() => Promise.all([
+    fs.rm(dataDir, { recursive: true, force: true }),
+    fs.rm(loraRoot, { recursive: true, force: true })
+  ]));
+  await fs.mkdir(path.join(loraRoot, "Characters", "Blue Archive"), { recursive: true });
+  await fs.mkdir(path.join(loraRoot, "Characters", "Arknights"), { recursive: true });
+  await fs.mkdir(path.join(loraRoot, "Style"), { recursive: true });
+
+  const service = createCivitaiService({
+    dataDir,
+    loraConfig: { installDir: loraRoot },
+    reforgeConfig: { url: "http://127.0.0.1:1" }, // 到達不可 → rawLoras空
+    inspectCivitai: async () => ({})
+  });
+  const result = await service.listInstallFolders();
+  assert.ok(result.folders.includes("Characters"));
+  assert.ok(result.folders.includes("Characters/Blue Archive"));
+  assert.ok(result.folders.includes("Characters/Arknights"));
+  assert.ok(result.folders.includes("Style"));
+  assert.ok(result.folders.includes("Body")); // 分類デフォルトも含む
+  assert.equal(result.defaults.character, "Characters");
+  // 区切りは / に統一・重複なし・昇順
+  assert.ok(result.folders.every((f) => !f.includes("\\")));
+  assert.equal(new Set(result.folders.map((f) => f.toLowerCase())).size, result.folders.length);
+  const ascending = [...result.folders].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+  assert.deepEqual(result.folders, ascending);
+});
+
+test("Civitaiインストールで指定フォルダへ保存し、不正フォルダを拒否する", async (t) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "local-image-chat-civitai-inst-"));
+  const loraRoot = await fs.mkdtemp(path.join(os.tmpdir(), "local-image-chat-lora-inst-"));
+  const originalFetch = global.fetch;
+  t.after(() => {
+    global.fetch = originalFetch;
+    return Promise.all([
+      fs.rm(dataDir, { recursive: true, force: true }),
+      fs.rm(loraRoot, { recursive: true, force: true })
+    ]);
+  });
+  global.fetch = async (url) => {
+    const target = String(url);
+    if (target.includes("/sdapi/v1/loras")) {
+      return new Response(JSON.stringify([]), { headers: { "content-type": "application/json" } });
+    }
+    if (target.includes("download")) return new Response("fake-lora-bytes");
+    return new Response("not found", { status: 404 });
+  };
+
+  const metadata = {
+    modelId: 1, versionId: 2, modelName: "Test LoRA", versionName: "v1", modelType: "LORA",
+    baseModel: "Illustrious", sourceUrl: "https://civitai.com/models/1?modelVersionId=2",
+    trainedWords: [], outfitPresets: [], recommendedWeight: 0.75, recommendedWeightMin: null,
+    recommendedWeightMax: null, recommendedWeightLabel: null, recommendedWeightSource: "fallback",
+    previewUrl: "", file: { name: "myLora.safetensors", sizeKB: 1, downloadUrl: "https://download/models/2" }
+  };
+  const service = createCivitaiService({
+    dataDir,
+    loraConfig: { installDir: loraRoot },
+    reforgeConfig: { url: "http://reforge.test" },
+    inspectCivitai: async () => metadata
+  });
+
+  const result = await service.install({
+    url: "https://civitai.com/models/1?modelVersionId=2",
+    category: "character",
+    folder: "characters/Blue Archive"
+  });
+  assert.equal(result.folder, "characters/Blue Archive");
+  assert.equal(result.reusedExisting, false);
+  assert.equal(result.entry.relativeName, "characters/Blue Archive/myLora");
+  await fs.access(path.join(loraRoot, "characters", "Blue Archive", "myLora.safetensors"));
+
+  // folder未指定なら分類デフォルト（Characters）へ
+  await fs.rm(path.join(dataDir, "lora-registry.json"), { force: true });
+  const defaulted = await service.install({
+    url: "https://civitai.com/models/1?modelVersionId=2",
+    category: "character"
+  });
+  assert.equal(defaulted.folder, "Characters");
+
+  // LoRAルート外は拒否
+  await assert.rejects(() => service.install({
+    url: "https://civitai.com/models/1?modelVersionId=2",
+    category: "character",
+    folder: "../escape"
+  }), /ルート外/);
+});
