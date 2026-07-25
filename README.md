@@ -2,8 +2,13 @@
 
 日本語の指示をOllamaでStable Diffusion向けタグに変換し、ReForge APIでローカル画像生成するツールです。
 
-## v2.8の主な機能
+## v2.9の主な機能
 
+- 生成履歴カードの操作を👍・削除・読込・詳細へ整理し、画像クリックで拡大モーダル表示
+- 履歴からの画像削除（history.jsonとoutputフォルダから安全に削除、`DELETE /api/history/:imageId`）
+- 履歴カードにCheckpoint短縮名とLoRA数を表示し、詳細モーダルでCheckpoint・LoRA+Weight・生成設定・Prompt等を確認
+- 新規生成時にCheckpoint名・hashを履歴へ保存（過去履歴は「Checkpoint記録なし」で後方互換）
+- img2img・部分修正は詳細モーダル最下部へ移動
 - 生成設定に「Noise schedule for sampling」（Automatic / Zero Terminal SNR）を追加し、生成前にReForgeのoptionsへ反映
 - V-Pred系Checkpoint（NoobAI XL V-Pred 1.0、Obsession vPred V2.0）のプロフィールへ Zero Terminal SNR を設定し、Checkpoint切替の自動反映でも切り替え
 - Civitaiの説明文・バージョン名から推奨Weight（単一値・範囲・全角/中国語表記）を抽出して登録情報へ保存
@@ -131,9 +136,10 @@ Denoisingが低いほど元画像に近く、高いほどPromptとLoRAの影響�
 保存先を変えたい場合は環境変数`LOCAL_IMAGE_CHAT_FAVORITES_DIR`で指定できます。
 `👍の傾向を追加`を押すと、頻出タグ上位を次回生成のプロンプト部品として使用します。
 
-`この構図で差し替え`または`レシピ読込・構図固定`を押すと、元画像のPrompt・Seed・設定・LoRAを読み込みます。
+履歴カードの操作は左から`👍`・`削除`・`読込`・`詳細`です。`読込`を押すと、元画像のPrompt・Seed・設定・LoRAを読み込み、構図を固定します。
 その後にキャラLoRAや衣装プリセットだけ変更して生成すると、構図をなるべく維持した差分を作れます。
 Seed固定は厳密なポーズ固定ではないため、キャラクターの体格やLoRAの影響が強い場合は構図も多少変化します。
+`削除`は確認のうえ、その画像を履歴と`outputs/`から削除します（同じ生成の最後の1枚を消すと生成ごと削除します）。カード画像をクリックすると拡大表示、`詳細`でCheckpoint・LoRA+Weight・生成設定・Prompt・Negative Promptを確認でき、詳細の最下部から`img2imgへ`・`部分修正`を実行できます。過去の履歴でCheckpoint情報がない場合は`Checkpoint記録なし`と表示します。
 
 ## LoRA
 

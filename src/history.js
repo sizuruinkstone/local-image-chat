@@ -54,6 +54,25 @@ export function createHistoryService(dataDir, { limit = 500 } = {}) {
       return matched;
     },
 
+    async deleteImage(imageId) {
+      let removed = null;
+      await store.update((data) => {
+        for (let index = 0; index < data.generations.length; index += 1) {
+          const generation = data.generations[index];
+          const imageIndex = generation.images.findIndex((item) => item.id === imageId);
+          if (imageIndex < 0) continue;
+          removed = { ...generation.images[imageIndex] };
+          generation.images.splice(imageIndex, 1);
+          // 世代の最後の1枚を消したら世代ごと削除する。
+          if (!generation.images.length) data.generations.splice(index, 1);
+          break;
+        }
+        if (!removed) throw new Error("指定された画像が履歴にありません");
+        return data;
+      });
+      return removed;
+    },
+
     async getRecipe(imageId) {
       const data = await store.read();
       for (const generation of data.generations) {
