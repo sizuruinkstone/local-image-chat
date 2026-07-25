@@ -209,7 +209,11 @@ test("保存先フォルダ一覧をLoRAルートのサブフォルダから列�
   assert.ok(result.folders.includes("Characters/Blue Archive"));
   assert.ok(result.folders.includes("Characters/Arknights"));
   assert.ok(result.folders.includes("Style"));
-  assert.ok(result.folders.includes("Body")); // 分類デフォルトも含む
+  // 実在しない分類デフォルトは既存フォルダ一覧へ混ぜない
+  assert.equal(result.folders.includes("Body"), false);
+  assert.deepEqual(result.recommended.body, { folder: "Body", exists: false });
+  assert.deepEqual(result.recommended.character, { folder: "Characters", exists: true });
+  assert.deepEqual(result.recommended.style, { folder: "Style", exists: true });
   assert.equal(result.defaults.character, "Characters");
   // 区切りは / に統一・重複なし・昇順
   assert.ok(result.folders.every((f) => !f.includes("\\")));

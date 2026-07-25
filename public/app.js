@@ -13,6 +13,17 @@ import {
 } from "./checkpoint-profiles.js";
 import { confirmModal, openModal, toast, withBusy } from "./ui-kit.js";
 import {
+  NEW_FOLDER_VALUE,
+  buildFolderGroups,
+  isFavoriteFolder,
+  normalizeFavorites,
+  normalizeFolder,
+  normalizeFolderMemory,
+  pickInitialFolder,
+  rememberRecentFolder,
+  toggleFavoriteFolder
+} from "./civitai-folders.js";
+import {
   compatibilityFilterAllows,
   getRecommendedWeight,
   hasLoraPreview,
@@ -45,7 +56,8 @@ const elements = Object.fromEntries(
     "clearPromptPartsButton", "promptPartsSummary", "compositionLockStatus",
     "unlockCompositionButton", "lockCompositionButton", "favoriteFinalButton",
     "reuseFinalButton", "civitaiDetails", "civitaiUrl", "civitaiCategory",
-    "civitaiFolderTop", "civitaiFolderSub", "civitaiNewFolder", "civitaiNewFolderRow",
+    "civitaiFolder", "civitaiFolderFavorite", "civitaiFolderPath",
+    "civitaiNewFolder", "civitaiNewFolderRow",
     "loraRootPath", "loraRootBadge", "openLoraRootButton",
     "civitaiToken", "inspectCivitaiButton", "installCivitaiButton",
     "refreshCivitaiRegistrationsButton",
@@ -80,8 +92,12 @@ let preferenceBoosts = [];
 let inspectedCivitai = null;
 let civitaiFolders = [];
 let civitaiFolderDefaults = { character: "Characters", style: "Style", body: "Body", pose: "Pose" };
-const CIVITAI_NEW_FOLDER = "__new__";
+let civitaiRecommendedFolders = {};
+let civitaiRecentFolders = normalizeFolderMemory(readJsonStorage("localImageChat.civitaiRecentFolders"));
+let civitaiFavoriteFolders = normalizeFavorites(readJsonStorage("localImageChat.civitaiFavoriteFolders", []));
+const CIVITAI_NEW_FOLDER = NEW_FOLDER_VALUE;
 let updateInfo = null;
+let loraRootInfo = { root: "", source: "", label: "", warning: "" };
 let installedCheckpoints = [];
 let activeCheckpoint = null;
 let activeLoraCategory = loadLoraCategory();
@@ -220,8 +236,8 @@ elements.civitaiUrl.addEventListener("input", () => {
   elements.installCivitaiButton.disabled = true;
 });
 elements.civitaiCategory.addEventListener("change", () => applyCategoryFolder(elements.civitaiCategory.value));
-elements.civitaiFolderTop.addEventListener("change", onCivitaiTopChange);
-elements.civitaiFolderSub.addEventListener("change", onCivitaiSubChange);
+elements.civitaiFolder.addEventListener("change", onCivitaiFolderChange);
+elements.civitaiFolderFavorite.addEventListener("click", toggleCivitaiFolderFavorite);
 elements.civitaiNewFolder.addEventListener("input", refreshCivitaiFolderHint);
 elements.checkUpdateButton.addEventListener("click", checkForUpdate);
 elements.applyUpdateButton.addEventListener("click", applyUpdate);
@@ -2692,8 +2708,6 @@ function renderCivitaiPreview(metadata) {
 }
 
 // 現在認識しているLoRAルートを取得して表示する。推定値と明示設定を区別する。
-let loraRootInfo = { root: "", source: "", label: "", warning: "" };
-
 async function loadLoraRoot() {
   try {
     loraRootInfo = await getJson("/api/lora/install-root");
@@ -2730,125 +2744,105 @@ async function loadCivitaiFolders() {
     const data = await getJson("/api/civitai/install-folders");
     civitaiFolders = Array.isArray(data.folders) ? data.folders : [];
     if (data.defaults && typeof data.defaults === "object") civitaiFolderDefaults = data.defaults;
+    civitaiRecommendedFolders = data.recommended && typeof data.recommended === "object" ? data.recommended : {};
   } catch {
-    civitaiFolders = [...new Set(Object.values(civitaiFolderDefaults))];
+    civitaiFolders = [];
+    civitaiRecommendedFolders = {};
   }
-  populateCivitaiTopSelect();
   applyCategoryFolder(elements.civitaiCategory.value);
 }
 
-// トップレベル（ジャンル）フォルダ = 各相対パスの先頭セグメント。
-function civitaiTopFolders() {
-  const tops = new Set();
-  for (const folder of civitaiFolders) {
-    const top = folder.split("/")[0];
-    if (top) tops.add(top);
-  }
-  for (const value of Object.values(civitaiFolderDefaults)) {
-    if (value) tops.add(String(value).split("/")[0]);
-  }
-  return [...tops].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
-}
-
-function populateCivitaiTopSelect() {
-  const select = elements.civitaiFolderTop;
-  const current = select.value;
+// 保存先selectを「前回使用 / お気に入り / 推奨 / 既存フォルダ / 新規作成」の順で構成する。
+// 実在しない推奨フォルダは既存フォルダ一覧へ混ぜず、「（新規作成）」と明示する。
+function populateCivitaiFolderSelect(category, preferred) {
+  const select = elements.civitaiFolder;
   select.replaceChildren();
-  for (const top of civitaiTopFolders()) select.append(new Option(top, top));
-  if ([...select.options].some((option) => option.value === current)) select.value = current;
+  const groups = buildFolderGroups({
+    folders: civitaiFolders,
+    recommended: civitaiRecommendedFolders,
+    recent: civitaiRecentFolders[category] ?? [],
+    favorites: civitaiFavoriteFolders,
+    category
+  });
+  for (const group of groups) {
+    const optgroup = document.createElement("optgroup");
+    optgroup.label = group.label;
+    for (const option of group.options) optgroup.append(new Option(option.label, option.value));
+    select.append(optgroup);
+  }
+  const values = [...select.options].map((option) => option.value);
+  const fallback = pickInitialFolder({
+    folders: civitaiFolders,
+    recommended: civitaiRecommendedFolders,
+    recent: civitaiRecentFolders[category] ?? [],
+    favorites: civitaiFavoriteFolders,
+    category
+  });
+  select.value = preferred && values.includes(preferred)
+    ? preferred
+    : (values.includes(fallback) ? fallback : CIVITAI_NEW_FOLDER);
 }
 
-// 選択中トップ配下のサブフォルダ（＋直下・新規作成）を並べる。
-function populateCivitaiSubSelect(top, preferred) {
-  const select = elements.civitaiFolderSub;
-  select.replaceChildren();
-  select.append(new Option("（このフォルダ直下）", top));
-  for (const folder of civitaiFolders) {
-    if (folder === top || !folder.startsWith(`${top}/`)) continue;
-    select.append(new Option(folder.slice(top.length + 1), folder));
-  }
-  select.append(new Option("＋ 新しいフォルダを作成", CIVITAI_NEW_FOLDER));
-  const options = [...select.options].map((option) => option.value);
-  select.value = preferred && options.includes(preferred) ? preferred : top;
-}
-
-function loadCivitaiFolderMemory() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem("localImageChat.civitaiInstallFolder") ?? "{}");
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
+function saveCivitaiFolderMemory() {
+  localStorage.setItem("localImageChat.civitaiRecentFolders", JSON.stringify(civitaiRecentFolders));
+  localStorage.setItem("localImageChat.civitaiFavoriteFolders", JSON.stringify(civitaiFavoriteFolders));
 }
 
 function rememberCivitaiFolder(category, folder) {
-  if (!folder) return;
-  const memory = loadCivitaiFolderMemory();
-  memory[category] = folder;
-  localStorage.setItem("localImageChat.civitaiInstallFolder", JSON.stringify(memory));
-}
-
-// 分類に応じた保存先へ切り替える。前回手動選択（記憶）があればそれを、なければ分類デフォルトを使う。
-// 記憶先が存在しない場合は分類デフォルトへ戻す。
-const CATEGORY_KEYWORDS = {
-  character: /^characters?$/i,
-  style: /^styles?$/i,
-  body: /^bod(?:y|ies)$/i,
-  pose: /^poses?$/i
-};
-
-// 分類のデフォルト保存先。トップレベルの既定名（Characters等）が実在すればそれ、
-// なければ末尾セグメントが分類名に一致する実在フォルダ（例: illustrious/character）を使う。
-function categoryDefaultFolder(category) {
-  const hard = civitaiFolderDefaults[category];
-  if (hard && civitaiFolders.some((folder) => folder.toLowerCase() === hard.toLowerCase())) return hard;
-  const keyword = CATEGORY_KEYWORDS[category];
-  if (keyword) {
-    const match = civitaiFolders
-      .filter((folder) => keyword.test(folder.split("/").at(-1) ?? ""))
-      .sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" }))[0];
-    if (match) return match;
-  }
-  return hard ?? civitaiFolders[0] ?? "";
+  const normalized = normalizeFolder(folder);
+  if (!normalized || normalized === CIVITAI_NEW_FOLDER) return;
+  civitaiRecentFolders = rememberRecentFolder(civitaiRecentFolders, category, normalized);
+  saveCivitaiFolderMemory();
 }
 
 function applyCategoryFolder(category) {
-  const tops = civitaiTopFolders();
-  const remembered = loadCivitaiFolderMemory()[category];
-  const fallback = categoryDefaultFolder(category) || civitaiFolders[0] || tops[0] || "";
-  const rememberedTop = remembered ? remembered.split("/")[0] : "";
-  const target = rememberedTop && tops.includes(rememberedTop) ? remembered : fallback;
-  const top = target.split("/")[0];
-  elements.civitaiFolderTop.value = tops.includes(top) ? top : (tops[0] ?? "");
-  populateCivitaiSubSelect(elements.civitaiFolderTop.value, target);
+  const recent = civitaiRecentFolders[category] ?? [];
+  populateCivitaiFolderSelect(category, recent[0]);
   refreshCivitaiFolderHint();
 }
 
-function onCivitaiTopChange() {
-  populateCivitaiSubSelect(elements.civitaiFolderTop.value);
-  onCivitaiSubChange();
-}
-
-function onCivitaiSubChange() {
-  const sub = elements.civitaiFolderSub.value;
-  if (sub === CIVITAI_NEW_FOLDER) {
+function onCivitaiFolderChange() {
+  const value = elements.civitaiFolder.value;
+  if (value === CIVITAI_NEW_FOLDER) {
     if (!elements.civitaiNewFolder.value.trim()) {
-      elements.civitaiNewFolder.value = `${elements.civitaiFolderTop.value}/`;
+      const recommended = civitaiRecommendedFolders[elements.civitaiCategory.value]?.folder ?? "";
+      elements.civitaiNewFolder.value = recommended;
     }
   } else {
-    rememberCivitaiFolder(elements.civitaiCategory.value, sub);
+    rememberCivitaiFolder(elements.civitaiCategory.value, value);
   }
   refreshCivitaiFolderHint();
 }
 
+function toggleCivitaiFolderFavorite() {
+  const folder = selectedCivitaiFolder();
+  if (!folder) return toast.warning("お気に入りにする保存先を選んでください");
+  const wasFavorite = isFavoriteFolder(civitaiFavoriteFolders, folder);
+  civitaiFavoriteFolders = toggleFavoriteFolder(civitaiFavoriteFolders, folder);
+  saveCivitaiFolderMemory();
+  populateCivitaiFolderSelect(elements.civitaiCategory.value, folder);
+  refreshCivitaiFolderHint();
+  toast.info(wasFavorite ? `${folder} をお気に入りから外しました` : `${folder} をお気に入りに登録しました`);
+}
+
 function selectedCivitaiFolder() {
-  return elements.civitaiFolderSub.value === CIVITAI_NEW_FOLDER
-    ? elements.civitaiNewFolder.value.trim()
-    : elements.civitaiFolderSub.value;
+  return elements.civitaiFolder.value === CIVITAI_NEW_FOLDER
+    ? normalizeFolder(elements.civitaiNewFolder.value)
+    : elements.civitaiFolder.value;
 }
 
 function refreshCivitaiFolderHint() {
-  elements.civitaiNewFolderRow.classList.toggle("hidden", elements.civitaiFolderSub.value !== CIVITAI_NEW_FOLDER);
+  const isNew = elements.civitaiFolder.value === CIVITAI_NEW_FOLDER;
+  elements.civitaiNewFolderRow.classList.toggle("hidden", !isNew);
+  const folder = selectedCivitaiFolder();
+  const favorite = isFavoriteFolder(civitaiFavoriteFolders, folder);
+  elements.civitaiFolderFavorite.textContent = favorite ? "★" : "☆";
+  elements.civitaiFolderFavorite.title = favorite ? "お気に入りから外す" : "この保存先をお気に入りに登録";
+  elements.civitaiFolderFavorite.setAttribute("aria-pressed", String(favorite));
+  const exists = civitaiFolders.some((item) => item.toLowerCase() === folder.toLowerCase());
+  elements.civitaiFolderPath.textContent = folder
+    ? `保存先: ${loraRootInfo.root ? `${loraRootInfo.root} / ` : ""}${folder}${exists ? "" : "（新規作成されます）"}`
+    : "保存先を選択してください";
   if (inspectedCivitai) renderCivitaiPreview(inspectedCivitai);
 }
 
@@ -3081,6 +3075,16 @@ function loadLoraWeights() {
     );
   } catch {
     return new Map();
+  }
+}
+
+// localStorageのJSONを安全に読む。壊れていればfallbackを返す。
+function readJsonStorage(storageKey, fallback = {}) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(storageKey) ?? "null");
+    return parsed === null || parsed === undefined ? fallback : parsed;
+  } catch {
+    return fallback;
   }
 }
 

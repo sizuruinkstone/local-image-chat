@@ -310,8 +310,8 @@
               </label>
               <label>保存先フォルダ
                 <div class="folderPicker">
-                  <select id="civitaiFolderTop" aria-label="ジャンルフォルダ"></select>
-                  <select id="civitaiFolderSub" aria-label="サブフォルダ"></select>
+                  <select id="civitaiFolder" aria-label="保存先フォルダ"></select>
+                  <button id="civitaiFolderFavorite" class="ghost smallButton" type="button" aria-label="この保存先をお気に入りに登録">☆</button>
                 </div>
               </label>
               <label>APIキー（必要な場合だけ）
@@ -319,8 +319,9 @@
               </label>
             </div>
             <label id="civitaiNewFolderRow" class="hidden">新規フォルダ名
-              <input id="civitaiNewFolder" type="text" placeholder="characters/Blue Archive" />
+              <input id="civitaiNewFolder" type="text" placeholder="Anime/Character" />
             </label>
+            <p id="civitaiFolderPath" class="hint"></p>
             <div class="buttonRow">
               <button id="inspectCivitaiButton" class="secondary" type="button">内容を確認</button>
               <button id="installCivitaiButton" class="primary" type="button" disabled>ダウンロードして登録</button>

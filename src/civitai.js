@@ -142,9 +142,11 @@ export function createCivitaiService({
       return { metadata, entry, destinationPath, reusedExisting, folder: relativeFolder, existingInOtherFolder };
     },
 
+    // foldersは「実在するフォルダ」だけを返す。分類デフォルト（Characters等）は
+    // 実在しない場合があるため、recommendedとして別枠で返しUIでも混ぜない。
     async listInstallFolders() {
-      const { root: installRoot, rawLoras } = await resolveRoot();
-      const set = new Set(Object.values(CATEGORY_FOLDERS));
+      const { root: installRoot, rawLoras, source, label, warning } = await resolveRoot();
+      const set = new Set();
       for (const lora of rawLoras) {
         const folder = loraFolderOf(lora);
         if (folder) set.add(folder);
@@ -164,14 +166,26 @@ export function createCivitaiService({
         seen.add(key);
         folders.push(value);
       }
+
+      const recommended = {};
+      for (const [category, defaultFolder] of Object.entries(CATEGORY_FOLDERS)) {
+        const exact = folders.find((folder) => folder.toLowerCase() === defaultFolder.toLowerCase());
+        const leaf = exact ?? folders.find((folder) => matchesCategoryLeaf(folder, category));
+        recommended[category] = leaf
+          ? { folder: leaf, exists: true }
+          : { folder: defaultFolder, exists: false };
+      }
+
       return {
         folders,
+        recommended,
         defaults: {
           character: CATEGORY_FOLDERS.character,
           style: CATEGORY_FOLDERS.style,
           body: CATEGORY_FOLDERS.body,
           pose: CATEGORY_FOLDERS.pose
         },
+        installRoot: { root: installRoot, source, label, warning },
         installDirConfigured: Boolean(installRoot)
       };
     },
@@ -627,6 +641,20 @@ function loraRelativeName(lora) {
     .replaceAll("\\", "/")
     .replace(/^\/+/, "")
     .replace(/\.(?:safetensors|ckpt|pt)$/i, "");
+}
+
+// 末尾セグメントが分類名に一致する実在フォルダ（例 Anime/Character）を推奨候補にする。
+const CATEGORY_LEAF_PATTERNS = {
+  character: /^characters?$/i,
+  style: /^styles?$/i,
+  body: /^bod(?:y|ies)$/i,
+  pose: /^poses?$/i
+};
+
+function matchesCategoryLeaf(folder, category) {
+  const pattern = CATEGORY_LEAF_PATTERNS[category];
+  if (!pattern) return false;
+  return pattern.test(String(folder).split("/").at(-1) ?? "");
 }
 
 function loraFolderOf(lora) {
