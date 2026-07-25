@@ -107,6 +107,9 @@ export async function generateImages(config, request, { signal, onProgress } = {
     : request;
   console.log(`[ReForge] ${label} started`);
 
+  // 生成前にNoise schedule（Zero Terminal SNR等）をReForgeのoptionsへ反映する。
+  await applyNoiseSchedule(config, request.noiseSchedule);
+
   try {
     // 4枚を一度にVRAMへ載せず、API呼び出し自体を1枚ずつ行う。
     // これによりRX 6700 XT 12GBでのメモリ不足とグリッド画像混入を避ける。
@@ -132,6 +135,31 @@ export async function generateImages(config, request, { signal, onProgress } = {
       throw new Error("ReForgeの画像生成がタイムアウトしました。ReForgeの画面とコンソールを確認してください");
     }
     throw error;
+  }
+}
+
+// "Noise schedule for sampling" のoptions APIキー。ReForgeにより異なる場合は
+// config.reforge.noiseScheduleOptionKey で上書きできる。
+const NOISE_SCHEDULE_OPTION_KEY = "sd_noise_schedule_sampling";
+
+async function applyNoiseSchedule(config, noiseSchedule) {
+  const value = typeof noiseSchedule === "string" ? noiseSchedule.trim() : "";
+  if (!value) return;
+  const key = config.noiseScheduleOptionKey || NOISE_SCHEDULE_OPTION_KEY;
+  try {
+    const response = await fetch(`${config.url}/sdapi/v1/options`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ [key]: value }),
+      signal: AbortSignal.timeout(15000)
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      console.warn(`[ReForge] Noise schedule設定に失敗 HTTP ${response.status}: ${detail.slice(0, 200)}`);
+    }
+  } catch (error) {
+    // オプション設定なので、失敗しても生成自体は継続する。
+    console.warn(`[ReForge] Noise schedule設定をスキップ: ${error.message}`);
   }
 }
 

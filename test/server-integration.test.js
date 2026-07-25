@@ -78,13 +78,14 @@ test("生成キューからReForge、履歴、👍集計までAPIが往復する
     prompt: "masterpiece, 1girl, blue hair",
     negativePrompt: "low quality",
     loras: [],
-    settings: { width: 512, height: 512, steps: 5, candidateCount: 1 }
+    settings: { width: 512, height: 512, steps: 5, candidateCount: 1, noiseSchedule: "Zero Terminal SNR" }
   });
   const completed = await waitForJob(baseUrl, queued.job.id);
 
   assert.equal(completed.status, "done");
   assert.equal(completed.result.images.length, 1);
   assert.match(completed.result.images[0].id, /^[a-z0-9-]+$/i);
+  assert.equal(reforgeRequests.noiseSchedule, "Zero Terminal SNR", "生成前にNoise scheduleをoptionsへ送る");
 
   const image = completed.result.images[0];
   await patchJson(`${baseUrl}/api/history/${image.id}/favorite`, { favorite: true });
@@ -248,7 +249,8 @@ function handleOllama(request, response) {
 async function handleReforge(request, response, requests) {
   if (request.url === "/sdapi/v1/options" && request.method === "POST") {
     const body = JSON.parse(await readBody(request));
-    requests.activeCheckpoint = body.sd_model_checkpoint;
+    if (body.sd_model_checkpoint !== undefined) requests.activeCheckpoint = body.sd_model_checkpoint;
+    if (body.sd_noise_schedule_sampling !== undefined) requests.noiseSchedule = body.sd_noise_schedule_sampling;
     return json(response, {});
   }
   if (request.url === "/sdapi/v1/options") {

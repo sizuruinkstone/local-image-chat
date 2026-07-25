@@ -1,6 +1,6 @@
 {
   "name": "local-image-chat",
-  "version": "2.7.0",
+  "version": "2.8.0",
   "private": true,
   "description": "Japanese natural-language frontend for Ollama and ReForge",
   "type": "module",

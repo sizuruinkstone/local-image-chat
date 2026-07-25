@@ -8,6 +8,22 @@ export const CHECKPOINT_PROFILES = [
     note: "普段使い向け。品質とRX 6700 XT 12GBでの扱いやすさを優先"
   },
   {
+    id: "chosen-mix-xl-v41",
+    name: "Chosen-mix XL v4.1",
+    family: "illustrious",
+    match: [/chosen.?mix.*xl.*v?4[._ -]?1/i],
+    settings: profileSettings(896, 1152, 32, 5, "Euler", "Automatic"),
+    note: "作者作例基準。Clip skip 2。通常生成は896×1152を安全側の初期値にする"
+  },
+  {
+    id: "rin-flanime-illustrious",
+    name: "RIN Flanime Illustrious",
+    family: "illustrious",
+    match: [/rin.*flanime/i, /flanime/i],
+    settings: profileSettings(896, 1152, 30, 5, "Euler a", "Automatic"),
+    note: "フラットアニメ向けの安定基準。Clip skip 2。Hiresは1.5倍・10〜15 Steps・Denoising 0.3前後から"
+  },
+  {
     id: "one-obsession-v23",
     name: "One Obsession v23",
     family: "illustrious",
@@ -28,15 +44,15 @@ export const CHECKPOINT_PROFILES = [
     name: "NoobAI XL V-Pred 1.0",
     family: "noobai",
     match: [/noobai.*(?:v.?pred|vpred).*v?1[._ -]?0/i],
-    settings: profileSettings(832, 1216, 30, 4.5, "Euler", "Automatic"),
-    note: "Euler推奨。CFG 4〜5・28〜35 Steps。Karras系Schedulerは避ける"
+    settings: profileSettings(832, 1216, 30, 4.5, "Euler", "Automatic", "Zero Terminal SNR"),
+    note: "Euler推奨。CFG 4〜5・28〜35 Steps。Karras系Schedulerは避ける。V-PredはZero Terminal SNR"
   },
   {
     id: "obsession-vpred-v20",
     name: "Obsession V-Pred 2.0",
     family: "noobai",
     match: [/obsession.*(?:v.?pred|vpred).*v?2[._ -]?0/i],
-    settings: profileSettings(768, 1280, 30, 5, "Euler a", "SGM Uniform"),
+    settings: profileSettings(768, 1280, 30, 5, "Euler a", "SGM Uniform", "Zero Terminal SNR"),
     note: "公式作例基準。Zero Terminal SNRを使用し、必要ならRescale CFG 0.2〜0.7を手動で有効化"
   },
   {
@@ -178,6 +194,6 @@ export function assessLoraCompatibility(checkpointProfile, baseModel) {
   };
 }
 
-function profileSettings(width, height, steps, cfgScale, samplerName, scheduler) {
-  return { width, height, steps, cfgScale, samplerName, scheduler };
+function profileSettings(width, height, steps, cfgScale, samplerName, scheduler, noiseSchedule = "Automatic") {
+  return { width, height, steps, cfgScale, samplerName, scheduler, noiseSchedule };
 }

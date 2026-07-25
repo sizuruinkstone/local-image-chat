@@ -325,7 +325,14 @@
               <label>Seed<input id="seed" type="number" value="-1" /></label>
               <label>Sampler<input id="samplerName" type="text" /></label>
               <label>Scheduler<input id="scheduler" type="text" /></label>
+              <label>Noise schedule for sampling
+                <select id="noiseSchedule">
+                  <option value="Automatic">Automatic</option>
+                  <option value="Zero Terminal SNR">Zero Terminal SNR</option>
+                </select>
+              </label>
             </div>
+            <p class="hint">V-Pred系Checkpoint（NoobAI V-Pred、Obsession vPredなど）は「Zero Terminal SNR」を選びます。Checkpoint切替時の推奨設定自動反映でも切り替わります。</p>
           </details>
 
           <details>

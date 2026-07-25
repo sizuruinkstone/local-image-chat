@@ -27,7 +27,7 @@ const elements = Object.fromEntries(
   [
     "health", "healthButton", "description", "promptButton", "generateButton",
     "prompt", "negativePrompt", "width", "height", "steps", "cfgScale", "seed",
-    "samplerName", "scheduler", "candidateCount", "hiresScale", "hiresSteps",
+    "samplerName", "scheduler", "noiseSchedule", "candidateCount", "hiresScale", "hiresSteps",
     "hiresDenoising", "hiresUpscaler", "emptyState", "loading", "loadingText",
     "resultContent", "candidateSection", "candidateGrid", "candidateSummary",
     "selectedSeedText", "finishButton", "finalResult", "resultImage", "seedText",
@@ -805,13 +805,14 @@ function renderCheckpointProfileSummary() {
     `CFG ${settings.cfgScale}`,
     settings.samplerName,
     settings.scheduler,
+    settings.noiseSchedule && settings.noiseSchedule !== "Automatic" ? settings.noiseSchedule : null,
     profile.note
-  ].join("・");
+  ].filter(Boolean).join("・");
 }
 
 function applyCheckpointSettings(profile) {
-  for (const key of ["width", "height", "steps", "cfgScale", "samplerName", "scheduler"]) {
-    if (profile.settings[key] !== undefined) elements[key].value = profile.settings[key];
+  for (const key of ["width", "height", "steps", "cfgScale", "samplerName", "scheduler", "noiseSchedule"]) {
+    if (profile.settings[key] !== undefined && elements[key]) elements[key].value = profile.settings[key];
   }
 }
 
@@ -2122,7 +2123,7 @@ function loadRecipeFields(recipe, image) {
   setPromptFields(recipe.prompt ?? "", recipe.negativePrompt ?? "", recipe.description ?? "");
   const settings = recipe.settings ?? {};
   for (const key of [
-    "width", "height", "steps", "cfgScale", "samplerName", "scheduler",
+    "width", "height", "steps", "cfgScale", "samplerName", "scheduler", "noiseSchedule",
     "img2imgDenoising", "img2imgResizeMode",
     "inpaintDenoising", "maskBlur", "inpaintFill", "inpaintFullResPadding",
     "hiresScale", "hiresSteps", "hiresDenoising", "hiresUpscaler"
@@ -2537,6 +2538,7 @@ function readSettings(overrides = {}) {
     seed: elements.seed.value,
     samplerName: elements.samplerName.value,
     scheduler: elements.scheduler.value,
+    noiseSchedule: elements.noiseSchedule.value,
     candidateCount: elements.candidateCount.value,
     img2imgDenoising: elements.img2imgDenoising.value,
     img2imgResizeMode: elements.img2imgResizeMode.value,

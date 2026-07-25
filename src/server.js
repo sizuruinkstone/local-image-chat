@@ -400,6 +400,7 @@ function validateSettings(input) {
     seed: boundedInt(input.seed, -1, -1, 4294967295),
     samplerName: textOrDefault(input.samplerName, defaults.samplerName),
     scheduler: textOrDefault(input.scheduler, defaults.scheduler),
+    noiseSchedule: normalizeNoiseSchedule(input.noiseSchedule, defaults.noiseSchedule),
     candidateCount: hiresEnabled ? 1 : boundedInt(input.candidateCount, defaults.candidateCount ?? 4, 1, 4),
     img2imgDenoising: boundedNumber(
       input.img2imgDenoising,
@@ -708,6 +709,15 @@ function booleanOrDefault(value, fallback) {
 
 function textOrDefault(value, fallback) {
   return typeof value === "string" && value.trim() ? value.trim().slice(0, 100) : fallback;
+}
+
+const NOISE_SCHEDULE_CHOICES = ["Automatic", "Zero Terminal SNR"];
+
+function normalizeNoiseSchedule(value, fallback) {
+  const requested = typeof value === "string" ? value.trim() : "";
+  if (NOISE_SCHEDULE_CHOICES.includes(requested)) return requested;
+  if (NOISE_SCHEDULE_CHOICES.includes(fallback)) return fallback;
+  return "Automatic";
 }
 
 function timestamp() {
