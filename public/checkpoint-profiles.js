@@ -44,15 +44,15 @@ export const CHECKPOINT_PROFILES = [
     name: "NoobAI XL V-Pred 1.0",
     family: "noobai",
     match: [/noobai.*(?:v.?pred|vpred).*v?1[._ -]?0/i],
-    settings: profileSettings(832, 1216, 30, 4.5, "Euler", "Automatic"),
-    note: "Euler推奨。CFG 4〜5・28〜35 Steps。Karras系Schedulerは避ける"
+    settings: profileSettings(832, 1216, 30, 4.5, "Euler", "Automatic", "Zero Terminal SNR"),
+    note: "Euler推奨。CFG 4〜5・28〜35 Steps。Karras系Schedulerは避ける。V-PredはZero Terminal SNR"
   },
   {
     id: "obsession-vpred-v20",
     name: "Obsession V-Pred 2.0",
     family: "noobai",
     match: [/obsession.*(?:v.?pred|vpred).*v?2[._ -]?0/i],
-    settings: profileSettings(768, 1280, 30, 5, "Euler a", "SGM Uniform"),
+    settings: profileSettings(768, 1280, 30, 5, "Euler a", "SGM Uniform", "Zero Terminal SNR"),
     note: "公式作例基準。Zero Terminal SNRを使用し、必要ならRescale CFG 0.2〜0.7を手動で有効化"
   },
   {
@@ -194,6 +194,6 @@ export function assessLoraCompatibility(checkpointProfile, baseModel) {
   };
 }
 
-function profileSettings(width, height, steps, cfgScale, samplerName, scheduler) {
-  return { width, height, steps, cfgScale, samplerName, scheduler };
+function profileSettings(width, height, steps, cfgScale, samplerName, scheduler, noiseSchedule = "Automatic") {
+  return { width, height, steps, cfgScale, samplerName, scheduler, noiseSchedule };
 }

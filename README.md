@@ -2,8 +2,10 @@
 
 日本語の指示をOllamaでStable Diffusion向けタグに変換し、ReForge APIでローカル画像生成するツールです。
 
-## v2.7の主な機能
+## v2.8の主な機能
 
+- 生成設定に「Noise schedule for sampling」（Automatic / Zero Terminal SNR）を追加し、生成前にReForgeのoptionsへ反映
+- V-Pred系Checkpoint（NoobAI XL V-Pred 1.0、Obsession vPred V2.0）のプロフィールへ Zero Terminal SNR を設定し、Checkpoint切替の自動反映でも切り替え
 - Civitaiの説明文・バージョン名から推奨Weight（単一値・範囲・全角/中国語表記）を抽出して登録情報へ保存
 - 画風系LoRAをCivitaiからダウンロードした直後に推奨Weight・Trigger Wordsを初期適用（ユーザー設定は上書きしない）
 - LoRA一覧の互換性バッジ横へ「推奨 0.80」「推奨 0.70～1.00」を表示（Civitaiから抽出できた場合のみ）
@@ -72,7 +74,7 @@
 
 ## Checkpoint
 
-`Checkpoint`欄にはReForgeが認識しているモデルが表示されます。選択を変えるとReForge側でもモデルが切り替わり、`切替時に推奨設定を適用`が有効なら幅・高さ・Steps・CFG・Sampler・Schedulerをモデル別プロフィールへ合わせます。Prompt、Negative prompt、LoRA、Seedは変更しません。
+`Checkpoint`欄にはReForgeが認識しているモデルが表示されます。選択を変えるとReForge側でもモデルが切り替わり、`切替時に推奨設定を適用`が有効なら幅・高さ・Steps・CFG・Sampler・Scheduler・Noise schedule for samplingをモデル別プロフィールへ合わせます。Prompt、Negative prompt、LoRA、Seedは変更しません。V-Pred系Checkpointでは`Noise schedule for sampling`が自動で`Zero Terminal SNR`になり、生成前にReForgeのoptionsへ反映されます（optionsのキーがReForgeで異なる場合は`config.local.json`の`reforge.noiseScheduleOptionKey`で上書きできます）。
 
 モデル名から判定できない場合は`設定プロフィール`を手動で選択できます。選択内容はCheckpointごとにブラウザへ保存されます。ReForgeで別のモデルへ切り替えてから画面を開いた場合は、ReForgeの実際の選択状態を優先します。
 

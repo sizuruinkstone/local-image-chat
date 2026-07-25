@@ -36,6 +36,7 @@
     "cfgScale": 6,
     "samplerName": "Euler a",
     "scheduler": "Automatic",
+    "noiseSchedule": "Automatic",
     "candidateCount": 1,
     "img2imgDenoising": 0.45,
     "img2imgResizeMode": 1,

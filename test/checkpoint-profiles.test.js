@@ -30,7 +30,8 @@ test("Chosen-mix XL v4.1とRIN Flanimeを専用プロフィールへ自動分類
     steps: 32,
     cfgScale: 5,
     samplerName: "Euler",
-    scheduler: "Automatic"
+    scheduler: "Automatic",
+    noiseSchedule: "Automatic"
   });
 
   const rin = inferCheckpointProfile({
@@ -44,7 +45,8 @@ test("Chosen-mix XL v4.1とRIN Flanimeを専用プロフィールへ自動分類
     steps: 30,
     cfgScale: 5,
     samplerName: "Euler a",
-    scheduler: "Automatic"
+    scheduler: "Automatic",
+    noiseSchedule: "Automatic"
   });
 });
 
@@ -60,7 +62,8 @@ test("追加Checkpointをバージョン別プロフィールへ自動分類す�
     steps: 30,
     cfgScale: 5,
     samplerName: "Euler a",
-    scheduler: "Exponential"
+    scheduler: "Exponential",
+    noiseSchedule: "Automatic"
   });
 
   const noobai = inferCheckpointProfile({
@@ -74,7 +77,8 @@ test("追加Checkpointをバージョン別プロフィールへ自動分類す�
     steps: 30,
     cfgScale: 4.5,
     samplerName: "Euler",
-    scheduler: "Automatic"
+    scheduler: "Automatic",
+    noiseSchedule: "Zero Terminal SNR"
   });
 
   const obsession = inferCheckpointProfile({
@@ -88,8 +92,16 @@ test("追加Checkpointをバージョン別プロフィールへ自動分類す�
     steps: 30,
     cfgScale: 5,
     samplerName: "Euler a",
-    scheduler: "SGM Uniform"
+    scheduler: "SGM Uniform",
+    noiseSchedule: "Zero Terminal SNR"
   });
+});
+
+test("V-Pred系プロフィールはnoiseScheduleがZero Terminal SNR、他はAutomatic", () => {
+  assert.equal(inferCheckpointProfile({ title: "noobai-xl-vpred-v1.0.safetensors" }).settings.noiseSchedule, "Zero Terminal SNR");
+  assert.equal(inferCheckpointProfile({ modelName: "Obsession_vPred-V2.0" }).settings.noiseSchedule, "Zero Terminal SNR");
+  assert.equal(inferCheckpointProfile({ title: "waiNSFWIllustrious_v170.safetensors" }).settings.noiseSchedule, "Automatic");
+  assert.equal(inferCheckpointProfile({ title: "my_custom_illustrious_mix.safetensors" }).settings.noiseSchedule, "Automatic");
 });
 
 test("個別登録がないIllustriousも汎用プロフィールへ分類する", () => {
