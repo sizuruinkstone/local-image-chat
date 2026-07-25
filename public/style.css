@@ -418,3 +418,4 @@ details label { margin-top: 13px; }
 .duplicateChoice small { color: var(--muted); font-size: 11px; line-height: 1.5; }
 .duplicateRename { display: grid; gap: 5px; margin-top: 12px; color: var(--muted); font-size: 11px; }
 .duplicateRename input { padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: rgba(255,255,255,.04); color: var(--text); font-size: 12px; }
+.uiCheckboxField { display: flex !important; flex-direction: row; align-items: center; gap: 8px; color: var(--text) !important; font-size: 12px; }

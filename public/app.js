@@ -12,6 +12,7 @@ import {
   inferCheckpointProfile
 } from "./checkpoint-profiles.js";
 import { confirmModal, openModal, toast, withBusy } from "./ui-kit.js";
+import { openLoraEditor } from "./lora-editor.js";
 import {
   NEW_FOLDER_VALUE,
   buildFolderGroups,
@@ -1064,6 +1065,14 @@ function renderLoraPreview(lora, { pinned = false } = {}) {
   toggle.addEventListener("click", () => toggleLoraSelectionFromPreview(lora));
   actions.append(toggle);
 
+  const edit = document.createElement("button");
+  edit.type = "button";
+  edit.className = "secondary";
+  edit.textContent = "編集";
+  edit.title = "表示名・分類・Trigger Words・推奨Weightなどを編集";
+  edit.addEventListener("click", () => void editLoraMetadata(lora, edit));
+  actions.append(edit);
+
   // 推奨値へ戻すボタン（Civitai推奨がある場合だけ）。
   if (recommended && Number(currentWeight).toFixed(2) !== recommended.weight.toFixed(2)) {
     const reset = document.createElement("button");
@@ -1087,6 +1096,38 @@ function renderLoraPreview(lora, { pinned = false } = {}) {
     actions.append(link);
   }
   pane.append(actions);
+}
+
+// LoRAメタデータ編集。未登録のLoRAは編集時にregistryへ登録してから扱う。
+async function editLoraMetadata(lora, button) {
+  await withBusy(button, "準備中…", async () => {
+    try {
+      const relativeName = String(lora.name ?? "").replaceAll("\\", "/");
+      const { entry } = await postJson("/api/loras/registry/ensure", {
+        relativeName,
+        displayName: lora.displayName ?? ""
+      });
+      await openLoraEditor({
+        lora,
+        entry,
+        folders: civitaiFolders,
+        onSave: async (patch) => {
+          const result = await patchJson(`/api/loras/${entry.uid}`, patch);
+          if (Array.isArray(result.loras) && result.loras.length) installedLoras = result.loras;
+          toast.success(`${result.entry.displayName || result.entry.modelName || "LoRA"} の情報を保存しました`);
+        },
+        onMove: async (folder) => {
+          const result = await postJson(`/api/loras/${entry.uid}/move`, { folder, confirm: true });
+          if (Array.isArray(result.loras) && result.loras.length) installedLoras = result.loras;
+          toast.success(`${folder} へ移動しました（${result.moved.length}ファイル）`);
+        }
+      });
+      await loadLoras();
+      await loadCivitaiFolders();
+    } catch (error) {
+      toast.error(error.message);
+    }
+  });
 }
 
 // Trigger Wordsは長い場合に折り返しつつ、展開できるようdetailsへ収める。

@@ -5,6 +5,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { AMBIGUOUS_ROOT_MESSAGE } from "./lora-root.js";
+import { migrateDataFiles } from "./migrations.js";
 import { checkOllama, createPrompt, unloadOllama } from "./ollama.js";
 import {
   checkReforge,
@@ -43,6 +44,9 @@ await Promise.all([
   fs.mkdir(favoritesDir, { recursive: true }),
   fs.mkdir(dataDir, { recursive: true })
 ]);
+
+// 既存データを読む前に、バックアップを作ってからschemaVersionを上げる。
+await migrateDataFiles(dataDir);
 
 const history = createHistoryService(dataDir, {
   limit: config.storage?.historyLimit ?? 500
@@ -132,6 +136,59 @@ app.post("/api/checkpoints/select", async (request, response) => {
     response.json(await switchCheckpoint(config.reforge, checkpoint.title));
   } catch (error) {
     response.status(500).json({ error: readableError(error) });
+  }
+});
+
+app.get("/api/loras/registry", async (_request, response) => {
+  try {
+    response.json({ entries: await civitai.listRegistry() });
+  } catch (error) {
+    response.status(500).json({ error: readableError(error) });
+  }
+});
+
+// Civitai経由でないLoRAも編集できるよう、必要時に登録を作る。
+app.post("/api/loras/registry/ensure", async (request, response) => {
+  try {
+    const entry = await civitai.ensureEntry({
+      relativeName: requireText(request.body.relativeName, "LoRA名"),
+      displayName: typeof request.body.displayName === "string" ? request.body.displayName : ""
+    });
+    response.json({ entry });
+  } catch (error) {
+    response.status(400).json({ error: readableError(error) });
+  }
+});
+
+app.get("/api/loras/:uid", async (request, response) => {
+  try {
+    response.json({ entry: await civitai.getEntry(requireId(request.params.uid)) });
+  } catch (error) {
+    response.status(404).json({ error: readableError(error) });
+  }
+});
+
+app.patch("/api/loras/:uid", async (request, response) => {
+  try {
+    const entry = await civitai.updateEntry(requireId(request.params.uid), request.body ?? {});
+    const loras = await getInstalledLoras().catch(() => []);
+    response.json({ entry, loras });
+  } catch (error) {
+    response.status(400).json({ error: readableError(error) });
+  }
+});
+
+app.post("/api/loras/:uid/move", async (request, response) => {
+  try {
+    const result = await civitai.moveEntry(requireId(request.params.uid), {
+      folder: requireText(request.body.folder, "保存先フォルダ"),
+      confirm: request.body.confirm === true
+    });
+    // 移動後はReForgeへLoRA再読込を促し、最新一覧を返す。
+    const loras = await refreshLoras(config.reforge).then((items) => civitai.mergeWithInstalled(items)).catch(() => []);
+    response.json({ ...result, loras });
+  } catch (error) {
+    response.status(400).json({ error: readableError(error) });
   }
 });
 

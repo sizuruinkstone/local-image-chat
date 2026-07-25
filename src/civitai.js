@@ -8,7 +8,14 @@ import { parseRecommendedWeight } from "./lora-weight.js";
 import { normalizeInstallFolder, resolveInstallTarget } from "./lora-folder.js";
 import { AMBIGUOUS_ROOT_MESSAGE, resolveLoraRoot } from "./lora-root.js";
 import { moveLoraFileSet, stripLoraExtension, suggestAlternateFilename } from "./lora-files.js";
-import { mergeRegistryEntry, normalizeSubcategory, toLegacyCategory } from "./lora-registry.js";
+import {
+  applyManualEdit,
+  ensureEntryUid,
+  mergeRegistryEntry,
+  normalizeEditableFields,
+  normalizeSubcategory,
+  toLegacyCategory
+} from "./lora-registry.js";
 import { fetchLoraDirectory } from "./reforge.js";
 
 const CIVITAI_API = "https://civitai.com/api/v1";
@@ -27,7 +34,7 @@ export function createCivitaiService({
   fetchLoraDir = fetchLoraDirectory
 }) {
   const registry = new JsonStore(path.join(dataDir, "lora-registry.json"), {
-    schemaVersion: 1,
+    schemaVersion: 2,
     entries: []
   });
 
@@ -265,9 +272,10 @@ export function createCivitaiService({
 
       if (updates.size) {
         await registry.update((data) => {
+          // ユーザーの手動編集（manualFields）は再解析で上書きしない。
           data.entries = data.entries.map((entry) => {
             const update = updates.get(entry.id);
-            return update ? { ...entry, ...update } : entry;
+            return update ? mergeRegistryEntry(entry, update) : entry;
           });
           return data;
         });
@@ -288,6 +296,8 @@ export function createCivitaiService({
         if (!entry) return lora;
         return {
           ...lora,
+          // 手動編集した表示名・分類を一覧へ反映する。
+          displayName: entry.displayName || lora.displayName,
           category: entry.category,
           registry: entry
         };
@@ -296,8 +306,105 @@ export function createCivitaiService({
 
     async listRegistry() {
       return (await registry.read()).entries;
+    },
+
+    // ---- LoRAメタデータ編集 ----
+
+    async getEntry(uid) {
+      const entry = (await registry.read()).entries.find((item) => item.uid === uid);
+      if (!entry) throw new Error("指定されたLoRAが登録されていません");
+      return entry;
+    },
+
+    // Civitai以外から入れたLoRAも編集できるよう、必要になった時点で登録を作る。
+    async ensureEntry({ relativeName, displayName = "" }) {
+      const normalized = normalizeRelativeName(relativeName);
+      if (!normalized) throw new Error("LoRA名が不正です");
+      const current = await registry.read();
+      const existing = current.entries.find((item) => normalizeName(item.relativeName) === normalizeName(normalized));
+      if (existing?.uid) return existing;
+
+      const created = ensureEntryUid({
+        ...(existing ?? {}),
+        id: existing?.id ?? `local:${normalized}`,
+        relativeName: normalized,
+        filename: existing?.filename ?? `${normalized.split("/").at(-1)}.safetensors`,
+        modelName: existing?.modelName ?? displayName ?? normalized.split("/").at(-1),
+        category: existing?.category ?? "direction",
+        subcategory: normalizeSubcategory(existing?.subcategory ?? existing?.category, "other"),
+        manualFields: Array.isArray(existing?.manualFields) ? existing.manualFields : [],
+        source: existing?.sourceUrl ? "civitai" : "local"
+      });
+      await registry.update((data) => {
+        data.entries = data.entries.filter((item) => normalizeName(item.relativeName) !== normalizeName(normalized));
+        data.entries.unshift(created);
+        return data;
+      });
+      return created;
+    },
+
+    async updateEntry(uid, input) {
+      const patch = normalizeEditableFields(input ?? {});
+      if (!Object.keys(patch).length) throw new Error("更新する項目がありません");
+      let updated = null;
+      await registry.update((data) => {
+        const index = data.entries.findIndex((item) => item.uid === uid);
+        if (index < 0) throw new Error("指定されたLoRAが登録されていません");
+        updated = applyManualEdit(data.entries[index], patch);
+        data.entries[index] = updated;
+        return data;
+      });
+      return updated;
+    },
+
+    // 保存先変更は実ファイル移動を伴うため、必ず confirm を要求する。
+    async moveEntry(uid, { folder, confirm = false }) {
+      if (!confirm) throw new Error("保存先の変更には確認が必要です");
+      const current = await registry.read();
+      const entry = current.entries.find((item) => item.uid === uid);
+      if (!entry) throw new Error("指定されたLoRAが登録されていません");
+
+      const { root: installRoot } = await resolveRoot();
+      if (!installRoot) throw new Error(AMBIGUOUS_ROOT_MESSAGE);
+      const { absolute: destinationDir, relative: relativeFolder } = resolveInstallTarget(installRoot, folder);
+
+      const baseName = String(entry.relativeName ?? "").split("/").at(-1);
+      if (!baseName) throw new Error("移動元のLoRA名が不正です");
+      const sourceRelativeDir = entry.relativeName.includes("/")
+        ? entry.relativeName.slice(0, entry.relativeName.lastIndexOf("/"))
+        : "";
+      const sourceDir = sourceRelativeDir
+        ? resolveInstallTarget(installRoot, sourceRelativeDir).absolute
+        : installRoot;
+      if (path.resolve(sourceDir) === path.resolve(destinationDir)) {
+        return { entry, moved: [], skipped: true };
+      }
+
+      const result = await moveLoraFileSet({ sourceDir, baseName, destinationDir });
+      const relativeName = `${relativeFolder}/${baseName}`;
+      let updated = null;
+      await registry.update((data) => {
+        const index = data.entries.findIndex((item) => item.uid === uid);
+        if (index < 0) throw new Error("指定されたLoRAが登録されていません");
+        updated = { ...data.entries[index], relativeName, movedAt: new Date().toISOString() };
+        data.entries[index] = updated;
+        return data;
+      });
+      return { entry: updated, moved: result.moved, skipped: false, folder: relativeFolder };
     }
   };
+}
+
+function normalizeRelativeName(value) {
+  const normalized = String(value ?? "")
+    .replaceAll("\\", "/")
+    .replace(/\.(?:safetensors|ckpt|pt)$/i, "")
+    .replace(/\/+/g, "/")
+    .replace(/^\/+|\/+$/g, "")
+    .trim();
+  if (!normalized || normalized.split("/").some((segment) => segment === "." || segment === "..")) return "";
+  if (/^[a-zA-Z]:/.test(normalized)) return "";
+  return normalized.slice(0, 400);
 }
 
 export async function inspectCivitaiUrl(inputUrl, token = "") {

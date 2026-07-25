@@ -9,7 +9,7 @@ const IGNORED_TAGS = new Set([
 
 export function createHistoryService(dataDir, { limit = 500 } = {}) {
   const store = new JsonStore(path.join(dataDir, "history.json"), {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generations: []
   });
 
