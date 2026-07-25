@@ -69,6 +69,22 @@ export function normalizeCheckpoint(item) {
   };
 }
 
+// ReForge/A1111の起動オプションからLoRAディレクトリを取得する。
+// 未対応バージョンや接続失敗では空文字を返し、呼び出し側の推定へ委ねる。
+export async function fetchLoraDirectory(config) {
+  try {
+    const response = await fetch(`${config.url}/sdapi/v1/cmd-flags`, {
+      signal: AbortSignal.timeout(5000)
+    });
+    if (!response.ok) return "";
+    const body = await response.json();
+    const value = body?.lora_dir ?? body?.lora_dir_path ?? body?.lyco_dir ?? "";
+    return typeof value === "string" ? value.trim() : "";
+  } catch {
+    return "";
+  }
+}
+
 export async function listLoras(config) {
   const response = await fetch(`${config.url}/sdapi/v1/loras`, {
     signal: AbortSignal.timeout(10000)

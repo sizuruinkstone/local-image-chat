@@ -11,6 +11,7 @@ import {
   getCheckpointProfile,
   inferCheckpointProfile
 } from "./checkpoint-profiles.js";
+import { confirmModal, openModal, toast, withBusy } from "./ui-kit.js";
 import {
   compatibilityFilterAllows,
   getRecommendedWeight,
@@ -45,6 +46,7 @@ const elements = Object.fromEntries(
     "unlockCompositionButton", "lockCompositionButton", "favoriteFinalButton",
     "reuseFinalButton", "civitaiDetails", "civitaiUrl", "civitaiCategory",
     "civitaiFolderTop", "civitaiFolderSub", "civitaiNewFolder", "civitaiNewFolderRow",
+    "loraRootPath", "loraRootBadge", "openLoraRootButton",
     "civitaiToken", "inspectCivitaiButton", "installCivitaiButton",
     "refreshCivitaiRegistrationsButton",
     "civitaiPreview", "civitaiStatus", "updateStatusButton", "updateDetails",
@@ -110,7 +112,9 @@ loadImg2ImgPreferences();
 loadInpaintPreferences();
 loadPromptPartSelections();
 restoreSessionSecrets();
-await Promise.all([checkHealth(), loadCheckpoints(), loadLoras(), loadHistory(), loadCivitaiFolders()]);
+await Promise.all([
+  checkHealth(), loadCheckpoints(), loadLoras(), loadHistory(), loadCivitaiFolders(), loadLoraRoot()
+]);
 setGenerationMode("txt2img");
 updateGenerateButton();
 
@@ -207,6 +211,7 @@ elements.checkpointProfileSelect.addEventListener("change", handleCheckpointProf
 elements.checkpointAutoApply.addEventListener("change", () => {
   localStorage.setItem("localImageChat.checkpointAutoApply", String(elements.checkpointAutoApply.checked));
 });
+elements.openLoraRootButton.addEventListener("click", openLoraRootFolder);
 elements.inspectCivitaiButton.addEventListener("click", inspectCivitai);
 elements.installCivitaiButton.addEventListener("click", installCivitai);
 elements.refreshCivitaiRegistrationsButton.addEventListener("click", refreshCivitaiRegistrations);
@@ -2404,46 +2409,9 @@ async function deleteHistoryImage(image, button) {
   }
 }
 
-// キャンセル/実行の2択確認。Promise<boolean>を返す軽量モーダル。
-function confirmDialog(message, { confirmText = "OK", cancelText = "キャンセル", danger = false } = {}) {
-  return new Promise((resolve) => {
-    const overlay = document.createElement("div");
-    overlay.className = "confirmModal";
-    overlay.setAttribute("role", "dialog");
-    overlay.setAttribute("aria-modal", "true");
-    const box = document.createElement("div");
-    box.className = "confirmBox";
-    const text = document.createElement("p");
-    text.className = "confirmMessage";
-    text.textContent = message;
-    const row = document.createElement("div");
-    row.className = "confirmActions";
-    const cancel = document.createElement("button");
-    cancel.type = "button";
-    cancel.className = "secondary";
-    cancel.textContent = cancelText;
-    const confirm = document.createElement("button");
-    confirm.type = "button";
-    confirm.className = danger ? "danger" : "primary";
-    confirm.textContent = confirmText;
-
-    const cleanup = (result) => {
-      document.removeEventListener("keydown", onKey);
-      overlay.remove();
-      resolve(result);
-    };
-    const onKey = (event) => { if (event.key === "Escape") cleanup(false); };
-    cancel.addEventListener("click", () => cleanup(false));
-    confirm.addEventListener("click", () => cleanup(true));
-    overlay.addEventListener("click", (event) => { if (event.target === overlay) cleanup(false); });
-    document.addEventListener("keydown", onKey);
-
-    row.append(cancel, confirm);
-    box.append(text, row);
-    overlay.append(box);
-    document.body.append(overlay);
-    confirm.focus();
-  });
+// キャンセル/実行の2択確認。共通モーダル部品へ委譲する。
+function confirmDialog(message, options = {}) {
+  return confirmModal(message, options);
 }
 
 function openHistoryDetail(generation, image) {
@@ -2721,6 +2689,40 @@ function renderCivitaiPreview(metadata) {
   text.append(heading, base, triggers, outfits, filename, location);
   elements.civitaiPreview.append(text);
   elements.civitaiPreview.classList.remove("hidden");
+}
+
+// 現在認識しているLoRAルートを取得して表示する。推定値と明示設定を区別する。
+let loraRootInfo = { root: "", source: "", label: "", warning: "" };
+
+async function loadLoraRoot() {
+  try {
+    loraRootInfo = await getJson("/api/lora/install-root");
+  } catch (error) {
+    loraRootInfo = { root: "", source: "", label: "取得失敗", warning: error.message };
+  }
+  renderLoraRoot();
+}
+
+function renderLoraRoot() {
+  const { root, source, label, warning } = loraRootInfo;
+  elements.loraRootPath.textContent = root || "特定できていません";
+  elements.loraRootPath.title = warning || root || "";
+  elements.loraRootBadge.textContent = label || "未特定";
+  elements.loraRootBadge.className = `loraRootBadge ${
+    source === "config" ? "configured" : source ? "detected" : "missing"
+  }`;
+  elements.openLoraRootButton.disabled = !root;
+}
+
+async function openLoraRootFolder() {
+  await withBusy(elements.openLoraRootButton, "開いています…", async () => {
+    try {
+      const data = await postJson("/api/lora/open-root", {});
+      toast.success(`LoRAフォルダを開きました: ${data.root}`);
+    } catch (error) {
+      toast.error(error.message);
+    }
+  });
 }
 
 async function loadCivitaiFolders() {

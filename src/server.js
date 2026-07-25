@@ -2,7 +2,9 @@ import express from "express";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { AMBIGUOUS_ROOT_MESSAGE } from "./lora-root.js";
 import { checkOllama, createPrompt, unloadOllama } from "./ollama.js";
 import {
   checkReforge,
@@ -139,6 +141,29 @@ app.post("/api/loras/refresh", async (_request, response) => {
     response.json({ loras: await civitai.mergeWithInstalled(loras) });
   } catch (error) {
     response.status(500).json({ error: readableError(error) });
+  }
+});
+
+app.get("/api/lora/install-root", async (_request, response) => {
+  try {
+    response.json(await civitai.describeInstallRoot());
+  } catch (error) {
+    response.status(500).json({ error: readableError(error) });
+  }
+});
+
+// LoRAルートをOSのファイラで開く。ユーザー入力は一切受け取らず、
+// サーバー側で確定したパスだけをshellを介さずに渡す。
+app.post("/api/lora/open-root", async (_request, response) => {
+  try {
+    const { root } = await civitai.describeInstallRoot();
+    if (!root) throw new Error(AMBIGUOUS_ROOT_MESSAGE);
+    const stats = await fs.stat(root).catch(() => null);
+    if (!stats?.isDirectory()) throw new Error("LoRAルートのフォルダが見つかりません");
+    openDirectory(root);
+    response.json({ ok: true, root });
+  } catch (error) {
+    response.status(400).json({ error: readableError(error) });
   }
 });
 
@@ -396,6 +421,19 @@ async function performGeneration(body, { signal, report }) {
 
 async function getInstalledLoras() {
   return civitai.mergeWithInstalled(await listLoras(config.reforge));
+}
+
+// shellを経由せず、確定済みディレクトリパスだけを引数として渡す。
+function openDirectory(directory) {
+  const command = process.platform === "win32"
+    ? { file: "explorer.exe", args: [directory] }
+    : process.platform === "darwin"
+      ? { file: "open", args: [directory] }
+      : { file: "xdg-open", args: [directory] };
+  const child = spawn(command.file, command.args, { shell: false, detached: true, stdio: "ignore" });
+  // explorer.exeは成功時も終了コード1を返すため、エラーは握りつぶす。
+  child.on("error", (error) => console.warn(`[LoRA] フォルダを開けません: ${error.message}`));
+  child.unref();
 }
 
 function requireText(value, label) {

@@ -6,6 +6,8 @@ import { pipeline } from "node:stream/promises";
 import { JsonStore } from "./json-store.js";
 import { parseRecommendedWeight } from "./lora-weight.js";
 import { normalizeInstallFolder, resolveInstallTarget } from "./lora-folder.js";
+import { AMBIGUOUS_ROOT_MESSAGE, resolveLoraRoot } from "./lora-root.js";
+import { fetchLoraDirectory } from "./reforge.js";
 
 const CIVITAI_API = "https://civitai.com/api/v1";
 const CATEGORY_FOLDERS = {
@@ -19,15 +21,33 @@ export function createCivitaiService({
   dataDir,
   loraConfig,
   reforgeConfig,
-  inspectCivitai = inspectCivitaiUrl
+  inspectCivitai = inspectCivitaiUrl,
+  fetchLoraDir = fetchLoraDirectory
 }) {
   const registry = new JsonStore(path.join(dataDir, "lora-registry.json"), {
     schemaVersion: 1,
     entries: []
   });
 
+  // LoRAルートは「明示設定 → ReForge設定API → LoRAパス検出」の順で決める。
+  async function resolveRoot(rawLoras) {
+    const loras = rawLoras ?? await fetchRawLoras(reforgeConfig).catch(() => []);
+    const configured = loraConfig?.installDir;
+    // 明示設定があるならReForgeへ問い合わせない（起動していなくても動く）。
+    const reforgeLoraDir = configured?.trim()
+      ? ""
+      : await Promise.resolve(fetchLoraDir(reforgeConfig)).catch(() => "");
+    return { ...resolveLoraRoot({ installDir: configured, reforgeLoraDir, rawLoras: loras }), rawLoras: loras };
+  }
+
   return {
     inspect: (url, token) => inspectCivitai(url, token),
+
+    // UI表示・フォルダを開く操作で使う、現在認識しているLoRAルート。
+    async describeInstallRoot() {
+      const { root, source, label, warning } = await resolveRoot();
+      return { root, source, label, warning, configured: source === "config" };
+    },
 
     async install({ url, token, category = "style", folder = "", overwrite = false }) {
       const metadata = await inspectCivitai(url, token);
@@ -38,10 +58,9 @@ export function createCivitaiService({
       if (!defaultFolder) throw new Error("LoRAの分類が不正です");
 
       const rawLoras = await fetchRawLoras(reforgeConfig);
-      const installRoot = resolveLoraInstallRoot(loraConfig?.installDir, rawLoras);
-      if (!installRoot) {
-        throw new Error("LoRA保存先を自動検出できません。config.jsonのlora.installDirへReForgeのLoRAフォルダを設定してください");
-      }
+      const { root: installRoot } = await resolveRoot(rawLoras);
+      // 安全に特定できない場合は自動インストールを行わない（誤った場所へフォルダを作らない）。
+      if (!installRoot) throw new Error(AMBIGUOUS_ROOT_MESSAGE);
 
       // 保存先フォルダ: 指定があれば正規化・検証、なければ分類デフォルト。
       // サーバー側でも必ず検証し、LoRAルート外・パストラバーサルを拒否する。
@@ -124,8 +143,7 @@ export function createCivitaiService({
     },
 
     async listInstallFolders() {
-      const rawLoras = await fetchRawLoras(reforgeConfig).catch(() => []);
-      const installRoot = resolveLoraInstallRoot(loraConfig?.installDir, rawLoras);
+      const { root: installRoot, rawLoras } = await resolveRoot();
       const set = new Set(Object.values(CATEGORY_FOLDERS));
       for (const lora of rawLoras) {
         const folder = loraFolderOf(lora);
@@ -303,25 +321,10 @@ export function parseCivitaiUrl(inputUrl) {
   };
 }
 
+// 後方互換のために残す同期版。判定ロジックは lora-root.js に集約している。
 export function resolveLoraInstallRoot(configuredPath, rawLoras) {
-  if (typeof configuredPath === "string" && configuredPath.trim()) {
-    return path.resolve(configuredPath.trim());
-  }
-
-  for (const item of rawLoras ?? []) {
-    if (typeof item?.path !== "string" || !item.path.trim()) continue;
-    const sourcePath = item.path.trim();
-    const pathApi = /^[a-z]:[\\/]/i.test(sourcePath) ? path.win32 : path;
-    const relativeParts = String(item.name ?? "")
-      .replaceAll("\\", "/")
-      .split("/")
-      .filter(Boolean);
-    if (!relativeParts.length) continue;
-    let root = sourcePath;
-    for (let index = 0; index < relativeParts.length; index += 1) root = pathApi.dirname(root);
-    if (root && root !== ".") return root;
-  }
-  return "";
+  const { root, source } = resolveLoraRoot({ installDir: configuredPath, rawLoras });
+  return source === "config" ? path.resolve(root) : root;
 }
 
 export function deriveCivitaiOutfitPresets(trainedWords, description = "") {

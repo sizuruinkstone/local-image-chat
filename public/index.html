@@ -290,6 +290,12 @@
           <details id="civitaiDetails">
             <summary>Civitai URLからLoRAを追加</summary>
             <p class="hint">モデルページURLを貼ると、対応バージョン・Trigger Words・保存先を確認してReForgeへ配置します。</p>
+            <div class="loraRootBar">
+              <span class="loraRootLabel">LoRAルート:</span>
+              <span id="loraRootPath" class="loraRootPath">確認中…</span>
+              <span id="loraRootBadge" class="loraRootBadge">確認中</span>
+              <button id="openLoraRootButton" class="ghost smallButton" type="button">LoRAフォルダを開く</button>
+            </div>
             <label>Civitaiモデルページ
               <input id="civitaiUrl" type="url" placeholder="https://civitai.com/models/..." />
             </label>

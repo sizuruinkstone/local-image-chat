@@ -363,3 +363,48 @@ details label { margin-top: 13px; }
   .headerActions { flex-direction: column; }
   .resultActions { align-items: stretch; flex-direction: column; }
 }
+
+/* ===== 共通UI: トースト通知 ===== */
+.toastHost { position: fixed; top: 16px; right: 16px; z-index: 90; display: grid; gap: 8px; width: min(360px, calc(100% - 32px)); pointer-events: none; }
+.toast { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: start; padding: 11px 12px; border: 1px solid var(--line); border-radius: 12px; background: rgba(18,20,26,.96); box-shadow: 0 14px 44px rgba(0,0,0,.45); font-size: 12px; line-height: 1.5; pointer-events: auto; animation: toastIn .18s ease-out; }
+.toast.leaving { opacity: 0; transform: translateY(-6px); transition: opacity .16s, transform .16s; }
+@keyframes toastIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
+.toastIcon { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; font-size: 11px; font-weight: 800; }
+.toastText { overflow-wrap: anywhere; white-space: pre-wrap; }
+.toastClose { padding: 0 4px; border: 0; background: none; color: var(--muted); font-size: 15px; line-height: 1; cursor: pointer; }
+.toastClose:hover { color: var(--text); }
+.toast-success { border-color: rgba(185,255,77,.35); } .toast-success .toastIcon { background: rgba(185,255,77,.18); color: var(--accent); }
+.toast-info .toastIcon { background: rgba(255,255,255,.12); color: #cdd2dc; }
+.toast-warning { border-color: rgba(255,196,77,.35); } .toast-warning .toastIcon { background: rgba(255,196,77,.16); color: #ffc44d; }
+.toast-error { border-color: rgba(255,102,122,.4); } .toast-error .toastIcon { background: rgba(255,102,122,.16); color: var(--danger); }
+
+/* ===== 共通UI: 汎用モーダル ===== */
+.uiModal { position: fixed; inset: 0; z-index: 70; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(0,0,0,.74); }
+.uiModalBox { display: flex; flex-direction: column; width: min(620px, 100%); max-height: 90vh; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); box-shadow: 0 24px 70px rgba(0,0,0,.55); }
+.uiModal-small .uiModalBox { width: min(400px, 100%); }
+.uiModal-large .uiModalBox { width: min(1100px, 100%); }
+.uiModalHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding: 15px 16px 10px; border-bottom: 1px solid var(--line); }
+.uiModalHeader > div { display: grid; gap: 3px; min-width: 0; }
+.uiModalTitle { font-size: 14px; overflow-wrap: anywhere; }
+.uiModalSubtitle { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.uiModalClose { flex: 0 0 auto; width: 32px; height: 32px; padding: 0; border: 1px solid var(--line); border-radius: 999px; background: rgba(255,255,255,.04); color: var(--text); font-size: 18px; line-height: 1; cursor: pointer; }
+.uiModalClose:hover { border-color: var(--accent); color: var(--accent); }
+.uiModalBody { flex: 1 1 auto; overflow: auto; padding: 14px 16px; font-size: 12px; line-height: 1.6; }
+.uiModalActions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
+.uiModalActions button { padding: 8px 14px; font-size: 12px; }
+.uiModalMessage { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.uiModalDetail { margin: 10px 0 0; color: var(--muted); font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.uiFormGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; }
+.uiFormGrid label { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
+.uiFormGrid input, .uiFormGrid select, .uiFormGrid textarea { padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: rgba(255,255,255,.04); color: var(--text); font-size: 12px; }
+.uiFormGrid .fullWidthField { grid-column: 1 / -1; }
+.uiFieldNote { margin: 4px 0 0; color: var(--muted); font-size: 10px; }
+
+/* ===== LoRAルート表示 ===== */
+.loraRootBar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 10px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 11px; background: rgba(255,255,255,.03); font-size: 11px; }
+.loraRootBar .loraRootLabel { color: var(--muted); }
+.loraRootBar .loraRootPath { flex: 1 1 200px; min-width: 0; color: var(--text); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.loraRootBadge { padding: 3px 8px; border: 1px solid var(--line); border-radius: 99px; font-size: 10px; font-weight: 700; }
+.loraRootBadge.configured { border-color: rgba(185,255,77,.35); color: var(--accent); }
+.loraRootBadge.detected { border-color: rgba(255,196,77,.35); color: #ffc44d; }
+.loraRootBadge.missing { border-color: rgba(255,102,122,.4); color: var(--danger); }
