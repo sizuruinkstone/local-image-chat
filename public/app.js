@@ -62,7 +62,7 @@ const elements = Object.fromEntries(
     "reuseFinalButton", "civitaiDetails", "civitaiUrl", "civitaiCategory",
     "civitaiFolder", "civitaiFolderFavorite", "civitaiFolderPath",
     "civitaiNewFolder", "civitaiNewFolderRow",
-    "loraRootPath", "loraRootBadge", "openLoraRootButton",
+    "loraRootPath", "loraRootBadge", "openLoraRootButton", "autoRetryOnFailure",
     "experimentDetails", "experimentBadge", "experimentParameter", "experimentTarget",
     "experimentTargetRow", "experimentValues", "experimentFixSeed", "runExperimentButton",
     "cancelExperimentButton", "openExperimentsButton", "experimentStatus", "experimentProgress",
@@ -311,6 +311,10 @@ async function loadConfig() {
   }
   const savedCount = localStorage.getItem("localImageChat.candidateCount");
   if (["1", "2", "3", "4"].includes(savedCount)) elements.candidateCount.value = savedCount;
+  elements.autoRetryOnFailure.checked = localStorage.getItem("localImageChat.autoRetry") === "true";
+  elements.autoRetryOnFailure.addEventListener("change", () => {
+    localStorage.setItem("localImageChat.autoRetry", String(elements.autoRetryOnFailure.checked));
+  });
 }
 
 function setGenerationMode(mode) {
@@ -2684,8 +2688,9 @@ function selectCandidate(candidate, card) {
       : "選択画像をHires.fix";
 }
 
-async function submitGeneration(payload) {
-  const { job } = await postJson("/api/jobs", payload);
+async function submitGeneration(payload, { allowRecovery = true } = {}) {
+  const request = { ...payload, autoRetry: elements.autoRetryOnFailure.checked };
+  const { job } = await postJson("/api/jobs", request);
   activeJobId = job.id;
   setJobProgress(job);
   elements.jobBar.classList.remove("hidden");
@@ -2697,7 +2702,14 @@ async function submitGeneration(payload) {
       const current = (await getJson(`/api/jobs/${job.id}`)).job;
       setJobProgress(current);
       if (current.status === "done") return current.result;
-      if (current.status === "failed") throw new Error(current.error ?? current.message);
+      if (current.status === "failed") {
+        // 設定を下げれば通る見込みがある場合だけ、確認して1回だけ再試行する。
+        if (allowRecovery && current.recovery) {
+          const retryPayload = await confirmRecovery(current.recovery, request);
+          if (retryPayload) return submitGeneration(retryPayload, { allowRecovery: false });
+        }
+        throw new Error(current.error ?? current.message);
+      }
       if (current.status === "cancelled") throw new Error("生成を中止しました");
     }
   } finally {
@@ -2707,6 +2719,56 @@ async function submitGeneration(payload) {
       if (!activeJobId) elements.jobBar.classList.add("hidden");
     }, 1800);
   }
+}
+
+// 自動リカバリの確認ダイアログ。承諾したら再試行用のpayloadを返す。
+async function confirmRecovery(recovery, request) {
+  const accepted = await openModal({
+    title: `${recovery.label}のため、設定を下げて再試行できます`,
+    subtitle: recovery.reason,
+    size: "small",
+    dismissValue: false,
+    build: (body) => {
+      if (!recovery.changes.length) {
+        const message = document.createElement("p");
+        message.className = "uiModalMessage";
+        message.textContent = "同じ設定のまま、もう一度だけ試します。";
+        body.append(message);
+        return;
+      }
+      const list = document.createElement("ul");
+      list.className = "recoveryChanges";
+      for (const change of recovery.changes) {
+        const item = document.createElement("li");
+        item.textContent = `${change.label}: ${change.from} → ${change.to}`;
+        list.append(item);
+      }
+      body.append(list);
+      const note = document.createElement("p");
+      note.className = "uiFieldNote";
+      note.textContent = "再試行は1回だけです。失敗した場合はそのまま停止します。";
+      body.append(note);
+    },
+    actions: [
+      { label: "中止", value: false, variant: "secondary" },
+      { label: "再試行する", value: true, primary: true }
+    ]
+  }).promise;
+  if (!accepted) return null;
+
+  toast.info(`${recovery.label}のため設定を下げて再試行します`);
+  return {
+    ...request,
+    settings: { ...request.settings, ...recovery.settings },
+    retryInfo: {
+      retryReason: recovery.kind,
+      retryReasonLabel: recovery.label,
+      retryCount: 1,
+      retriedAt: new Date().toISOString(),
+      originalSettings: request.settings,
+      retrySettings: recovery.settings
+    }
+  };
 }
 
 function setJobProgress(job) {

@@ -8,6 +8,13 @@ import { AMBIGUOUS_ROOT_MESSAGE } from "./lora-root.js";
 import { migrateDataFiles } from "./migrations.js";
 import { createCheckpointSetService } from "./checkpoint-sets.js";
 import {
+  MAX_RETRY_COUNT,
+  buildRecoveryPlan,
+  buildRetryInfo,
+  classifyGenerationError,
+  describeRecoveryPlan
+} from "./recovery.js";
+import {
   COMPARABLE_PARAMETERS,
   MAX_EXPERIMENT_IMAGES,
   createExperimentService,
@@ -67,7 +74,7 @@ const updater = createUpdater(rootDir, {
   repository: config.github?.repository ?? "sizuruinkstone/local-image-chat",
   branch: config.github?.branch ?? "main"
 }, packageJson.version);
-const jobs = createJobManager(performGeneration);
+const jobs = createJobManager(generateWithRecovery);
 const checkpointSets = createCheckpointSetService(dataDir);
 const experiments = createExperimentService(dataDir, {
   jobs,
@@ -563,6 +570,43 @@ app.listen(config.port, "127.0.0.1", () => {
 
 backfillFavorites();
 
+// 失敗時に原因を判定し、安全側の設定で1回だけ再試行する。
+// 自動再試行がOFFの場合は、提案内容をjob.recoveryへ載せてユーザーへ確認させる。
+async function generateWithRecovery(body, context) {
+  try {
+    return await performGeneration(body, context);
+  } catch (error) {
+    if (context.signal?.aborted) throw error;
+    const previousCount = Number(body?.retryInfo?.retryCount ?? 0);
+    if (previousCount >= MAX_RETRY_COUNT) throw error;
+
+    const classification = classifyGenerationError(error);
+    if (!classification.retryable) throw error;
+    const originalSettings = validateSettings(body?.settings ?? {});
+    const plan = buildRecoveryPlan(originalSettings, classification.kind);
+    if (!plan) throw error;
+
+    const description = describeRecoveryPlan(classification, plan);
+    if (body?.autoRetry !== true) {
+      // ユーザー確認を挟むため、提案付きで失敗させる。
+      const failure = new Error(`${classification.message}。設定を下げて再試行できます`);
+      failure.recovery = description;
+      throw failure;
+    }
+
+    const retryInfo = buildRetryInfo({
+      originalSettings,
+      retrySettings: plan.settings,
+      classification,
+      previousCount
+    });
+    const summary = description.changes.map((change) => `${change.label}: ${change.from} → ${change.to}`).join("・");
+    context.report(4, `${classification.label}のため設定を下げて再試行します${summary ? `（${summary}）` : ""}`);
+    console.warn(`[Recovery] ${classification.label}: 1回だけ再試行します ${summary}`);
+    return performGeneration({ ...body, settings: plan.settings, retryInfo }, context);
+  }
+}
+
 async function performGeneration(body, { signal, report }) {
   const description = requireText(body.description, "生成したい内容");
   const mode = validateGenerationMode(body.mode);
@@ -583,7 +627,14 @@ async function performGeneration(body, { signal, report }) {
 
   const promptWithBoosts = appendUniqueTags(generatedPrompt.prompt, promptBoosts);
   report(18, "OllamaをVRAMから解放中");
-  await unloadOllama(config.ollama, { signal });
+  try {
+    await unloadOllama(config.ollama, { signal });
+  } catch (error) {
+    // unloadに失敗してもReForge生成自体は可能なので、警告に留める。
+    if (signal?.aborted) throw error;
+    console.warn(`[Ollama] VRAM解放に失敗しましたが生成を続行します: ${error.message}`);
+    report(19, "Ollamaの解放に失敗しましたが生成を続行します");
+  }
 
   const effectivePrompt = appendLoras(promptWithBoosts, loras);
   const effectiveNegativePrompt = appendLoraNegatives(generatedPrompt.negative_prompt, loras);
@@ -638,7 +689,7 @@ async function performGeneration(body, { signal, report }) {
     baseSeed: experiment?.baseSeed ?? null,
     derivationType: derivation?.type ?? null,
     derivationInstruction: derivation?.instruction ?? null,
-    retryInfo: body.retryInfo ?? null,
+    retryInfo: validateRetryInfo(body.retryInfo),
     sourceImageId: sourceImage?.imageId,
     sourceImageUrl,
     maskImageUrl,
@@ -798,6 +849,34 @@ function validateDerivation(value) {
   const type = DERIVATION_TYPES.includes(value.type) ? value.type : null;
   if (!type) return null;
   return { type, instruction: passthroughText(value.instruction, 500) };
+}
+
+const RETRY_TRACKED_KEYS = [
+  "width", "height", "steps", "cfgScale", "candidateCount",
+  "hiresEnabled", "hiresScale", "hiresSteps", "hiresDenoising"
+];
+
+function validateRetryInfo(value) {
+  if (!isPlainObject(value)) return null;
+  return {
+    retryReason: passthroughText(value.retryReason, 40),
+    retryReasonLabel: passthroughText(value.retryReasonLabel, 60),
+    retryCount: boundedInt(value.retryCount, 1, 0, 3),
+    retriedAt: passthroughText(value.retriedAt, 40),
+    originalSettings: pickRetrySettings(value.originalSettings),
+    retrySettings: pickRetrySettings(value.retrySettings)
+  };
+}
+
+function pickRetrySettings(value) {
+  if (!isPlainObject(value)) return {};
+  const picked = {};
+  for (const key of RETRY_TRACKED_KEYS) {
+    const item = value[key];
+    if (typeof item === "number" || typeof item === "boolean") picked[key] = item;
+    else if (typeof item === "string" && item) picked[key] = item.slice(0, 40);
+  }
+  return picked;
 }
 
 const INSTALL_MODES = ["auto", "reuse", "metadata", "rename", "move"];

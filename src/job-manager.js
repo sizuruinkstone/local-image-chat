@@ -18,6 +18,8 @@ export function createJobManager(execute, { retentionMs = 60 * 60 * 1000 } = {})
       finishedAt: null,
       result: null,
       error: null,
+      // 失敗時の自動リカバリ提案（設定を下げた再試行案）
+      recovery: null,
       payload,
       controller: new AbortController()
     };
@@ -75,6 +77,7 @@ export function createJobManager(execute, { retentionMs = 60 * 60 * 1000 } = {})
             finish(job, "cancelled", "生成を中止しました");
           } else {
             job.error = error?.message ?? "生成に失敗しました";
+            job.recovery = error?.recovery ?? null;
             finish(job, "failed", job.error);
           }
         }
@@ -127,6 +130,7 @@ function publicJob(job) {
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
     result: job.result,
-    error: job.error
+    error: job.error,
+    recovery: job.recovery
   };
 }

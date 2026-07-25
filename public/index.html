@@ -365,7 +365,11 @@
                 </select>
               </label>
             </div>
-            <p class="hint">V-Pred系Checkpoint（NoobAI V-Pred、Obsession vPredなど）は「Zero Terminal SNR」を選びます。Checkpoint切替時の推奨設定自動反映でも切り替わります。</p>
+            <label class="fullWidthField autoSizeChoice">
+              <input id="autoRetryOnFailure" type="checkbox" />
+              VRAM不足・タイムアウト時に、安全設定で1回だけ自動再試行する
+            </label>
+            <p class="hint">V-Pred系Checkpoint（NoobAI V-Pred、Obsession vPredなど）は「Zero Terminal SNR」を選びます。Checkpoint切替時の推奨設定自動反映でも切り替わります。オフの場合は、失敗時に下げる設定を確認してから再試行します。</p>
           </details>
 
           <details id="experimentDetails">
