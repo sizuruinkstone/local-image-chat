@@ -303,7 +303,10 @@
                 </select>
               </label>
               <label>保存先フォルダ
-                <select id="civitaiFolder"></select>
+                <div class="folderPicker">
+                  <select id="civitaiFolderTop" aria-label="ジャンルフォルダ"></select>
+                  <select id="civitaiFolderSub" aria-label="サブフォルダ"></select>
+                </div>
               </label>
               <label>APIキー（必要な場合だけ）
                 <input id="civitaiToken" type="password" autocomplete="off" placeholder="非公開・制限付きモデル用" />

@@ -44,7 +44,7 @@ const elements = Object.fromEntries(
     "clearPromptPartsButton", "promptPartsSummary", "compositionLockStatus",
     "unlockCompositionButton", "lockCompositionButton", "favoriteFinalButton",
     "reuseFinalButton", "civitaiDetails", "civitaiUrl", "civitaiCategory",
-    "civitaiFolder", "civitaiNewFolder", "civitaiNewFolderRow",
+    "civitaiFolderTop", "civitaiFolderSub", "civitaiNewFolder", "civitaiNewFolderRow",
     "civitaiToken", "inspectCivitaiButton", "installCivitaiButton",
     "refreshCivitaiRegistrationsButton",
     "civitaiPreview", "civitaiStatus", "updateStatusButton", "updateDetails",
@@ -215,7 +215,8 @@ elements.civitaiUrl.addEventListener("input", () => {
   elements.installCivitaiButton.disabled = true;
 });
 elements.civitaiCategory.addEventListener("change", () => applyCategoryFolder(elements.civitaiCategory.value));
-elements.civitaiFolder.addEventListener("change", onCivitaiFolderChange);
+elements.civitaiFolderTop.addEventListener("change", onCivitaiTopChange);
+elements.civitaiFolderSub.addEventListener("change", onCivitaiSubChange);
 elements.civitaiNewFolder.addEventListener("input", refreshCivitaiFolderHint);
 elements.checkUpdateButton.addEventListener("click", checkForUpdate);
 elements.applyUpdateButton.addEventListener("click", applyUpdate);
@@ -2730,17 +2731,43 @@ async function loadCivitaiFolders() {
   } catch {
     civitaiFolders = [...new Set(Object.values(civitaiFolderDefaults))];
   }
-  populateCivitaiFolderSelect();
+  populateCivitaiTopSelect();
   applyCategoryFolder(elements.civitaiCategory.value);
 }
 
-function populateCivitaiFolderSelect() {
-  const select = elements.civitaiFolder;
+// トップレベル（ジャンル）フォルダ = 各相対パスの先頭セグメント。
+function civitaiTopFolders() {
+  const tops = new Set();
+  for (const folder of civitaiFolders) {
+    const top = folder.split("/")[0];
+    if (top) tops.add(top);
+  }
+  for (const value of Object.values(civitaiFolderDefaults)) {
+    if (value) tops.add(String(value).split("/")[0]);
+  }
+  return [...tops].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+}
+
+function populateCivitaiTopSelect() {
+  const select = elements.civitaiFolderTop;
   const current = select.value;
   select.replaceChildren();
-  for (const folder of civitaiFolders) select.append(new Option(folder, folder));
-  select.append(new Option("新しいフォルダを作成", CIVITAI_NEW_FOLDER));
+  for (const top of civitaiTopFolders()) select.append(new Option(top, top));
   if ([...select.options].some((option) => option.value === current)) select.value = current;
+}
+
+// 選択中トップ配下のサブフォルダ（＋直下・新規作成）を並べる。
+function populateCivitaiSubSelect(top, preferred) {
+  const select = elements.civitaiFolderSub;
+  select.replaceChildren();
+  select.append(new Option("（このフォルダ直下）", top));
+  for (const folder of civitaiFolders) {
+    if (folder === top || !folder.startsWith(`${top}/`)) continue;
+    select.append(new Option(folder.slice(top.length + 1), folder));
+  }
+  select.append(new Option("＋ 新しいフォルダを作成", CIVITAI_NEW_FOLDER));
+  const options = [...select.options].map((option) => option.value);
+  select.value = preferred && options.includes(preferred) ? preferred : top;
 }
 
 function loadCivitaiFolderMemory() {
@@ -2761,30 +2788,65 @@ function rememberCivitaiFolder(category, folder) {
 
 // 分類に応じた保存先へ切り替える。前回手動選択（記憶）があればそれを、なければ分類デフォルトを使う。
 // 記憶先が存在しない場合は分類デフォルトへ戻す。
+const CATEGORY_KEYWORDS = {
+  character: /^characters?$/i,
+  style: /^styles?$/i,
+  body: /^bod(?:y|ies)$/i,
+  pose: /^poses?$/i
+};
+
+// 分類のデフォルト保存先。トップレベルの既定名（Characters等）が実在すればそれ、
+// なければ末尾セグメントが分類名に一致する実在フォルダ（例: illustrious/character）を使う。
+function categoryDefaultFolder(category) {
+  const hard = civitaiFolderDefaults[category];
+  if (hard && civitaiFolders.some((folder) => folder.toLowerCase() === hard.toLowerCase())) return hard;
+  const keyword = CATEGORY_KEYWORDS[category];
+  if (keyword) {
+    const match = civitaiFolders
+      .filter((folder) => keyword.test(folder.split("/").at(-1) ?? ""))
+      .sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" }))[0];
+    if (match) return match;
+  }
+  return hard ?? civitaiFolders[0] ?? "";
+}
+
 function applyCategoryFolder(category) {
-  const options = [...elements.civitaiFolder.options].map((option) => option.value);
+  const tops = civitaiTopFolders();
   const remembered = loadCivitaiFolderMemory()[category];
-  const fallback = civitaiFolderDefaults[category] ?? civitaiFolders[0] ?? "";
-  const target = remembered && options.includes(remembered) ? remembered : fallback;
-  elements.civitaiFolder.value = options.includes(target) ? target : CIVITAI_NEW_FOLDER;
+  const fallback = categoryDefaultFolder(category) || civitaiFolders[0] || tops[0] || "";
+  const rememberedTop = remembered ? remembered.split("/")[0] : "";
+  const target = rememberedTop && tops.includes(rememberedTop) ? remembered : fallback;
+  const top = target.split("/")[0];
+  elements.civitaiFolderTop.value = tops.includes(top) ? top : (tops[0] ?? "");
+  populateCivitaiSubSelect(elements.civitaiFolderTop.value, target);
   refreshCivitaiFolderHint();
 }
 
-function onCivitaiFolderChange() {
-  if (elements.civitaiFolder.value !== CIVITAI_NEW_FOLDER) {
-    rememberCivitaiFolder(elements.civitaiCategory.value, elements.civitaiFolder.value);
+function onCivitaiTopChange() {
+  populateCivitaiSubSelect(elements.civitaiFolderTop.value);
+  onCivitaiSubChange();
+}
+
+function onCivitaiSubChange() {
+  const sub = elements.civitaiFolderSub.value;
+  if (sub === CIVITAI_NEW_FOLDER) {
+    if (!elements.civitaiNewFolder.value.trim()) {
+      elements.civitaiNewFolder.value = `${elements.civitaiFolderTop.value}/`;
+    }
+  } else {
+    rememberCivitaiFolder(elements.civitaiCategory.value, sub);
   }
   refreshCivitaiFolderHint();
 }
 
 function selectedCivitaiFolder() {
-  return elements.civitaiFolder.value === CIVITAI_NEW_FOLDER
+  return elements.civitaiFolderSub.value === CIVITAI_NEW_FOLDER
     ? elements.civitaiNewFolder.value.trim()
-    : elements.civitaiFolder.value;
+    : elements.civitaiFolderSub.value;
 }
 
 function refreshCivitaiFolderHint() {
-  elements.civitaiNewFolderRow.classList.toggle("hidden", elements.civitaiFolder.value !== CIVITAI_NEW_FOLDER);
+  elements.civitaiNewFolderRow.classList.toggle("hidden", elements.civitaiFolderSub.value !== CIVITAI_NEW_FOLDER);
   if (inspectedCivitai) renderCivitaiPreview(inspectedCivitai);
 }
 

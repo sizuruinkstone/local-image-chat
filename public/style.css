@@ -231,6 +231,8 @@ details label { margin-top: 13px; }
 .integrationPreview strong, .integrationPreview span { display: block; }
 .integrationPreview span { margin-top: 4px; color: var(--muted); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
 .integrationPreview .civitaiPreviewLocation { color: var(--accent); font-weight: 700; }
+.folderPicker { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); gap: 6px; margin-top: 6px; }
+.folderPicker select { margin-top: 0; }
 
 .emptyState { text-align: center; color: var(--muted); }
 .spark { color: var(--accent); font-size: 52px; }
