@@ -251,7 +251,8 @@ details label { margin-top: 13px; }
 .sectionHeading .eyebrow { margin-bottom: 5px; font-size: 10px; }
 .muted { color: var(--muted); font-size: 12px; }
 .candidateGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.candidateCard { overflow: hidden; border: 2px solid transparent; border-radius: 13px; background: rgba(0,0,0,.28); cursor: pointer; outline: none; transition: border-color .16s ease, transform .16s ease, box-shadow .16s ease; }
+.candidateCard { overflow: hidden; border: 2px solid transparent; border-radius: 13px; background: rgba(0,0,0,.28); outline: none; transition: border-color .16s ease, transform .16s ease, box-shadow .16s ease; }
+.candidateImage { cursor: zoom-in; }
 .candidateCard:hover { transform: translateY(-2px); }
 .candidateCard:focus-visible { border-color: rgba(185,255,77,.55); }
 .candidateCard.selected { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(185,255,77,.1); }
@@ -261,6 +262,8 @@ details label { margin-top: 13px; }
 .candidateCardActions { display: flex; align-items: center; gap: 7px; }
 .candidateCardActions button { padding: 3px 6px; color: var(--muted); background: transparent; font-size: 13px; }
 .candidateCardActions .candidateImg2ImgButton { font-size: 9px; font-weight: 800; }
+.candidateCardActions .candidateSelectButton { padding: 4px 10px; border: 1px solid rgba(185,255,77,.4); border-radius: 8px; color: var(--accent); background: rgba(185,255,77,.1); font-size: 10px; font-weight: 800; }
+.candidateCard.selected .candidateSelectButton { background: rgba(185,255,77,.22); }
 .candidateCardActions button.active { color: var(--accent); }
 .finishBar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 13px; background: rgba(255,255,255,.035); color: var(--muted); font-size: 12px; }
 .finishBar > div { display: flex; gap: 8px; }

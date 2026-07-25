@@ -2051,13 +2051,17 @@ function renderCandidates(images) {
   images.forEach((candidate, index) => {
     const card = document.createElement("article");
     card.className = "candidateCard";
-    card.tabIndex = 0;
-    card.setAttribute("role", "button");
     card.setAttribute("aria-label", `候補${index + 1}、Seed ${candidate.seed}`);
 
     const image = document.createElement("img");
+    image.className = "candidateImage";
     image.src = `${candidate.imageUrl}?t=${Date.now()}`;
     image.alt = `生成候補 ${index + 1}`;
+    image.title = "クリックで拡大";
+    // 画像クリックで拡大、選択は下の「選択」ボタンで行う。
+    image.addEventListener("click", () =>
+      openImageModal(candidate.imageUrl, `候補 ${index + 1} · Seed ${candidate.seed}`)
+    );
 
     const footer = document.createElement("footer");
     const label = document.createElement("span");
@@ -2096,28 +2100,18 @@ function renderCandidates(images) {
       event.stopPropagation();
       useImageForInpaint(candidate);
     });
-    const zoom = document.createElement("button");
-    zoom.type = "button";
-    zoom.className = "candidateImg2ImgButton";
-    zoom.textContent = "拡大";
-    zoom.title = "画像を拡大表示";
-    // 候補カードのクリックは選択なので、拡大はボタンで（stopPropagationで選択を誤発火させない）。
-    zoom.addEventListener("click", (event) => {
+    const select = document.createElement("button");
+    select.type = "button";
+    select.className = "candidateSelectButton";
+    select.textContent = "選択";
+    select.title = "この画像を仕上げ対象に選ぶ";
+    select.addEventListener("click", (event) => {
       event.stopPropagation();
-      openImageModal(candidate.imageUrl, `候補 ${index + 1} · Seed ${candidate.seed}`);
+      selectCandidate(candidate, card);
     });
-    actions.append(favorite, toImg2Img, toInpaint, zoom, download);
+    actions.append(favorite, toImg2Img, toInpaint, select, download);
     footer.append(label, actions);
     card.append(image, footer);
-
-    const choose = () => selectCandidate(candidate, card);
-    card.addEventListener("click", choose);
-    card.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        choose();
-      }
-    });
     elements.candidateGrid.append(card);
   });
 
