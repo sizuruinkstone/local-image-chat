@@ -218,6 +218,17 @@ app.patch("/api/history/:imageId/favorite", async (request, response) => {
   }
 });
 
+app.delete("/api/history/:imageId", async (request, response) => {
+  try {
+    const removed = await history.deleteImage(requireId(request.params.imageId));
+    await deleteOutputImage(removed.filename ?? removed.imageUrl);
+    await syncFavoriteFile(removed, false);
+    response.json({ ok: true, preferences: await history.getPreferences() });
+  } catch (error) {
+    response.status(404).json({ error: readableError(error) });
+  }
+});
+
 app.get("/api/jobs", (_request, response) => {
   response.json({ jobs: jobs.list() });
 });
@@ -434,8 +445,17 @@ function validateSettings(input) {
     hiresScale: boundedNumber(input.hiresScale, defaults.hiresScale ?? 1.5, 1, 2),
     hiresSteps: boundedInt(input.hiresSteps, defaults.hiresSteps ?? 20, 1, 50),
     hiresDenoising: boundedNumber(input.hiresDenoising, defaults.hiresDenoising ?? 0.4, 0.1, 0.8),
-    hiresUpscaler: textOrDefault(input.hiresUpscaler, defaults.hiresUpscaler ?? "R-ESRGAN 4x+ Anime6B")
+    hiresUpscaler: textOrDefault(input.hiresUpscaler, defaults.hiresUpscaler ?? "R-ESRGAN 4x+ Anime6B"),
+    // 履歴表示用のCheckpoint情報。生成には使わず、settingsへそのまま保存する。
+    checkpoint: passthroughText(input.checkpoint),
+    checkpointHash: passthroughText(input.checkpointHash),
+    checkpointModelName: passthroughText(input.checkpointModelName),
+    checkpointFilename: passthroughText(input.checkpointFilename)
   };
+}
+
+function passthroughText(value, max = 400) {
+  return typeof value === "string" ? value.slice(0, max) : "";
 }
 
 function validateGenerationMode(value) {
@@ -548,6 +568,17 @@ async function syncFavoriteFile(image, favorite) {
       console.warn(`[Favorites] ${filename} の同期に失敗: ${error.message}`);
     }
   }
+}
+
+// 履歴削除時に出力画像ファイルを消す。outputディレクトリ外のパスは扱わない。
+async function deleteOutputImage(nameOrUrl) {
+  const filename = path.basename(String(nameOrUrl ?? "").replace(/^\/outputs\//, ""));
+  // パス区切りを含む名前（トラバーサル）は対象外にする。
+  if (!filename || path.basename(filename) !== filename) return;
+  const target = path.resolve(outputDir, filename);
+  if (path.relative(outputDir, target).startsWith("..")) return;
+  // ファイルが存在しなくても削除は成功扱い（force: true）。
+  await fs.rm(target, { force: true });
 }
 
 async function backfillFavorites() {

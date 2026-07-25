@@ -271,12 +271,39 @@ details label { margin-top: 13px; }
 .historyGrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .historyCard { overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: rgba(0,0,0,.22); }
 .historyCard img { display: block; width: 100%; aspect-ratio: 7 / 9; object-fit: cover; background: #050506; }
+.historyCardImage { cursor: zoom-in; }
 .historyCardBody { padding: 9px; }
-.historyCardBody strong { display: block; overflow: hidden; color: #d9dce3; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.historyCardBody span { display: block; margin-top: 4px; color: var(--muted); font-size: 9px; }
-.historyCardActions { display: grid; grid-template-columns: auto 1fr 1fr; gap: 6px; margin-top: 8px; }
-.historyCardActions button { padding: 7px 8px; font-size: 10px; }
-.historyCardActions button:last-child { grid-column: 1 / -1; }
+.historyCardMeta { display: grid; gap: 3px; }
+.historyCardSummary { overflow: hidden; color: #d9dce3; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.historyCardSeed { overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* 👍→削除→読込→詳細 の順を保ったまま2×2で並べ、狭幅でも破綻させない。 */
+.historyCardActions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
+.historyCardActions button { min-width: 0; padding: 7px 6px; font-size: 10px; }
+.historyDelete { color: #ffc2ca; border: 1px solid rgba(255,102,122,.32); background: rgba(255,102,122,.1); }
+.historyDelete:hover { border-color: rgba(255,102,122,.55); }
+.danger { color: #fff; border: 1px solid rgba(255,102,122,.5); background: rgba(255,80,105,.35); }
+.danger:hover { background: rgba(255,80,105,.5); }
+/* 削除確認・詳細のモーダル */
+.confirmModal, .detailModal { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(0,0,0,.72); }
+.confirmBox { width: min(360px, 100%); padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+.confirmMessage { margin: 0 0 16px; color: var(--text); font-size: 13px; line-height: 1.6; }
+.confirmActions { display: flex; justify-content: flex-end; gap: 8px; }
+.confirmActions button { padding: 8px 14px; font-size: 12px; }
+.detailBox { width: min(560px, 100%); max-height: 88vh; overflow: auto; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+.detailHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.detailHeader strong { font-size: 14px; overflow-wrap: anywhere; }
+.detailFields { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 5px 12px; margin: 0 0 12px; font-size: 12px; }
+.detailFields dt { color: var(--muted); }
+.detailFields dd { margin: 0; overflow-wrap: anywhere; }
+.detailLoraList { display: grid; gap: 3px; }
+.detailLoraRow { display: flex; justify-content: space-between; gap: 10px; }
+.detailLoraName { overflow-wrap: anywhere; }
+.detailLoraWeight { flex: 0 0 auto; color: var(--accent); font-variant-numeric: tabular-nums; }
+.detailPrompts { display: grid; gap: 6px; margin-bottom: 12px; }
+.detailPrompt summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.detailPromptBody { margin: 6px 0 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; color: var(--text); font-size: 11px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.detailActions { display: flex; flex-wrap: wrap; gap: 8px; }
+.detailActions button { padding: 8px 12px; font-size: 12px; }
 .hidden { display: none !important; }
 
 /* 中間デスクトップ: 左右ほぼ同幅。パネルが狭くなるためLoRAは上下配置。 */

@@ -926,7 +926,7 @@ function renderLoraPreview(lora, { pinned = false } = {}) {
       figure.classList.add("noPreview");
     });
     figure.classList.add("clickable");
-    figure.addEventListener("click", () => openLoraImageModal(url, `${lora.displayName}の作例`));
+    figure.addEventListener("click", () => openImageModal(url, `${lora.displayName}の作例`));
     figure.append(img);
   } else {
     figure.classList.add("noPreview");
@@ -1059,16 +1059,16 @@ function createTriggerWordsNode(triggerWords) {
   return details;
 }
 
-// 作例画像の拡大モーダル。外部ライブラリを使わず、必要時に一度だけ生成する。
-let loraImageModalEl = null;
+// 画像拡大モーダル（LoRA作例・履歴画像で共用）。外部ライブラリを使わず一度だけ生成する。
+let imageModalEl = null;
 
-function ensureLoraImageModal() {
-  if (loraImageModalEl) return loraImageModalEl;
+function ensureImageModal() {
+  if (imageModalEl) return imageModalEl;
   const overlay = document.createElement("div");
   overlay.className = "imageModal hidden";
   overlay.setAttribute("role", "dialog");
   overlay.setAttribute("aria-modal", "true");
-  overlay.setAttribute("aria-label", "作例画像の拡大表示");
+  overlay.setAttribute("aria-label", "画像の拡大表示");
   const img = document.createElement("img");
   img.className = "imageModalImg";
   img.alt = "";
@@ -1077,36 +1077,36 @@ function ensureLoraImageModal() {
   close.className = "imageModalClose";
   close.setAttribute("aria-label", "閉じる");
   close.textContent = "×";
-  close.addEventListener("click", closeLoraImageModal);
+  close.addEventListener("click", closeImageModal);
   overlay.append(img, close);
   // 背景（画像の外側）クリックで閉じる。
   overlay.addEventListener("click", (event) => {
-    if (event.target === overlay) closeLoraImageModal();
+    if (event.target === overlay) closeImageModal();
   });
   document.body.append(overlay);
-  loraImageModalEl = overlay;
+  imageModalEl = overlay;
   return overlay;
 }
 
-function openLoraImageModal(url, alt = "") {
+function openImageModal(url, alt = "") {
   if (!url) return;
-  const overlay = ensureLoraImageModal();
+  const overlay = ensureImageModal();
   const img = overlay.querySelector(".imageModalImg");
   img.src = url;
   img.alt = alt;
   overlay.classList.remove("hidden");
-  document.addEventListener("keydown", handleLoraImageModalKey);
+  document.addEventListener("keydown", handleImageModalKey);
 }
 
-function closeLoraImageModal() {
-  if (!loraImageModalEl || loraImageModalEl.classList.contains("hidden")) return;
-  loraImageModalEl.classList.add("hidden");
-  loraImageModalEl.querySelector(".imageModalImg").removeAttribute("src");
-  document.removeEventListener("keydown", handleLoraImageModalKey);
+function closeImageModal() {
+  if (!imageModalEl || imageModalEl.classList.contains("hidden")) return;
+  imageModalEl.classList.add("hidden");
+  imageModalEl.querySelector(".imageModalImg").removeAttribute("src");
+  document.removeEventListener("keydown", handleImageModalKey);
 }
 
-function handleLoraImageModalKey(event) {
-  if (event.key === "Escape") closeLoraImageModal();
+function handleImageModalKey(event) {
+  if (event.key === "Escape") closeImageModal();
 }
 
 function toggleLoraSelectionFromPreview(lora) {
@@ -2192,50 +2192,7 @@ function renderHistory(generations) {
     generation.images.map((image) => ({ generation, image }))
   );
   for (const { generation, image } of entries) {
-    const card = document.createElement("article");
-    card.className = "historyCard";
-    const preview = document.createElement("img");
-    preview.src = image.imageUrl;
-    preview.alt = generation.description || `Seed ${image.seed}`;
-    preview.loading = "lazy";
-    const body = document.createElement("div");
-    body.className = "historyCardBody";
-    const title = document.createElement("strong");
-    title.textContent = generation.description || "生成画像";
-    title.title = generation.description;
-    const metadata = document.createElement("span");
-    const mode = generation.mode === "inpaint"
-      ? "inpaint"
-      : generation.mode === "img2img"
-        ? "img2img"
-        : "txt2img";
-    metadata.textContent = `${mode}・${generation.kind === "hires" ? "仕上げ" : "候補"}・Seed ${image.seed}・${formatDate(generation.createdAt)}`;
-    const actions = document.createElement("div");
-    actions.className = "historyCardActions";
-    const favorite = document.createElement("button");
-    favorite.type = "button";
-    favorite.className = `iconButton${image.favorite ? " active" : ""}`;
-    favorite.textContent = "👍";
-    favorite.addEventListener("click", () => void toggleFavorite(image, favorite));
-    const toImg2Img = document.createElement("button");
-    toImg2Img.type = "button";
-    toImg2Img.className = "secondary";
-    toImg2Img.textContent = "img2imgへ";
-    toImg2Img.addEventListener("click", () => useImageForImg2Img(image));
-    const toInpaint = document.createElement("button");
-    toInpaint.type = "button";
-    toInpaint.className = "secondary";
-    toInpaint.textContent = "部分修正";
-    toInpaint.addEventListener("click", () => useImageForInpaint(image));
-    const reuse = document.createElement("button");
-    reuse.type = "button";
-    reuse.className = "secondary";
-    reuse.textContent = "レシピ読込・構図固定";
-    reuse.addEventListener("click", () => activateCompositionLock(generation, image));
-    actions.append(favorite, toImg2Img, toInpaint, reuse);
-    body.append(title, metadata, actions);
-    card.append(preview, body);
-    elements.historyGrid.append(card);
+    elements.historyGrid.append(createHistoryCard(generation, image));
   }
   if (!entries.length) {
     const empty = document.createElement("p");
@@ -2245,6 +2202,281 @@ function renderHistory(generations) {
       : "生成すると画像とレシピがここへ保存されます";
     elements.historyGrid.append(empty);
   }
+}
+
+function createHistoryCard(generation, image) {
+  const card = document.createElement("article");
+  card.className = "historyCard";
+
+  const preview = document.createElement("img");
+  preview.className = "historyCardImage";
+  preview.src = image.imageUrl;
+  preview.alt = generation.description || `Seed ${image.seed}`;
+  preview.loading = "lazy";
+  preview.title = "クリックで拡大";
+  preview.addEventListener("click", () =>
+    openImageModal(image.imageUrl, generation.description || `Seed ${image.seed}`)
+  );
+
+  const body = document.createElement("div");
+  body.className = "historyCardBody";
+
+  const meta = document.createElement("div");
+  meta.className = "historyCardMeta";
+  const summary = document.createElement("span");
+  summary.className = "historyCardSummary";
+  const badge = generation.settings?.checkpoint
+    ? formatCheckpointBadge(generation.settings.checkpoint)
+    : null;
+  summary.textContent = [badge, loraCountLabel(generation.loras), historyModeLabel(generation.mode)]
+    .filter(Boolean)
+    .join("・");
+  const seedLine = document.createElement("span");
+  seedLine.className = "historyCardSeed";
+  seedLine.textContent = `Seed ${image.seed}`;
+  meta.append(summary, seedLine);
+
+  const actions = document.createElement("div");
+  actions.className = "historyCardActions";
+
+  const favorite = document.createElement("button");
+  favorite.type = "button";
+  favorite.className = `iconButton${image.favorite ? " active" : ""}`;
+  favorite.title = "お気に入り";
+  favorite.textContent = "👍";
+  favorite.addEventListener("click", () => void toggleFavorite(image, favorite));
+
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "historyDelete";
+  del.textContent = "削除";
+  del.title = "この画像を削除する";
+  del.addEventListener("click", () => void deleteHistoryImage(image, del));
+
+  const load = document.createElement("button");
+  load.type = "button";
+  load.className = "secondary";
+  load.textContent = "読込";
+  load.title = "この画像の設定を読み込む";
+  load.addEventListener("click", () => activateCompositionLock(generation, image));
+
+  const detail = document.createElement("button");
+  detail.type = "button";
+  detail.className = "ghost";
+  detail.textContent = "詳細";
+  detail.title = "生成情報を表示";
+  detail.addEventListener("click", () => openHistoryDetail(generation, image));
+
+  actions.append(favorite, del, load, detail);
+  body.append(meta, actions);
+  card.append(preview, body);
+  return card;
+}
+
+// 一覧表示専用のCheckpoint短縮名。内部データには正式名を保存する。
+function formatCheckpointBadge(name) {
+  const value = String(name ?? "").toLowerCase();
+  if (!value) return "Other";
+  if (value.includes("noobai") || value.includes("noob")) return "NoobAI";
+  if (value.includes("obsession")) return "Obsession";
+  if (value.includes("chosen")) return "Chosen";
+  if (value.includes("realskin")) return "RealSkin";
+  if (value.includes("wai")) return "WAI";
+  if (value.includes("rin")) return "RIN";
+  if (value.includes("illustrious")) return "Illustrious";
+  return "Other";
+}
+
+function loraCountLabel(loras) {
+  const count = Array.isArray(loras) ? loras.length : 0;
+  return count ? `LoRA ${count}` : "LoRAなし";
+}
+
+function historyModeLabel(mode) {
+  if (mode === "img2img") return "img2img";
+  if (mode === "inpaint") return "部分修正";
+  return null;
+}
+
+async function deleteHistoryImage(image, button) {
+  const confirmed = await confirmDialog("この画像を削除しますか？", {
+    confirmText: "削除する",
+    cancelText: "キャンセル",
+    danger: true
+  });
+  if (!confirmed) return;
+  button.disabled = true;
+  try {
+    const data = await deleteJson(`/api/history/${image.id}`);
+    if (data.preferences) {
+      preferenceData = data.preferences;
+      renderPreferenceSummary();
+    }
+    await loadHistory();
+  } catch (error) {
+    button.disabled = false;
+    showError(`削除できませんでした: ${error.message}`);
+  }
+}
+
+// キャンセル/実行の2択確認。Promise<boolean>を返す軽量モーダル。
+function confirmDialog(message, { confirmText = "OK", cancelText = "キャンセル", danger = false } = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "confirmModal";
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    const box = document.createElement("div");
+    box.className = "confirmBox";
+    const text = document.createElement("p");
+    text.className = "confirmMessage";
+    text.textContent = message;
+    const row = document.createElement("div");
+    row.className = "confirmActions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "secondary";
+    cancel.textContent = cancelText;
+    const confirm = document.createElement("button");
+    confirm.type = "button";
+    confirm.className = danger ? "danger" : "primary";
+    confirm.textContent = confirmText;
+
+    const cleanup = (result) => {
+      document.removeEventListener("keydown", onKey);
+      overlay.remove();
+      resolve(result);
+    };
+    const onKey = (event) => { if (event.key === "Escape") cleanup(false); };
+    cancel.addEventListener("click", () => cleanup(false));
+    confirm.addEventListener("click", () => cleanup(true));
+    overlay.addEventListener("click", (event) => { if (event.target === overlay) cleanup(false); });
+    document.addEventListener("keydown", onKey);
+
+    row.append(cancel, confirm);
+    box.append(text, row);
+    overlay.append(box);
+    document.body.append(overlay);
+    confirm.focus();
+  });
+}
+
+function openHistoryDetail(generation, image) {
+  const overlay = document.createElement("div");
+  overlay.className = "detailModal";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-label", "生成情報");
+  const box = document.createElement("div");
+  box.className = "detailBox";
+
+  const closeDetail = () => {
+    document.removeEventListener("keydown", onKey);
+    overlay.remove();
+  };
+  const onKey = (event) => { if (event.key === "Escape") closeDetail(); };
+
+  const header = document.createElement("div");
+  header.className = "detailHeader";
+  const heading = document.createElement("strong");
+  heading.textContent = generation.description || "生成情報";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "imageModalClose";
+  close.setAttribute("aria-label", "閉じる");
+  close.textContent = "×";
+  close.addEventListener("click", closeDetail);
+  header.append(heading, close);
+
+  const settings = generation.settings ?? {};
+  const dl = document.createElement("dl");
+  dl.className = "detailFields";
+  const addField = (label, value) => {
+    if (value === null || value === undefined || value === "") return;
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    if (value instanceof Node) dd.append(value);
+    else dd.textContent = String(value);
+    dl.append(dt, dd);
+  };
+  addField("Checkpoint", settings.checkpoint || "Checkpoint記録なし");
+  addField("LoRA", buildLoraDetailNode(generation.loras));
+  addField("Seed", image.seed);
+  addField("Sampler", settings.samplerName);
+  addField("Scheduler", settings.scheduler);
+  if (settings.noiseSchedule && settings.noiseSchedule !== "Automatic") {
+    addField("Noise schedule", settings.noiseSchedule);
+  }
+  addField("Steps", settings.steps);
+  addField("CFG", settings.cfgScale);
+  const resolution = image.width && image.height
+    ? `${image.width}×${image.height}`
+    : (settings.width && settings.height ? `${settings.width}×${settings.height}` : null);
+  addField("解像度", resolution);
+  addField("生成モード", historyModeLabel(generation.mode) ?? "txt2img");
+  addField("生成日時", formatDate(generation.createdAt));
+
+  const prompts = document.createElement("div");
+  prompts.className = "detailPrompts";
+  prompts.append(buildPromptDetails("Prompt", generation.prompt));
+  prompts.append(buildPromptDetails("Negative Prompt", generation.negativePrompt));
+
+  const footer = document.createElement("div");
+  footer.className = "detailActions";
+  const toImg2Img = document.createElement("button");
+  toImg2Img.type = "button";
+  toImg2Img.className = "secondary";
+  toImg2Img.textContent = "img2imgへ";
+  toImg2Img.addEventListener("click", () => { closeDetail(); useImageForImg2Img(image); });
+  const toInpaint = document.createElement("button");
+  toInpaint.type = "button";
+  toInpaint.className = "secondary";
+  toInpaint.textContent = "部分修正";
+  toInpaint.addEventListener("click", () => { closeDetail(); useImageForInpaint(image); });
+  footer.append(toImg2Img, toInpaint);
+
+  overlay.addEventListener("click", (event) => { if (event.target === overlay) closeDetail(); });
+  document.addEventListener("keydown", onKey);
+
+  box.append(header, dl, prompts, footer);
+  overlay.append(box);
+  document.body.append(overlay);
+}
+
+function buildLoraDetailNode(loras) {
+  if (!Array.isArray(loras) || !loras.length) {
+    const span = document.createElement("span");
+    span.textContent = "LoRAなし";
+    return span;
+  }
+  const list = document.createElement("div");
+  list.className = "detailLoraList";
+  for (const lora of loras) {
+    const row = document.createElement("div");
+    row.className = "detailLoraRow";
+    const name = document.createElement("span");
+    name.className = "detailLoraName";
+    name.textContent = lora.name;
+    const weight = document.createElement("span");
+    weight.className = "detailLoraWeight";
+    weight.textContent = Number(lora.weight).toFixed(2);
+    row.append(name, weight);
+    list.append(row);
+  }
+  return list;
+}
+
+function buildPromptDetails(label, text) {
+  const details = document.createElement("details");
+  details.className = "detailPrompt";
+  const summary = document.createElement("summary");
+  summary.textContent = label;
+  const body = document.createElement("p");
+  body.className = "detailPromptBody";
+  body.textContent = text || "（なし）";
+  details.append(summary, body);
+  return details;
 }
 
 function renderPreferenceSummary() {
@@ -2539,6 +2771,10 @@ function readSettings(overrides = {}) {
     samplerName: elements.samplerName.value,
     scheduler: elements.scheduler.value,
     noiseSchedule: elements.noiseSchedule.value,
+    checkpoint: activeCheckpoint?.title ?? "",
+    checkpointHash: activeCheckpoint?.hash ?? "",
+    checkpointModelName: activeCheckpoint?.modelName ?? "",
+    checkpointFilename: activeCheckpoint?.filename ?? "",
     candidateCount: elements.candidateCount.value,
     img2imgDenoising: elements.img2imgDenoising.value,
     img2imgResizeMode: elements.img2imgResizeMode.value,
@@ -2665,6 +2901,13 @@ async function patchJson(url, body) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body)
   });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
+  return data;
+}
+
+async function deleteJson(url) {
+  const response = await fetch(url, { method: "DELETE" });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
   return data;

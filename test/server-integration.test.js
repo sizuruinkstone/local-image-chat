@@ -78,7 +78,10 @@ test("生成キューからReForge、履歴、👍集計までAPIが往復する
     prompt: "masterpiece, 1girl, blue hair",
     negativePrompt: "low quality",
     loras: [],
-    settings: { width: 512, height: 512, steps: 5, candidateCount: 1, noiseSchedule: "Zero Terminal SNR" }
+    settings: {
+      width: 512, height: 512, steps: 5, candidateCount: 1, noiseSchedule: "Zero Terminal SNR",
+      checkpoint: "waiNSFWIllustrious_v170.safetensors", checkpointHash: "abc123def"
+    }
   });
   const completed = await waitForJob(baseUrl, queued.job.id);
 
@@ -88,6 +91,9 @@ test("生成キューからReForge、履歴、👍集計までAPIが往復する
   assert.equal(reforgeRequests.noiseSchedule, "Zero Terminal SNR", "生成前にNoise scheduleをoptionsへ送る");
 
   const image = completed.result.images[0];
+  const savedRecipe = await (await fetch(`${baseUrl}/api/history/${image.id}/recipe`)).json();
+  assert.equal(savedRecipe.settings.checkpoint, "waiNSFWIllustrious_v170.safetensors", "Checkpoint名が履歴へ保存される");
+  assert.equal(savedRecipe.settings.checkpointHash, "abc123def", "Checkpoint hashが履歴へ保存される");
   await patchJson(`${baseUrl}/api/history/${image.id}/favorite`, { favorite: true });
   const preferences = await (await fetch(`${baseUrl}/api/history/preferences`)).json();
   assert.equal(preferences.favoriteCount, 1);
@@ -103,6 +109,18 @@ test("生成キューからReForge、履歴、👍集計までAPIが往復する
   assert.equal(await fileExists(favoritedFile), false, "お気に入り解除でoutputs/favoriteから削除する");
 
   await patchJson(`${baseUrl}/api/history/${image.id}/favorite`, { favorite: true });
+
+  // 履歴削除: 出力ファイル・お気に入り複製・履歴エントリがすべて消える
+  const outputFile = path.join(temporaryDir, "outputs", path.basename(image.imageUrl));
+  assert.ok(await fileExists(outputFile), "削除前は出力ファイルが存在する");
+  const deleteResult = await (await fetch(`${baseUrl}/api/history/${image.id}`, { method: "DELETE" })).json();
+  assert.equal(deleteResult.ok, true);
+  assert.equal(await fileExists(outputFile), false, "削除でoutputファイルも消える");
+  assert.equal(await fileExists(favoritedFile), false, "削除でお気に入り複製も消える");
+  const goneRecipe = await fetch(`${baseUrl}/api/history/${image.id}/recipe`);
+  assert.equal(goneRecipe.status, 404, "削除後は履歴から引けない");
+  const gonePreferences = await (await fetch(`${baseUrl}/api/history/preferences`)).json();
+  assert.equal(gonePreferences.favoriteCount, 0, "削除で👍集計からも外れる");
 
   const img2imgQueued = await postJson(`${baseUrl}/api/jobs`, {
     mode: "img2img",
