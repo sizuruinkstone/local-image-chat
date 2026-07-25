@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { AMBIGUOUS_ROOT_MESSAGE } from "./lora-root.js";
 import { migrateDataFiles } from "./migrations.js";
+import { createCheckpointSetService } from "./checkpoint-sets.js";
 import {
   COMPARABLE_PARAMETERS,
   MAX_EXPERIMENT_IMAGES,
@@ -67,6 +68,7 @@ const updater = createUpdater(rootDir, {
   branch: config.github?.branch ?? "main"
 }, packageJson.version);
 const jobs = createJobManager(performGeneration);
+const checkpointSets = createCheckpointSetService(dataDir);
 const experiments = createExperimentService(dataDir, {
   jobs,
   maxImages: config.experiments?.maxImages ?? MAX_EXPERIMENT_IMAGES
@@ -366,6 +368,45 @@ app.get("/api/jobs/:jobId", (request, response) => {
 app.delete("/api/jobs/:jobId", (request, response) => {
   try {
     response.json({ job: jobs.cancel(requireId(request.params.jobId)) });
+  } catch (error) {
+    response.status(404).json({ error: readableError(error) });
+  }
+});
+
+// ---- Checkpoint別LoRAセット ----
+
+app.get("/api/checkpoint-lora-sets", async (_request, response) => {
+  try {
+    response.json({ sets: await checkpointSets.list() });
+  } catch (error) {
+    response.status(500).json({ error: readableError(error) });
+  }
+});
+
+app.post("/api/checkpoint-lora-sets", async (request, response) => {
+  try {
+    response.status(201).json({ set: await checkpointSets.create(request.body ?? {}) });
+  } catch (error) {
+    response.status(400).json({ error: readableError(error) });
+  }
+});
+
+app.patch("/api/checkpoint-lora-sets/:setId", async (request, response) => {
+  try {
+    const setId = requireId(request.params.setId);
+    const set = request.body?.duplicate === true
+      ? await checkpointSets.duplicate(setId)
+      : await checkpointSets.patch(setId, request.body ?? {});
+    response.json({ set });
+  } catch (error) {
+    response.status(400).json({ error: readableError(error) });
+  }
+});
+
+app.delete("/api/checkpoint-lora-sets/:setId", async (request, response) => {
+  try {
+    await checkpointSets.remove(requireId(request.params.setId));
+    response.json({ ok: true });
   } catch (error) {
     response.status(404).json({ error: readableError(error) });
   }

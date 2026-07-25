@@ -256,6 +256,23 @@
               </label>
             </div>
             <div id="checkpointProfileSummary" class="checkpointProfileSummary"></div>
+            <div class="settingsGrid checkpointSettings">
+              <label>LoRAセット
+                <select id="checkpointSetSelect"></select>
+              </label>
+              <label class="checkpointAutoApply">
+                <input id="checkpointSetAutoApply" type="checkbox" />
+                Checkpoint切替時にこのセットを自動適用
+              </label>
+            </div>
+            <div class="buttonRow compactButtons">
+              <button id="saveCheckpointSetButton" class="secondary" type="button">現在の設定を保存</button>
+              <button id="applyCheckpointSetButton" class="secondary" type="button">読込</button>
+              <button id="renameCheckpointSetButton" class="ghost" type="button">名前変更</button>
+              <button id="duplicateCheckpointSetButton" class="ghost" type="button">複製</button>
+              <button id="deleteCheckpointSetButton" class="historyDelete" type="button">削除</button>
+            </div>
+            <p id="checkpointSetStatus" class="hint" aria-live="polite"></p>
             <p id="checkpointStatus" class="hint" aria-live="polite">Checkpointを取得中…</p>
           </details>
 

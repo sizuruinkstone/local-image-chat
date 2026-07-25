@@ -52,7 +52,9 @@ const elements = Object.fromEntries(
     "refreshLorasButton", "loraCategories", "versionText", "jobBar", "jobMessage",
     "checkpointDetails", "checkpointSelect", "refreshCheckpointsButton", "checkpointStatus",
     "checkpointFamilyBadge", "checkpointProfileSelect", "checkpointAutoApply",
-    "checkpointProfileSummary",
+    "checkpointProfileSummary", "checkpointSetSelect", "checkpointSetAutoApply",
+    "saveCheckpointSetButton", "applyCheckpointSetButton", "renameCheckpointSetButton",
+    "duplicateCheckpointSetButton", "deleteCheckpointSetButton", "checkpointSetStatus",
     "jobProgressText", "jobProgress", "cancelJobButton", "stylePreset",
     "compositionPreset", "lightingPreset", "moodPreset", "outfitOverride", "applyPreferenceButton",
     "clearPromptPartsButton", "promptPartsSummary", "compositionLockStatus",
@@ -142,8 +144,9 @@ loadPromptPartSelections();
 restoreSessionSecrets();
 await Promise.all([
   checkHealth(), loadCheckpoints(), loadLoras(), loadHistory(), loadCivitaiFolders(), loadLoraRoot(),
-  loadExperiments()
+  loadExperiments(), loadCheckpointSets()
 ]);
+markSettingsApplied();
 setGenerationMode("txt2img");
 updateGenerateButton();
 
@@ -237,6 +240,13 @@ elements.refreshLorasButton.addEventListener("click", () => loadLoras(true));
 elements.refreshCheckpointsButton.addEventListener("click", loadCheckpoints);
 elements.checkpointSelect.addEventListener("change", switchSelectedCheckpoint);
 elements.checkpointProfileSelect.addEventListener("change", handleCheckpointProfileChange);
+elements.checkpointSetSelect.addEventListener("change", syncCheckpointSetControls);
+elements.checkpointSetAutoApply.addEventListener("change", toggleCheckpointSetAutoApply);
+elements.saveCheckpointSetButton.addEventListener("click", saveCurrentCheckpointSet);
+elements.applyCheckpointSetButton.addEventListener("click", () => void applyCheckpointSet(selectedCheckpointSet()));
+elements.renameCheckpointSetButton.addEventListener("click", renameCheckpointSet);
+elements.duplicateCheckpointSetButton.addEventListener("click", duplicateCheckpointSet);
+elements.deleteCheckpointSetButton.addEventListener("click", deleteCheckpointSet);
 elements.checkpointAutoApply.addEventListener("change", () => {
   localStorage.setItem("localImageChat.checkpointAutoApply", String(elements.checkpointAutoApply.checked));
 });
@@ -767,6 +777,7 @@ async function loadCheckpoints() {
         : null
     );
     renderCheckpointControls();
+    renderCheckpointSetSelect();
     localStorage.setItem("localImageChat.lastCheckpoint", activeCheckpoint?.title ?? "");
     elements.checkpointStatus.textContent = activeCheckpoint
       ? `使用中: ${activeCheckpoint.title}`
@@ -821,7 +832,10 @@ async function switchSelectedCheckpoint() {
     renderCheckpointProfileSummary();
     renderLoras();
     renderSelectedLoraSummary();
+    renderCheckpointSetSelect();
     elements.checkpointStatus.textContent = `切替完了: ${activeCheckpoint.title}`;
+    // 自動適用ONのLoRAセットがあれば読み込む（編集中なら確認する）。
+    await applyAutoCheckpointSet();
     void checkHealth();
   } catch (error) {
     activeCheckpoint = previous;
@@ -913,6 +927,253 @@ function checkpointIdentity(value) {
     .replace(/\.(?:safetensors|ckpt|pt)$/i, "")
     .trim()
     .toLowerCase();
+}
+
+// ---- Checkpoint別LoRAセット ----
+
+let checkpointSets = [];
+// 「ユーザーが編集中か」を判定するための、最後に適用した設定のスナップショット。
+let appliedSettingsFingerprint = null;
+
+function settingsFingerprint() {
+  return JSON.stringify({
+    settings: readSettings({ candidateCount: elements.candidateCount.value }),
+    loras: [...selectedLoras.entries()].sort()
+  });
+}
+
+function markSettingsApplied() {
+  appliedSettingsFingerprint = settingsFingerprint();
+}
+
+function hasUnsavedSettingChanges() {
+  return appliedSettingsFingerprint !== null && appliedSettingsFingerprint !== settingsFingerprint();
+}
+
+async function loadCheckpointSets() {
+  try {
+    const data = await getJson("/api/checkpoint-lora-sets");
+    checkpointSets = data.sets ?? [];
+  } catch {
+    checkpointSets = [];
+  }
+  renderCheckpointSetSelect();
+}
+
+function setsForActiveCheckpoint() {
+  const identity = checkpointIdentity(activeCheckpoint?.title);
+  return checkpointSets.filter((set) => checkpointIdentity(set.checkpoint) === identity);
+}
+
+function renderCheckpointSetSelect() {
+  const select = elements.checkpointSetSelect;
+  const current = select.value;
+  select.replaceChildren();
+  const own = setsForActiveCheckpoint();
+  const others = checkpointSets.filter((set) => !own.includes(set));
+  select.append(new Option("セットを選択", ""));
+  if (own.length) {
+    const group = document.createElement("optgroup");
+    group.label = "このCheckpoint";
+    for (const set of own) group.append(new Option(`${set.name}${set.autoApply ? "（自動適用）" : ""}`, set.id));
+    select.append(group);
+  }
+  if (others.length) {
+    const group = document.createElement("optgroup");
+    group.label = "他のCheckpoint";
+    for (const set of others) group.append(new Option(`${set.name} / ${shorten(set.checkpoint, 22)}`, set.id));
+    select.append(group);
+  }
+  if ([...select.options].some((option) => option.value === current)) select.value = current;
+  syncCheckpointSetControls();
+}
+
+function selectedCheckpointSet() {
+  return checkpointSets.find((set) => set.id === elements.checkpointSetSelect.value) ?? null;
+}
+
+function syncCheckpointSetControls() {
+  const set = selectedCheckpointSet();
+  const disabled = !set;
+  for (const key of [
+    "applyCheckpointSetButton", "renameCheckpointSetButton",
+    "duplicateCheckpointSetButton", "deleteCheckpointSetButton"
+  ]) elements[key].disabled = disabled;
+  elements.checkpointSetAutoApply.checked = set?.autoApply === true;
+  elements.checkpointSetAutoApply.disabled = disabled;
+  elements.checkpointSetStatus.textContent = set
+    ? `${set.name}: LoRA ${set.loras.length}個・${describeSetSettings(set.settings)}`
+    : setsForActiveCheckpoint().length
+      ? "セットを選ぶと内容を表示します。"
+      : "現在のCheckpoint用のセットはまだありません。";
+}
+
+function describeSetSettings(settings = {}) {
+  return [
+    settings.width && settings.height ? `${settings.width}×${settings.height}` : null,
+    settings.steps ? `${settings.steps} Steps` : null,
+    settings.cfgScale ? `CFG ${settings.cfgScale}` : null,
+    settings.samplerName,
+    settings.scheduler
+  ].filter(Boolean).join("・") || "設定なし";
+}
+
+function currentSetPayload(name) {
+  const settings = readSettings({ candidateCount: elements.candidateCount.value });
+  return {
+    name,
+    checkpoint: activeCheckpoint?.title ?? "",
+    autoApply: elements.checkpointSetAutoApply.checked,
+    loras: readSelectedLoras(),
+    settings: {
+      samplerName: settings.samplerName,
+      scheduler: settings.scheduler,
+      noiseSchedule: settings.noiseSchedule,
+      steps: settings.steps,
+      cfgScale: settings.cfgScale,
+      width: settings.width,
+      height: settings.height,
+      hiresScale: settings.hiresScale,
+      hiresSteps: settings.hiresSteps,
+      hiresDenoising: settings.hiresDenoising,
+      hiresUpscaler: settings.hiresUpscaler
+    },
+    prompt: elements.prompt.value,
+    negativePrompt: elements.negativePrompt.value,
+    promptBoosts: readPromptBoosts()
+  };
+}
+
+async function saveCurrentCheckpointSet() {
+  if (!activeCheckpoint?.title) return toast.warning("Checkpointを選択してから保存してください");
+  const name = await promptModal("LoRAセットの名前", `${formatCheckpointBadge(activeCheckpoint.title)} 基本セット`, {
+    placeholder: "例: NoobAI 基本セット",
+    confirmText: "保存"
+  });
+  if (!name) return;
+  await withBusy(elements.saveCheckpointSetButton, "保存中…", async () => {
+    try {
+      const { set } = await postJson("/api/checkpoint-lora-sets", currentSetPayload(name));
+      await loadCheckpointSets();
+      elements.checkpointSetSelect.value = set.id;
+      syncCheckpointSetControls();
+      markSettingsApplied();
+      toast.success(`${set.name} を保存しました`);
+    } catch (error) {
+      toast.error(error.message);
+    }
+  });
+}
+
+// セット適用。ユーザーが編集中の設定を勝手に上書きしない。
+async function applyCheckpointSet(set, { silent = false } = {}) {
+  if (!set) return false;
+  if (!silent && hasUnsavedSettingChanges()) {
+    const confirmed = await confirmModal(
+      `現在の設定を「${set.name}」で上書きします。編集中の内容は失われます。`,
+      { title: "LoRAセットの適用", confirmText: "適用する" }
+    );
+    if (!confirmed) return false;
+  }
+
+  for (const [key, value] of Object.entries(set.settings ?? {})) {
+    if (elements[key] && value !== undefined && value !== "") elements[key].value = value;
+  }
+  selectedLoras.clear();
+  const missing = [];
+  for (const lora of set.loras ?? []) {
+    if (!installedLoras.some((item) => item.name === lora.name)) {
+      missing.push(lora.name);
+      continue;
+    }
+    selectedLoras.set(lora.name, Number(lora.weight));
+    loraWeights.set(lora.name, Number(lora.weight));
+    if (lora.triggerWords) loraTriggers.set(lora.name, lora.triggerWords);
+    if (lora.negativeWords) loraNegativeWords.set(lora.name, lora.negativeWords);
+  }
+  saveLoraWeights();
+  saveLoraTriggers();
+  saveLoraNegativeWords();
+  if (set.prompt || set.negativePrompt) {
+    setPromptFields(set.prompt ?? "", set.negativePrompt ?? "", elements.description.value.trim());
+  }
+  renderLoras();
+  renderSelectedLoraSummary();
+  markSettingsApplied();
+  toast.success(`${set.name}を適用しました${missing.length ? `（未導入のLoRA: ${missing.join(", ")}）` : ""}`);
+  if (missing.length) toast.warning(`未導入のLoRAはスキップしました: ${missing.join(", ")}`);
+  return true;
+}
+
+async function renameCheckpointSet() {
+  const set = selectedCheckpointSet();
+  if (!set) return;
+  const name = await promptModal("セット名を変更", set.name);
+  if (!name) return;
+  try {
+    await patchJson(`/api/checkpoint-lora-sets/${set.id}`, { name });
+    await loadCheckpointSets();
+    elements.checkpointSetSelect.value = set.id;
+    syncCheckpointSetControls();
+    toast.success("セット名を変更しました");
+  } catch (error) {
+    toast.error(error.message);
+  }
+}
+
+async function duplicateCheckpointSet() {
+  const set = selectedCheckpointSet();
+  if (!set) return;
+  try {
+    const { set: created } = await patchJson(`/api/checkpoint-lora-sets/${set.id}`, { duplicate: true });
+    await loadCheckpointSets();
+    elements.checkpointSetSelect.value = created.id;
+    syncCheckpointSetControls();
+    toast.success(`${created.name} を作成しました`);
+  } catch (error) {
+    toast.error(error.message);
+  }
+}
+
+async function deleteCheckpointSet() {
+  const set = selectedCheckpointSet();
+  if (!set) return;
+  const confirmed = await confirmModal(`LoRAセット「${set.name}」を削除しますか？`, {
+    title: "LoRAセットの削除",
+    confirmText: "削除する",
+    danger: true
+  });
+  if (!confirmed) return;
+  try {
+    await deleteJson(`/api/checkpoint-lora-sets/${set.id}`);
+    await loadCheckpointSets();
+    toast.success("LoRAセットを削除しました");
+  } catch (error) {
+    toast.error(error.message);
+  }
+}
+
+async function toggleCheckpointSetAutoApply() {
+  const set = selectedCheckpointSet();
+  if (!set) return;
+  try {
+    await patchJson(`/api/checkpoint-lora-sets/${set.id}`, { autoApply: elements.checkpointSetAutoApply.checked });
+    await loadCheckpointSets();
+    elements.checkpointSetSelect.value = set.id;
+    syncCheckpointSetControls();
+  } catch (error) {
+    toast.error(error.message);
+  }
+}
+
+// Checkpoint切替後に、自動適用ONのセットがあれば適用する。
+async function applyAutoCheckpointSet() {
+  const identity = checkpointIdentity(activeCheckpoint?.title);
+  const set = checkpointSets.find((item) => item.autoApply && checkpointIdentity(item.checkpoint) === identity);
+  if (!set) return;
+  elements.checkpointSetSelect.value = set.id;
+  syncCheckpointSetControls();
+  await applyCheckpointSet(set);
 }
 
 function getLoraCompatibility(lora) {
