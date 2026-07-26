@@ -3,6 +3,104 @@
 v2.12の総合改造で意図的に簡略化した項目と、次に手を入れるとよい箇所。
 機能自体は動作しており、以下は「あると better」の残作業。
 
+## v2.17で対応済み
+
+- プロンプト内LoRAタグとLoRA選択UIの双方向同期（`public/lora-tags.js`）
+- 実効Weight・選択元（ui / prompt / both）・LoRA警告の履歴保存と、履歴詳細での表示
+- 生成へ送るeffectivePromptでの同一LoRAの一本化と、`Copy Prompt`のeffectivePrompt化
+
+## v2.17で見送った項目
+
+### `<lyco:...>` などLoRA以外のタグ
+
+- 現状: `<lora:...>` だけを解析する。`<lyco:...>`・`<hypernet:...>`は対象外で、
+  プロンプトにあってもそのまま生成へ送るだけ。
+- 次にやるなら: `public/lora-tags.js` の `LORA_TAG_PATTERN` を種別付きへ広げ、
+  `parseLoraTags` の戻り値へ `kind` を足す。UI側の照合は種別が一致するものだけにする。
+
+### 同名ファイルが複数フォルダにある場合の選択
+
+- 現状: `A/dup` と `B/dup` のようにファイル名が重複していて、タグがフォルダ省略形
+  （`<lora:dup:1>`）の場合は自動選択せず警告だけ出す。
+- 次にやるなら: 警告からフォルダを選ばせるUIを出し、選んだ結果をタグへ書き戻す
+  （`replaceLoraWeight`と同じ要領でタグ名だけを置換する）。
+
+### 共通モジュールの置き場所
+
+- `public/lora-tags.js` はブラウザへ配信する必要があるためpublic配下にあり、
+  サーバー（`src/server.js`）はそこから相対importしている。
+  共有コードを増やす場合は `shared/` を作り、publicへコピー配信する構成を検討する。
+
+## v2.16で対応済み
+
+- AI出力の一括インポート（`public/prompt-import.js` + `public/app.js`の`openAiPromptImport`）
+- 反映前プレビュー、置き換え／末尾追加、結合結果の二重追加防止、認識不能時のRaw Promptフォールバック
+- `LoRAトリガーワード`見出しの取り込みと`(word:1.2)`からのWeight読み取り
+- Grok向け指示テンプレートの保存・全文コピー・`lora_list.csv`の自動生成（`src/prompt-template.js`）
+
+## v2.16で見送った項目
+
+### インポート時の項目マッピング変更
+
+- 現状: 見出しと反映先の対応は`HEADING_ALIASES`（`public/prompt-import.js`）の固定表。
+  未対応の見出しは取り込まず、プレビューに一覧を出すだけ。
+- 次にやるなら: プレビューの各行へ`<select>`を足し、反映先を選び直せるようにする。
+  対応表をユーザー辞書として`data/prompt-template.json`へ保存する手もある。
+
+### Grokへの直接送信
+
+- 現状: 指示テンプレートのコピーだけ。API送信は行わない（仕様どおり）。
+- 次にやるなら: `src/prompt-template.js`と並べて送信サービスを作り、
+  APIキーはDiscord Webhookと同じくサーバー内だけで保持する。
+
+## v2.15で対応済み
+
+- Favorite時のDiscord自動送信（`src/discord.js` + `PATCH /api/history/:imageId/favorite`）
+- 画像ごとの送信状態（`not_sent` / `sending` / `sent` / `failed`）の履歴保存と二重送信防止
+- 失敗した画像だけの再送（`POST /api/history/:imageId/discord/send`）
+- Webhook URLのサーバー内保持（環境変数 / `config.local.json` / `data/discord-settings.json`）
+
+## v2.15で見送った項目
+
+### Discord Bot API（チャンネルID指定）での送信
+
+- 現状: Webhookのみ対応。指示にあった「送信先チャンネル」はWebhook URLで代用している。
+- 次にやるなら: `src/discord.js`の`postToDiscordWebhook`と並べて`postToDiscordChannel`
+  （`POST /channels/{id}/messages` + `Authorization: Bot ...`）を足し、
+  `resolveWebhook`を「送信方式の解決」へ広げる。Bot Tokenも同じくサーバー内だけで保持する。
+
+### Discord投稿の削除・比較画面のバッジ
+
+- 現状: Favorite解除では投稿を消さない（仕様どおり）。投稿削除のUIとAPIは無い。
+  送信状態のバッジは履歴カード・候補カード・生成結果パネルのみで、`public/compare-view.js`の
+  👍ボタンには出していない。
+- 次にやるなら: 保存済みの`discordMessageId`を使って`DELETE /webhooks/{id}/{token}/messages/{messageId}`
+  を呼ぶ明示的な操作を履歴詳細へ追加する。
+
+## v2.14で対応済み
+
+- 日本語説明文の任意化（Promptがあれば説明文なしで生成し、履歴は`無題`）
+- 用途別Positive Prompt（分割入力）とRaw Promptモード（`public/structured-prompt.js` + `public/app.js`）
+- LoRAトリガーワードの自動取得・分類・個別Weight・枠単位の削除
+- 履歴への構造化プロンプト／Raw Prompt上書き／トリガーワード保存と、古い履歴のRaw Prompt復元
+
+## v2.14で見送った項目
+
+### トリガーワード反映先の手動変更
+
+- 現状: 反映先はLoRA分類（`registry.subcategory`）とキーワードで自動決定し、判定できない語は
+  `追加プロンプト`へ入れる。ユーザーが枠ごとに反映先を選び直すUIは無い。
+- 次にやるなら: `createTriggerRow`（`public/app.js`）へ`<select>`を足し、
+  `AppliedTriggerWord.targetField`を書き換える。`syncTriggerWords`は既存枠の
+  `targetField`を保持するので、同期で戻されることはない。
+
+### Checkpoint別LoRAセットの構造化保存
+
+- 現状: LoRAセット（`data/checkpoint-lora-sets.json`）は従来どおりPrompt全文を保存する。
+  読み込むとRaw Prompt上書きとして復元される。
+- 次にやるなら: `src/checkpoint-sets.js`のスキーマへ`structuredPrompt`を追加し、
+  `currentSetPayload` / `applyCheckpointSet`（`public/app.js`）を履歴と同じ形へ揃える。
+
 ## v2.13で対応済み
 
 - ヘッダー右上の生成キュー表示（`GET /api/queue` + `public/queue-view.js`）。

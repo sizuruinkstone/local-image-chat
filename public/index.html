@@ -46,8 +46,9 @@
 
       <div class="layout">
         <section class="panel controls">
-          <label for="description">生成したい画像</label>
+          <label for="description">生成したい画像<small class="labelNote">（任意・Promptを直接書く場合は空でOK）</small></label>
           <textarea id="description" rows="6" placeholder="例：銀髪の女の子が、黒い大きめのパーカーを着て夜の秋葉原に立っている。縦長のアニメイラスト。"></textarea>
+          <p class="hint">空のまま生成した場合、履歴には「無題」として保存されます。</p>
 
           <div class="generationMode" role="group" aria-label="生成モード">
             <button id="txt2imgModeButton" class="modeButton active" type="button" aria-pressed="true">
@@ -188,13 +189,66 @@
             <button id="unlockCompositionButton" type="button">解除</button>
           </div>
 
-          <details>
+          <details id="promptDetails" open>
             <summary>プロンプトを確認・編集</summary>
-            <label for="prompt">Prompt</label>
-            <div class="clearableField">
-              <textarea id="prompt" rows="5" placeholder="空なら日本語から自動作成"></textarea>
-              <button id="clearPromptButton" class="fieldClearButton" type="button" aria-label="Promptを消す" title="Promptだけを消す">×</button>
+            <div class="promptModeTabs" role="tablist" aria-label="Positive Promptの入力方式">
+              <button id="structuredPromptTabButton" class="promptModeTab active" type="button" role="tab" aria-selected="true" aria-controls="structuredPromptPanel">分割入力</button>
+              <button id="rawPromptTabButton" class="promptModeTab" type="button" role="tab" aria-selected="false" aria-controls="rawPromptPanel">Raw Prompt</button>
+              <button id="importAiPromptButton" class="secondary smallButton promptImportButton" type="button" title="GrokやChatGPTの回答を全文貼り付けて、各欄へ振り分けます">AI出力をインポート</button>
             </div>
+            <p id="rawPromptNotice" class="promptNotice rawPromptNotice hidden" aria-live="polite">
+              <span id="rawPromptNoticeText">Raw Promptを直接編集中です。生成にはこの内容を使います。</span>
+              <button id="useStructuredPromptButton" class="ghost smallButton" type="button" title="Raw Promptの上書きをやめて、分割入力の結合結果へ戻します">分割入力へ戻す</button>
+            </p>
+            <p id="rawTriggerNotice" class="promptNotice rawTriggerNotice hidden" aria-live="polite">
+              <span id="rawTriggerNoticeText">このLoRAにはトリガーワードがあります</span>
+              <button id="appendTriggersToRawButton" class="secondary smallButton" type="button">Raw Promptへ追加</button>
+            </p>
+
+            <div id="structuredPromptPanel" class="structuredPromptPanel" role="tabpanel" aria-labelledby="structuredPromptTabButton">
+              <p class="hint">用途ごとに入力すると、上から順に1本のPositive Promptへ結合されます。空欄は無視されます。</p>
+              <div class="promptFieldBlock">
+                <label for="promptCharacter">キャラクター</label>
+                <textarea id="promptCharacter" rows="2" placeholder="例: 1girl, solo, character_name"></textarea>
+                <div id="triggerListCharacter" class="triggerList hidden"></div>
+              </div>
+              <div class="promptFieldBlock">
+                <label for="promptAppearance">容姿・衣装</label>
+                <textarea id="promptAppearance" rows="2" placeholder="例: long hair, blue eyes, sailor uniform"></textarea>
+                <div id="triggerListAppearance" class="triggerList hidden"></div>
+              </div>
+              <div class="promptFieldBlock">
+                <label for="promptComposition">ポーズ・構図</label>
+                <textarea id="promptComposition" rows="2" placeholder="例: upper body, looking at viewer"></textarea>
+                <div id="triggerListComposition" class="triggerList hidden"></div>
+              </div>
+              <div class="promptFieldBlock">
+                <label for="promptSituation">シチュエーション・背景</label>
+                <textarea id="promptSituation" rows="2" placeholder="例: classroom, afternoon sunlight"></textarea>
+                <div id="triggerListSituation" class="triggerList hidden"></div>
+              </div>
+              <div class="promptFieldBlock">
+                <label for="promptStyle">画風・品質</label>
+                <textarea id="promptStyle" rows="2" placeholder="例: masterpiece, best quality, anime coloring"></textarea>
+                <div id="triggerListStyle" class="triggerList hidden"></div>
+              </div>
+              <div class="promptFieldBlock">
+                <label for="promptExtra">追加プロンプト</label>
+                <textarea id="promptExtra" rows="2" placeholder="例: (depth of field:1.1)"></textarea>
+                <div id="triggerListExtra" class="triggerList hidden"></div>
+              </div>
+              <p id="structuredPromptPreview" class="hint structuredPromptPreview">結合結果: （未入力）</p>
+            </div>
+
+            <div id="rawPromptPanel" class="rawPromptPanel hidden" role="tabpanel" aria-labelledby="rawPromptTabButton">
+              <label for="prompt">Prompt</label>
+              <div class="clearableField">
+                <textarea id="prompt" rows="6" placeholder="空なら日本語から自動作成"></textarea>
+                <button id="clearPromptButton" class="fieldClearButton" type="button" aria-label="Promptを消す" title="Promptだけを消す">×</button>
+              </div>
+              <p class="hint">ここを直接編集すると、その内容が生成に使われます（分割入力より優先）。</p>
+            </div>
+
             <label for="negativePrompt">Negative prompt</label>
             <div class="clearableField">
               <textarea id="negativePrompt" rows="4"></textarea>
@@ -321,6 +375,7 @@
               <aside id="loraPreview" class="loraPreview" aria-live="polite" aria-label="LoRAプレビュー"></aside>
             </div>
             <div id="selectedLoraSummary" class="selectedLoraSummary">LoRAなし</div>
+            <div id="loraSyncNotice" class="loraSyncNotice hidden" aria-live="polite"></div>
           </details>
 
           <details id="civitaiDetails">
@@ -437,6 +492,52 @@
             </div>
           </details>
 
+          <details id="promptTemplateDetails">
+            <summary>Grok向け指示テンプレート</summary>
+            <p class="hint">毎回Grokへ渡す指示文と環境情報をまとめて保存し、ワンクリックで全文コピーします。回答は「AI出力をインポート」でそのまま取り込めます。</p>
+            <label>指示テンプレート
+              <textarea id="grokInstructions" rows="8" placeholder="Grokへ渡す固定の指示文"></textarea>
+            </label>
+            <label>MY_SD_SETUP.md
+              <textarea id="grokSetupDoc" rows="6" placeholder="GPU・Checkpoint・既定設定など、環境の説明"></textarea>
+            </label>
+            <label>lora_list.csv
+              <textarea id="grokLoraCsv" rows="6" placeholder="name,displayName,category,baseModel,recommendedWeight,triggerWords"></textarea>
+            </label>
+            <div class="buttonRow compactButtons">
+              <button id="copyGrokTemplateButton" class="primary" type="button" title="指示文・MY_SD_SETUP.md・lora_list.csvをまとめてコピー">全文コピー</button>
+              <button id="saveGrokTemplateButton" class="secondary" type="button">保存</button>
+              <button id="generateLoraCsvButton" class="secondary" type="button" title="導入済みLoRAからlora_list.csvを作り直します">LoRA一覧から更新</button>
+              <button id="resetGrokInstructionsButton" class="ghost" type="button">既定の指示文に戻す</button>
+            </div>
+            <p id="grokTemplateStatus" class="hint" aria-live="polite">確認中…</p>
+          </details>
+
+          <details id="discordDetails">
+            <summary>Discord連携（Favorite自動送信）</summary>
+            <p class="hint">👍を付けた画像を、そのままDiscordへ送信します。Webhook URLはサーバー側にだけ保存され、画面へは戻しません（環境変数<code>LOCAL_IMAGE_CHAT_DISCORD_WEBHOOK</code>や<code>config.local.json</code>でも設定できます）。</p>
+            <label class="checkboxRow">
+              <input id="discordAutoSend" type="checkbox" />
+              Favorite時にDiscordへ自動送信する
+            </label>
+            <label>Webhook URL
+              <input id="discordWebhook" type="password" autocomplete="off" placeholder="https://discord.com/api/webhooks/…" />
+            </label>
+            <label class="checkboxRow">
+              <input id="discordIncludePrompt" type="checkbox" />
+              Positive Promptを投稿へ含める
+            </label>
+            <label class="checkboxRow">
+              <input id="discordIncludeMetadata" type="checkbox" />
+              Model・Seed・LoRAを投稿へ含める
+            </label>
+            <div class="buttonRow compactButtons">
+              <button id="saveDiscordSettingsButton" class="secondary" type="button">設定を保存</button>
+              <button id="clearDiscordWebhookButton" class="ghost" type="button">送信先を削除</button>
+            </div>
+            <p id="discordSettingsStatus" class="hint" aria-live="polite">確認中…</p>
+          </details>
+
           <details id="updateDetails">
             <summary>アプリのアップデート</summary>
             <p class="hint">GitHubの最新版を確認し、履歴・画像・config.jsonを残したまま更新します。非公開リポジトリではContents読み取り権限のPATが必要です。</p>
@@ -475,6 +576,7 @@
                 </div>
                 <div class="resultActions">
                   <button id="favoriteFinalButton" class="iconButton" type="button" aria-label="お気に入り">👍</button>
+                  <span id="finalDiscordStatus" class="discordStatus hidden" aria-live="polite"></span>
                   <button id="sendFinalToImg2ImgButton" class="secondary smallButton" type="button">img2imgへ</button>
                   <button id="sendFinalToInpaintButton" class="secondary smallButton" type="button">部分修正</button>
                   <button id="reuseFinalButton" class="secondary smallButton" type="button">この構図で差し替え</button>

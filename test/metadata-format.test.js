@@ -29,11 +29,14 @@ const GENERATION = {
 
 const IMAGE = { id: "image-9999", seed: 2123974969, width: 1120, height: 1440, filename: "20260726_hires.png" };
 
-test("Copy Promptはポジティブプロンプトだけを返す", () => {
+test("Copy Promptは実際に生成へ送ったeffectivePromptを返す", () => {
   const text = buildPromptText(GENERATION);
-  assert.equal(text, "anime screencap, solo, 1girl, smile");
+  // LoRAタグ込みの実効プロンプト。UIの値ではなく生成に使った内容をコピーする。
+  assert.equal(text, "anime screencap, solo, 1girl, smile, <lora:Style/Flat:0.7>");
   assert.equal(/worst quality/.test(text), false, "Negativeを含めない");
   assert.equal(/Steps|Seed|Sampler|CFG|Model/.test(text), false, "生成設定を含めない");
+  // effectivePromptが無い古い履歴はpromptで代用する
+  assert.equal(buildPromptText({ prompt: "1girl, smile" }), "1girl, smile");
   assert.equal(buildPromptText({}), "");
   assert.equal(buildPromptText(null), "");
 });

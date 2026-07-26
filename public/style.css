@@ -553,3 +553,69 @@ details label { margin-top: 13px; }
 /* 自動リカバリで設定を下げて再試行したrun・画像の目印 */
 .experimentRecovered { flex: 0 0 auto; padding: 2px 7px; border: 1px solid rgba(255,183,77,.42); border-radius: 99px; color: #ffb74d; font-size: 10px; white-space: nowrap; cursor: help; }
 .compareBadge.recovered { border-color: rgba(255,183,77,.42); color: #ffb74d; cursor: help; }
+
+/* ===== 構造化プロンプト（用途別入力）とLoRAトリガーワード ===== */
+.promptModeTabs { display: flex; gap: 6px; margin: 4px 0 10px; }
+.promptModeTab { padding: 7px 14px; border: 1px solid var(--line); border-radius: 99px; background: rgba(255,255,255,.03); color: var(--muted); font-size: 12px; cursor: pointer; }
+.promptModeTab:hover { color: var(--text); }
+.promptModeTab.active { border-color: rgba(185,255,77,.45); background: rgba(185,255,77,.1); color: var(--accent); font-weight: 700; }
+.promptNotice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; font-size: 12px; }
+.rawPromptNotice { border-color: rgba(255,183,77,.42); background: rgba(255,183,77,.08); color: #ffb74d; }
+.rawTriggerNotice { border-color: rgba(185,255,77,.35); background: rgba(185,255,77,.07); color: var(--accent); }
+.promptNotice > span { flex: 1 1 200px; }
+.promptFieldBlock { margin: 0 0 12px; }
+.promptFieldBlock > label { display: block; margin-bottom: 4px; color: var(--muted); font-size: 12px; }
+.promptFieldBlock > textarea { width: 100%; }
+.structuredPromptPreview { padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; overflow-wrap: anywhere; }
+
+.triggerList { margin-top: 6px; padding: 6px 10px; border: 1px dashed var(--line); border-radius: 10px; background: rgba(255,255,255,.02); }
+/* summaryをflexにすると既定の三角が消えるため、開閉の目印を自前で出す */
+.triggerPanelSummary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; padding: 2px 0; color: var(--muted); font-size: 11px; cursor: pointer; list-style: none; }
+.triggerPanelSummary::-webkit-details-marker { display: none; }
+.triggerPanelSummary::before { content: "▸"; flex: 0 0 auto; font-size: 10px; transition: transform .15s ease; }
+.triggerPanel[open] .triggerPanelSummary::before { transform: rotate(90deg); }
+.triggerPanelSummary:hover { color: var(--text); }
+.triggerPanelTitle { font-weight: 700; letter-spacing: .06em; }
+.triggerPanelPreview { flex: 1 1 120px; min-width: 0; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.triggerPanel[open] .triggerPanelSummary { color: var(--text); }
+.triggerPanel[open] .triggerPanelPreview { display: none; }
+.triggerPanelBody { margin-top: 4px; padding-top: 4px; border-top: 1px solid rgba(255,255,255,.06); }
+.triggerRow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 4px 0; }
+.triggerRow + .triggerRow { border-top: 1px solid rgba(255,255,255,.05); }
+.triggerText { flex: 1 1 140px; font-size: 12px; overflow-wrap: anywhere; }
+.triggerSource { color: var(--muted); font-size: 10px; }
+.triggerWeight { display: flex; align-items: center; gap: 5px; margin: 0; color: var(--muted); font-size: 11px; }
+.triggerWeight input { width: 72px; margin: 0; padding: 5px 7px; font-size: 11px; }
+.triggerToggle { width: 24px; height: 24px; padding: 0; border: 1px solid var(--line); border-radius: 999px; background: rgba(20,22,28,.9); color: var(--muted); font-size: 12px; line-height: 1; cursor: pointer; }
+.triggerToggle:hover { border-color: var(--danger); color: var(--danger); }
+.triggerRow.disabled .triggerText { color: var(--muted); text-decoration: line-through; }
+.triggerRow.disabled .triggerToggle:hover { border-color: var(--accent); color: var(--accent); }
+.labelNote { margin-left: 6px; color: var(--muted); font-size: 11px; font-weight: 400; }
+
+/* ===== FavoriteのDiscord送信状態 ===== */
+.discordStatus { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted); font-size: 10px; white-space: nowrap; }
+.discordStatus.status-sending { border-color: rgba(185,255,77,.35); color: var(--accent); }
+.discordStatus.status-sent { border-color: rgba(255,255,255,.16); color: var(--muted); }
+.discordStatus.status-failed { border-color: rgba(255,102,122,.45); color: var(--danger); }
+.discordRetryButton { padding: 1px 7px; border: 1px solid rgba(255,102,122,.5); border-radius: 99px; background: transparent; color: var(--danger); font-size: 10px; cursor: pointer; }
+.discordRetryButton:hover { background: rgba(255,102,122,.12); }
+.discordRetryButton:disabled { opacity: .5; cursor: default; }
+.checkboxRow { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; }
+.checkboxRow input { margin: 0; }
+
+/* ===== AI出力の一括インポート ===== */
+.promptImportButton { margin-left: auto; }
+.importInput { width: 100%; min-height: 180px; font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 12px; }
+.importModeRow { display: flex; flex-wrap: wrap; gap: 14px; margin: 10px 0; font-size: 12px; }
+.importModeChoice { display: flex; align-items: center; gap: 6px; margin: 0; cursor: pointer; }
+.importPreview { margin-top: 4px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: rgba(255,255,255,.02); }
+.importPreviewFields { display: grid; grid-template-columns: minmax(96px, auto) 1fr; gap: 4px 12px; margin: 0; font-size: 12px; }
+.importPreviewFields dt { color: var(--muted); font-size: 11px; }
+.importPreviewFields dd { margin: 0; overflow-wrap: anywhere; }
+.importPreviewNote { color: var(--muted); }
+.importPreviewWarning { color: #ffb74d; }
+
+/* ===== プロンプト内LoRAタグとUI選択の同期 ===== */
+.loraSyncNotice { margin-top: 6px; padding: 7px 10px; border: 1px solid rgba(255,183,77,.4); border-radius: 10px; background: rgba(255,183,77,.07); color: #ffb74d; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.detailLoraSource { flex: 0 0 auto; color: var(--muted); font-size: 10px; }
+.detailLoraNotices { display: grid; gap: 3px; color: #ffb74d; font-size: 11px; overflow-wrap: anywhere; }

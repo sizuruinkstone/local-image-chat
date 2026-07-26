@@ -35,6 +35,37 @@ import {
   resolveLoraPreviewUrl,
   shouldApplyRecommendedWeight
 } from "./lora-preview.js";
+import {
+  buildLoraNotices,
+  describeLoraNotices,
+  hasLoraTag,
+  parseLoraTags,
+  reconcilePromptLoras,
+  removeLoraTags,
+  replaceLoraWeight
+} from "./lora-tags.js";
+import {
+  DEFAULT_GROK_INSTRUCTIONS,
+  buildGrokRequestText,
+  buildLoraCsv,
+  mergePromptValue,
+  parseAiPromptOutput
+} from "./prompt-import.js";
+import {
+  PROMPT_FIELDS,
+  PROMPT_FIELD_LABELS,
+  appendTriggersToRawPrompt,
+  buildFinalPrompt,
+  formatTriggerWord,
+  hasSectionContent,
+  normalizeAppliedTriggerWords,
+  normalizeSections,
+  normalizeTriggerWeight,
+  pendingTriggerWords,
+  syncTriggerWords,
+  triggerKey,
+  triggersForField
+} from "./structured-prompt.js";
 
 const PROFILE_STORAGE_VERSION = 3;
 const MAX_INIT_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -85,14 +116,72 @@ const elements = Object.fromEntries(
     "inpaintFill", "inpaintFullRes", "inpaintFullResPadding",
     "sendFinalToImg2ImgButton", "sendFinalToInpaintButton", "finalEyebrow", "finalTitle",
     "queueIndicator", "queueIndicatorText", "clearPromptButton", "clearNegativePromptButton",
-    "clearPromptsButton", "clearSeedButton", "clearCivitaiUrlButton"
+    "clearPromptsButton", "clearSeedButton", "clearCivitaiUrlButton",
+    "promptDetails", "structuredPromptTabButton", "rawPromptTabButton",
+    "structuredPromptPanel", "rawPromptPanel", "structuredPromptPreview",
+    "rawPromptNotice", "rawPromptNoticeText", "useStructuredPromptButton",
+    "rawTriggerNotice", "rawTriggerNoticeText", "appendTriggersToRawButton",
+    "promptCharacter", "promptAppearance", "promptComposition", "promptSituation",
+    "promptStyle", "promptExtra",
+    "triggerListCharacter", "triggerListAppearance", "triggerListComposition",
+    "triggerListSituation", "triggerListStyle", "triggerListExtra",
+    "discordDetails", "discordAutoSend", "discordWebhook", "discordIncludePrompt",
+    "discordIncludeMetadata", "saveDiscordSettingsButton", "clearDiscordWebhookButton",
+    "discordSettingsStatus", "finalDiscordStatus", "importAiPromptButton", "loraSyncNotice",
+    "promptTemplateDetails", "grokInstructions", "grokSetupDoc", "grokLoraCsv",
+    "copyGrokTemplateButton", "saveGrokTemplateButton", "generateLoraCsvButton",
+    "resetGrokInstructionsButton", "grokTemplateStatus"
   ].map((id) => [id, document.getElementById(id)])
 );
+
+// 用途別プロンプトの入力欄・トリガーワード表示枠と、要素IDの対応。
+const PROMPT_FIELD_ELEMENTS = {
+  character: "promptCharacter",
+  appearance: "promptAppearance",
+  composition: "promptComposition",
+  situation: "promptSituation",
+  style: "promptStyle",
+  extra: "promptExtra"
+};
+
+const DISCORD_STATUS_LABELS = {
+  sending: "★ Discord送信中…",
+  sent: "★ Discord送信済み",
+  failed: "★ Favorite済み・Discord送信失敗"
+};
+
+// 画像IDごとのDiscord送信状態。履歴の再描画で作り直されるバッジもここから読む。
+const discordStates = new Map();
+const discordWatchers = new Set();
+
+// LoRAトリガーワード一覧の開閉状態（項目ごと）。既定は折りたたみ。
+const triggerPanelOpen = new Map();
+const TRIGGER_PREVIEW_COUNT = 2;
+// AI出力から取り込んだトリガーワードの由来ID（LoRA名と混ざらない形にする）。
+const IMPORT_SOURCE_PREFIX = "import:";
+// プロンプト入力中に同期を走らせすぎないための待ち時間。
+const LORA_SYNC_DEBOUNCE = 400;
+let loraSyncTimer = null;
+
+const TRIGGER_LIST_ELEMENTS = {
+  character: "triggerListCharacter",
+  appearance: "triggerListAppearance",
+  composition: "triggerListComposition",
+  situation: "triggerListSituation",
+  style: "triggerListStyle",
+  extra: "triggerListExtra"
+};
 
 let promptDescription = "";
 let selectedCandidate = null;
 let lastGeneration = null;
 let settingPromptProgrammatically = false;
+// 用途別プロンプト（分割入力）とRaw Promptの状態。
+// rawPromptOverride が true の間は、分割入力ではなくRaw Promptを生成へ使う。
+let appliedTriggerWords = [];
+let rawPromptOverride = false;
+let rawPromptOverrideSource = "manual";
+let promptMode = "structured";
 let installedLoras = [];
 let loraConfig = { defaultWeight: 0.7, maxSelected: 4 };
 let activeJobId = null;
@@ -155,6 +244,10 @@ let maskUndoStack = [];
 let maskRedoStack = [];
 const MAX_MASK_HISTORY = 12;
 const selectedLoras = new Map();
+// LoRAごとの選択元: "ui"（UI操作）/ "prompt"（プロンプト内タグ）/ "both"
+const loraSelectionSources = new Map();
+// 直近のLoRAタグ同期で出た警告（重複・未インストールなど）。履歴へも保存する。
+let loraSyncNotices = [];
 const loraWeights = loadLoraWeights();
 const loraTriggers = loadLoraTriggers();
 const loraNegativeWords = loadStringMap("localImageChat.loraNegativeWords");
@@ -169,9 +262,13 @@ loadImg2ImgPreferences();
 loadInpaintPreferences();
 loadPromptPartSelections();
 restoreSessionSecrets();
+setPromptMode(promptMode);
+renderTriggerLists();
+renderPromptModeState();
+syncRawPromptFromSections();
 await Promise.all([
   checkHealth(), loadCheckpoints(), loadLoras(), loadHistory(), loadCivitaiFolders(), loadLoraRoot(),
-  loadExperiments(), loadCheckpointSets()
+  loadExperiments(), loadCheckpointSets(), loadDiscordSettings(), loadPromptTemplate()
 ]);
 markSettingsApplied();
 setGenerationMode("txt2img");
@@ -260,8 +357,15 @@ elements.queueIndicator.addEventListener("click", openQueuePanel);
 elements.clearPromptsButton.addEventListener("click", clearBothPrompts);
 elements.candidateCount.addEventListener("change", handleCandidateCountChange);
 elements.description.addEventListener("input", handleDescriptionChange);
-elements.prompt.addEventListener("input", markPromptAsCurrent);
+elements.prompt.addEventListener("input", handleRawPromptInput);
 elements.negativePrompt.addEventListener("input", markPromptAsCurrent);
+elements.structuredPromptTabButton.addEventListener("click", () => setPromptMode("structured"));
+elements.rawPromptTabButton.addEventListener("click", () => setPromptMode("raw"));
+elements.useStructuredPromptButton.addEventListener("click", useStructuredPrompt);
+elements.appendTriggersToRawButton.addEventListener("click", appendTriggersToRaw);
+for (const field of PROMPT_FIELDS) {
+  promptFieldElement(field).addEventListener("input", handleStructuredPromptInput);
+}
 elements.loraSearch.addEventListener("input", renderLoras);
 elements.loraCompatibilityFilter.value = loadLoraCompatibilityFilter();
 elements.loraCompatibilityFilter.addEventListener("change", () => {
@@ -298,6 +402,13 @@ elements.civitaiCategory.addEventListener("change", () => applyCategoryFolder(el
 elements.civitaiFolder.addEventListener("change", onCivitaiFolderChange);
 elements.civitaiFolderFavorite.addEventListener("click", toggleCivitaiFolderFavorite);
 elements.civitaiNewFolder.addEventListener("input", refreshCivitaiFolderHint);
+elements.importAiPromptButton.addEventListener("click", openAiPromptImport);
+elements.copyGrokTemplateButton.addEventListener("click", copyGrokTemplate);
+elements.saveGrokTemplateButton.addEventListener("click", () => void savePromptTemplate());
+elements.generateLoraCsvButton.addEventListener("click", updateLoraCsvFromInstalled);
+elements.resetGrokInstructionsButton.addEventListener("click", resetGrokInstructions);
+elements.saveDiscordSettingsButton.addEventListener("click", saveDiscordSettings);
+elements.clearDiscordWebhookButton.addEventListener("click", clearDiscordWebhook);
 elements.checkUpdateButton.addEventListener("click", checkForUpdate);
 elements.applyUpdateButton.addEventListener("click", applyUpdate);
 elements.updateStatusButton.addEventListener("click", () => {
@@ -1517,10 +1628,10 @@ function toggleLoraSelectionFromPreview(lora) {
     return;
   }
   if (isSelected) {
-    selectedLoras.delete(lora.name);
+    setLoraSelected(lora.name, false);
   } else {
     const weight = loraWeights.get(lora.name) ?? lora.registry?.recommendedWeight ?? loraConfig.defaultWeight;
-    selectedLoras.set(lora.name, Number(weight));
+    setLoraSelected(lora.name, true, weight);
   }
   clearError();
   // 操作したLoRAを固定して詳細を表示したまま一覧を再描画する。
@@ -1537,6 +1648,7 @@ function applyRecommendedWeight(lora) {
   saveLoraWeights();
   if (selectedLoras.has(lora.name)) {
     selectedLoras.set(lora.name, recommended.weight);
+    applyLoraWeightToPrompt(lora.name, recommended.weight);
     renderSelectedLoraSummary();
   }
   pinnedLoraName = lora.name;
@@ -1687,7 +1799,8 @@ function createLoraRow(lora) {
   const slider = document.createElement("input");
   slider.type = "range";
   slider.min = "0.05";
-  slider.max = "1.5";
+  // プロンプト内タグ・サーバー側と同じ上限（0.05〜2）に合わせる。
+  slider.max = "2";
   slider.step = "0.05";
   slider.value = String(weight);
   slider.setAttribute("aria-label", `${lora.displayName}の強度`);
@@ -1770,8 +1883,7 @@ function createLoraRow(lora) {
       showError(`LoRAは最大${loraConfig.maxSelected}個までです`);
       return;
     }
-    if (checkbox.checked) selectedLoras.set(lora.name, Number(slider.value));
-    else selectedLoras.delete(lora.name);
+    setLoraSelected(lora.name, checkbox.checked, Number(slider.value));
     clearError();
     renderSelectedLoraSummary();
     if (activeLoraCategory === "selected" && !checkbox.checked) {
@@ -1792,6 +1904,8 @@ function createLoraRow(lora) {
     saveLoraWeights();
     if (selectedLoras.has(lora.name)) {
       selectedLoras.set(lora.name, nextWeight);
+      // プロンプトに同じLoRAタグがあれば、そのWeightだけを書き換える。
+      applyLoraWeightToPrompt(lora.name, nextWeight);
       renderSelectedLoraSummary();
     }
   });
@@ -2138,6 +2252,9 @@ function getPresetWeight(profile, preset) {
 }
 
 function renderSelectedLoraSummary() {
+  // LoRAの選択・weight・トリガーワード編集はすべてここを通るので、
+  // トリガーワード枠の追加・削除もここで同期する。
+  syncAppliedTriggerWords();
   const items = [...selectedLoras].map(([name, weight]) => {
     const triggerWords = loraTriggers.get(name);
     const suppressesOutfit = Boolean(loraNegativeWords.get(name));
@@ -2187,7 +2304,8 @@ async function buildPrompt() {
   try {
     const data = await requestPrompt(description);
     elements.explanation.textContent = data.explanation_ja;
-    document.querySelector("details").open = true;
+    elements.promptDetails.open = true;
+    setPromptMode("raw");
   } catch (error) {
     showError(error.message);
   } finally {
@@ -2198,7 +2316,10 @@ async function buildPrompt() {
 async function generateCandidates() {
   clearError();
   const description = elements.description.value.trim();
-  if (!description) return showError("生成したい画像を日本語で入力してくれ");
+  // 説明文は任意。Promptが空のときだけ、日本語からの自動作成のために必須になる。
+  if (!description && !currentPositivePrompt().trim()) {
+    return showError("生成したい画像を日本語で入力するか、Promptを入力してくれ");
+  }
   if (generationMode !== "txt2img" && !initImageReference) {
     setGenerationMode(generationMode);
     return showError(`${generationMode === "inpaint" ? "部分修正" : "img2img"}の参照画像を選択してください`);
@@ -2207,6 +2328,8 @@ async function generateCandidates() {
     return showError("修正したい範囲を白く塗ってください");
   }
 
+  // プロンプト内のLoRAタグとUI選択を先に揃えてから、送信内容を組み立てる。
+  syncLorasFromPrompt();
   setResultTab("result");
   elements.emptyState.classList.add("hidden");
   elements.finalResult.classList.add("hidden");
@@ -2222,7 +2345,7 @@ async function generateCandidates() {
   setBusy(true, `${count}枚の${modeLabel}を1枚ずつ生成します…`);
 
   try {
-    if (!elements.prompt.value.trim() || promptDescription !== description) {
+    if (shouldRequestPrompt(description)) {
       elements.loadingText.textContent = "日本語からプロンプトを作成中…";
       await requestPrompt(description);
     }
@@ -2231,8 +2354,7 @@ async function generateCandidates() {
     const data = await submitGeneration({
       mode: generationMode,
       description,
-      prompt: elements.prompt.value,
-      negativePrompt: elements.negativePrompt.value,
+      ...readPromptPayload(),
       loras: readSelectedLoras(),
       promptBoosts: readPromptBoosts(),
       ...readInitImagePayload(),
@@ -2249,11 +2371,15 @@ async function generateCandidates() {
       description,
       prompt: data.prompt,
       negativePrompt: data.negativePrompt,
+      structuredPrompt: data.structuredPrompt ?? null,
+      rawPromptOverride: data.rawPromptOverride === true,
+      rawPrompt: data.rawPrompt ?? "",
+      appliedTriggerWords: data.appliedTriggerWords ?? [],
       settings: data.settings,
       loras: data.loras,
       images: data.images
     };
-    setPromptFields(data.prompt, data.negativePrompt, description);
+    applyGeneratedPromptResult(data, description);
     elements.explanation.textContent = data.explanation;
     renderCandidates(data.images);
     elements.resultContent.classList.remove("hidden");
@@ -2284,6 +2410,7 @@ async function finishSelected() {
       description: lastGeneration.description,
       prompt: lastGeneration.prompt,
       negativePrompt: lastGeneration.negativePrompt,
+      ...carryStructuredPrompt(lastGeneration),
       loras: lastGeneration.loras,
       promptBoosts: [],
       parentImageId: selectedCandidate.id,
@@ -2314,6 +2441,18 @@ async function finishSelected() {
   }
 }
 
+// Hires仕上げ・再生成でも、元の構造化プロンプト情報を履歴へ引き継ぐ。
+// 実際に使うPositive Promptは呼び出し側のpromptのままで、ここでは記録用の情報だけ渡す。
+function carryStructuredPrompt(source) {
+  if (!source?.structuredPrompt) return {};
+  return {
+    structuredPrompt: source.structuredPrompt,
+    rawPromptOverride: source.rawPromptOverride === true,
+    rawPrompt: source.rawPrompt ?? "",
+    appliedTriggerWords: source.appliedTriggerWords ?? []
+  };
+}
+
 // 高解像度仕上げの結果を「生成結果」タブへ表示する共通処理。
 function presentHiresResult(data, description, eyebrow, title) {
   const finished = data.images[0];
@@ -2326,6 +2465,10 @@ function presentHiresResult(data, description, eyebrow, title) {
     description,
     prompt: data.prompt,
     negativePrompt: data.negativePrompt,
+    structuredPrompt: data.structuredPrompt ?? null,
+    rawPromptOverride: data.rawPromptOverride === true,
+    rawPrompt: data.rawPrompt ?? "",
+    appliedTriggerWords: data.appliedTriggerWords ?? [],
     settings: data.settings,
     loras: data.loras,
     images: data.images
@@ -2338,6 +2481,9 @@ function presentHiresResult(data, description, eyebrow, title) {
   elements.downloadLink.href = finished.imageUrl;
   elements.downloadLink.download = finished.filename;
   elements.favoriteFinalButton.classList.toggle("active", finished.favorite);
+  if (finished.discord) discordStates.set(finished.id, finished.discord);
+  elements.finalDiscordStatus.dataset.discordImage = finished.id;
+  renderDiscordStatusNode(elements.finalDiscordStatus, finished.id);
   elements.emptyState.classList.add("hidden");
   elements.resultContent.classList.remove("hidden");
   elements.finalResult.classList.remove("hidden");
@@ -2370,6 +2516,7 @@ async function hiresFromGallery(generation, image) {
       description: generation.description ?? "",
       prompt: generation.prompt ?? "",
       negativePrompt: generation.negativePrompt ?? "",
+      ...carryStructuredPrompt(generation),
       loras: generation.loras ?? [],
       promptBoosts: [],
       parentImageId: image.id,
@@ -2494,7 +2641,9 @@ async function runExperiment() {
   }
 
   const description = elements.description.value.trim();
-  if (!description) return toast.warning("生成したい画像を日本語で入力してください");
+  if (!description && !currentPositivePrompt().trim()) {
+    return toast.warning("生成したい画像を日本語で入力するか、Promptを入力してください");
+  }
   if (generationMode !== "txt2img" && !initImageReference) {
     return toast.warning(`${generationMode === "inpaint" ? "部分修正" : "img2img"}の参照画像を選択してください`);
   }
@@ -2510,17 +2659,17 @@ async function runExperiment() {
     fixedSeed = seed;
   }
 
+  syncLorasFromPrompt();
   await withBusy(elements.runExperimentButton, "開始中…", async () => {
     try {
-      if (!elements.prompt.value.trim() || promptDescription !== description) {
+      if (shouldRequestPrompt(description)) {
         elements.experimentStatus.textContent = "日本語からプロンプトを作成中…";
         await requestPrompt(description);
       }
       const baseRequest = {
         mode: generationMode,
         description,
-        prompt: elements.prompt.value,
-        negativePrompt: elements.negativePrompt.value,
+        ...readPromptPayload(),
         loras: readSelectedLoras(),
         promptBoosts: readPromptBoosts(),
         ...readInitImagePayload(),
@@ -2638,13 +2787,19 @@ async function requestPrompt(description) {
   return data;
 }
 
-function setPromptFields(prompt, negativePrompt, description) {
+// Raw Promptへ全文を入れる（AI生成・履歴復元・セット適用など）。
+// 空文字を渡した場合は上書きを解除し、分割入力の結合結果へ戻す。
+function setPromptFields(prompt, negativePrompt, description, { source = "generated" } = {}) {
   settingPromptProgrammatically = true;
   elements.prompt.value = prompt;
   elements.negativePrompt.value = negativePrompt;
   settingPromptProgrammatically = false;
+  rawPromptOverride = Boolean(String(prompt ?? "").trim());
+  rawPromptOverrideSource = source;
   promptDescription = description;
+  if (!rawPromptOverride) syncRawPromptFromSections();
   syncPromptClearButtons();
+  renderPromptModeState();
 }
 
 function handleDescriptionChange() {
@@ -2652,11 +2807,16 @@ function handleDescriptionChange() {
   if (promptDescription && current !== promptDescription) {
     if (compositionLock) unlockComposition();
     settingPromptProgrammatically = true;
+    // 分割入力の内容は消さない。自動生成・上書きしたRaw Promptだけを破棄する。
     elements.prompt.value = "";
     elements.negativePrompt.value = "";
     settingPromptProgrammatically = false;
+    rawPromptOverride = false;
+    rawPromptOverrideSource = "manual";
     promptDescription = "";
+    syncRawPromptFromSections();
     syncPromptClearButtons();
+    renderPromptModeState();
   }
 }
 
@@ -2664,6 +2824,672 @@ function markPromptAsCurrent() {
   if (!settingPromptProgrammatically) {
     promptDescription = elements.description.value.trim();
   }
+}
+
+// ---- 用途別Positive Prompt（分割入力）とRaw Prompt ----
+
+function promptFieldElement(field) {
+  return elements[PROMPT_FIELD_ELEMENTS[field]];
+}
+
+function readStructuredSections() {
+  const sections = {};
+  for (const field of PROMPT_FIELDS) sections[field] = promptFieldElement(field).value;
+  return sections;
+}
+
+function writeStructuredSections(sections) {
+  const normalized = normalizeSections(sections);
+  for (const field of PROMPT_FIELDS) promptFieldElement(field).value = normalized[field];
+}
+
+function buildCombinedPrompt() {
+  return buildFinalPrompt(readStructuredSections(), appliedTriggerWords);
+}
+
+// 生成に使うPositive Prompt。Raw Promptを直接編集していればそちらを優先する。
+function currentPositivePrompt() {
+  return rawPromptOverride ? elements.prompt.value : buildCombinedPrompt();
+}
+
+// Raw Promptは、上書き中でなければ結合結果のミラーとして保つ。
+// これで既存コード（elements.prompt.valueを読む箇所）はそのまま動く。
+function syncRawPromptFromSections() {
+  if (!rawPromptOverride) {
+    settingPromptProgrammatically = true;
+    elements.prompt.value = buildCombinedPrompt();
+    settingPromptProgrammatically = false;
+    syncPromptClearButtons();
+  }
+  const combined = buildCombinedPrompt();
+  elements.structuredPromptPreview.textContent = `結合結果: ${combined || "（未入力）"}`;
+  renderRawTriggerNotice();
+}
+
+function setPromptMode(mode) {
+  promptMode = mode === "raw" ? "raw" : "structured";
+  const raw = promptMode === "raw";
+  elements.structuredPromptPanel.classList.toggle("hidden", raw);
+  elements.rawPromptPanel.classList.toggle("hidden", !raw);
+  elements.structuredPromptTabButton.classList.toggle("active", !raw);
+  elements.rawPromptTabButton.classList.toggle("active", raw);
+  elements.structuredPromptTabButton.setAttribute("aria-selected", String(!raw));
+  elements.rawPromptTabButton.setAttribute("aria-selected", String(raw));
+}
+
+function renderPromptModeState() {
+  elements.rawPromptNotice.classList.toggle("hidden", !rawPromptOverride);
+  elements.rawPromptNoticeText.textContent = rawPromptOverrideSource === "generated"
+    ? "自動生成したRaw Promptを使用中です。分割入力より優先されます。"
+    : "Raw Promptを直接編集中です。生成にはこの内容を使います。";
+  renderRawTriggerNotice();
+}
+
+// Raw Prompt優先中は勝手に差し込まない。追加ボタンだけを出す。
+function renderRawTriggerNotice() {
+  const pending = rawPromptOverride
+    ? pendingTriggerWords(elements.prompt.value, appliedTriggerWords.filter((item) => item.enabled))
+    : [];
+  elements.rawTriggerNotice.classList.toggle("hidden", !pending.length);
+  if (!pending.length) return;
+  elements.rawTriggerNoticeText.textContent =
+    `このLoRAにはトリガーワードがあります（${pending.map((item) => item.text).join(", ")}）`;
+}
+
+function handleStructuredPromptInput() {
+  markPromptAsCurrent();
+  syncRawPromptFromSections();
+  scheduleLoraSync();
+}
+
+function handleRawPromptInput() {
+  if (settingPromptProgrammatically) return;
+  markPromptAsCurrent();
+  // 直接編集した時点でRaw Prompt優先へ切り替える（勝手に上書きしないため）。
+  rawPromptOverride = true;
+  rawPromptOverrideSource = "manual";
+  renderPromptModeState();
+  scheduleLoraSync();
+}
+
+// ---- プロンプト内LoRAタグとLoRA選択UIの同期 ----
+
+// 生成に使う側のPositive Prompt入力欄だけを見る。
+// Raw Prompt優先中はRaw Prompt、そうでなければ分割入力（Rawはその写し）。
+function positivePromptSources() {
+  if (rawPromptOverride) return [{ key: "raw", value: elements.prompt.value }];
+  return PROMPT_FIELDS.map((field) => ({ key: field, value: promptFieldElement(field).value }));
+}
+
+function writePromptSource(key, text) {
+  if (key === "raw") {
+    settingPromptProgrammatically = true;
+    elements.prompt.value = text;
+    settingPromptProgrammatically = false;
+    return;
+  }
+  promptFieldElement(key).value = text;
+}
+
+function currentSelectionState() {
+  return [...selectedLoras].map(([name, weight]) => ({
+    name,
+    weight,
+    source: loraSelectionSources.get(name) ?? "ui"
+  }));
+}
+
+// 入力のたびに走らせない。少し待ってからまとめて同期する。
+function scheduleLoraSync() {
+  clearTimeout(loraSyncTimer);
+  loraSyncTimer = setTimeout(() => syncLorasFromPrompt(), LORA_SYNC_DEBOUNCE);
+}
+
+// プロンプト → UI。プロンプトに書かれたWeightを正としてUI側を合わせる。
+function syncLorasFromPrompt() {
+  clearTimeout(loraSyncTimer);
+  if (!installedLoras.length) return;
+  const text = positivePromptSources().map((source) => source.value).join("\n");
+  const result = reconcilePromptLoras(parseLoraTags(text), currentSelectionState(), installedLoras);
+  loraSyncNotices = buildLoraNotices(result);
+  renderLoraSyncNotice(describeLoraNotices(result));
+  if (!result.changed) return;
+
+  selectedLoras.clear();
+  loraSelectionSources.clear();
+  for (const item of result.selected) {
+    selectedLoras.set(item.name, item.weight);
+    loraSelectionSources.set(item.name, item.source);
+    loraWeights.set(item.name, item.weight);
+  }
+  saveLoraWeights();
+  renderLoras();
+  renderSelectedLoraSummary();
+}
+
+function renderLoraSyncNotice(messages) {
+  elements.loraSyncNotice.replaceChildren();
+  elements.loraSyncNotice.classList.toggle("hidden", !messages.length);
+  for (const message of messages) {
+    const line = document.createElement("div");
+    line.textContent = `⚠ ${message}`;
+    elements.loraSyncNotice.append(line);
+  }
+}
+
+// UI → プロンプト。既存タグのWeight部分だけを書き換える（末尾へ追加しない）。
+function applyLoraWeightToPrompt(name, weight) {
+  let changed = false;
+  for (const source of positivePromptSources()) {
+    const next = replaceLoraWeight(source.value, name, weight);
+    if (next === source.value) continue;
+    writePromptSource(source.key, next);
+    changed = true;
+  }
+  if (!changed) return false;
+  syncRawPromptFromSections();
+  syncPromptClearButtons();
+  return true;
+}
+
+// UIでLoRAを外したとき、プロンプトに残ったタグも消す（UIと生成内容をずらさない）。
+function removeLoraTagsFromPrompt(name) {
+  let removed = 0;
+  for (const source of positivePromptSources()) {
+    const result = removeLoraTags(source.value, name);
+    if (!result.removed) continue;
+    writePromptSource(source.key, result.text);
+    removed += result.removed;
+  }
+  if (!removed) return 0;
+  syncRawPromptFromSections();
+  syncPromptClearButtons();
+  return removed;
+}
+
+// チェックボックスとプレビューの選択・解除を1か所に集める。
+function setLoraSelected(name, selected, weight) {
+  if (selected) {
+    selectedLoras.set(name, Number(weight));
+    const source = loraSelectionSources.get(name);
+    loraSelectionSources.set(name, source === "prompt" || source === "both" ? "both" : "ui");
+    return;
+  }
+  selectedLoras.delete(name);
+  loraSelectionSources.delete(name);
+  const removed = removeLoraTagsFromPrompt(name);
+  if (removed) toast.info(`プロンプト内の <lora:${name}> も削除しました`);
+}
+
+// Raw Promptの上書きをやめ、分割入力の結合結果へ戻す。
+function useStructuredPrompt() {
+  rawPromptOverride = false;
+  rawPromptOverrideSource = "manual";
+  syncRawPromptFromSections();
+  renderPromptModeState();
+  toast.info("分割入力の結合結果を使います");
+}
+
+function appendTriggersToRaw() {
+  const enabled = appliedTriggerWords.filter((item) => item.enabled);
+  const next = appendTriggersToRawPrompt(elements.prompt.value, enabled);
+  if (next === elements.prompt.value.trim()) return toast.info("追加できるトリガーワードはありません");
+  settingPromptProgrammatically = true;
+  elements.prompt.value = next;
+  settingPromptProgrammatically = false;
+  syncPromptClearButtons();
+  renderPromptModeState();
+  toast.success("Raw Promptへトリガーワードを追加しました");
+}
+
+// 選択中LoRAのトリガーワード（手入力欄 → 登録メタデータの順）を読む。
+function resolveLoraTriggerText(name) {
+  const lora = findLoraByName(name);
+  return loraTriggers.get(name) || lora?.registry?.triggerWords || "";
+}
+
+function loraTriggerSources() {
+  const sources = [...selectedLoras.keys()].map((name) => {
+    const lora = findLoraByName(name);
+    return {
+      id: name,
+      subcategory: lora?.registry?.subcategory ?? "",
+      category: lora?.registry?.category ?? lora?.category ?? "",
+      triggerWords: resolveLoraTriggerText(name)
+    };
+  });
+  return [...sources, ...importedTriggerSources()];
+}
+
+// AI出力から取り込んだトリガーワードは、LoRAの選択状態に関係なく残す。
+// 供給元を今の枠から作り直すことで、同期で消えないようにする。
+function importedTriggerSources() {
+  const byField = new Map();
+  for (const trigger of appliedTriggerWords) {
+    const sourceId = trigger.sourceLoraIds.find((id) => id.startsWith(IMPORT_SOURCE_PREFIX));
+    if (!sourceId) continue;
+    if (!byField.has(sourceId)) byField.set(sourceId, { id: sourceId, words: [] });
+    byField.get(sourceId).words.push({
+      text: trigger.text,
+      weight: trigger.weight,
+      targetField: trigger.targetField
+    });
+  }
+  return [...byField.values()];
+}
+
+// LoRAの追加・削除・トリガーワード編集のたびに枠を作り直す。
+// Weightと有効/無効はユーザーの操作として保持される。
+function syncAppliedTriggerWords() {
+  const { triggers } = syncTriggerWords(appliedTriggerWords, loraTriggerSources());
+  appliedTriggerWords = triggers;
+  renderTriggerLists();
+  syncRawPromptFromSections();
+}
+
+function renderTriggerLists() {
+  for (const field of PROMPT_FIELDS) {
+    const container = elements[TRIGGER_LIST_ELEMENTS[field]];
+    const triggers = triggersForField(appliedTriggerWords, field);
+    container.replaceChildren();
+    container.classList.toggle("hidden", !triggers.length);
+    if (!triggers.length) continue;
+    container.append(createTriggerPanel(field, triggers));
+  }
+}
+
+// 一覧は常時全面表示しない。既定は折りたたみで、見出しに件数と先頭の語だけ出す。
+// Weight編集と削除ボタンは展開したときだけ表示する。
+function createTriggerPanel(field, triggers) {
+  const panel = document.createElement("details");
+  panel.className = "triggerPanel";
+  // 再描画（LoRA追加・削除・除外操作）で開閉状態が戻らないように覚えておく。
+  panel.open = triggerPanelOpen.get(field) === true;
+  panel.addEventListener("toggle", () => triggerPanelOpen.set(field, panel.open));
+
+  const summary = document.createElement("summary");
+  summary.className = "triggerPanelSummary";
+  const title = document.createElement("span");
+  title.className = "triggerPanelTitle";
+  title.textContent = `LoRAトリガーワード（${triggers.length}）`;
+  const preview = document.createElement("span");
+  preview.className = "triggerPanelPreview";
+  preview.textContent = describeTriggerPreview(triggers);
+  summary.append(title, preview);
+
+  const body = document.createElement("div");
+  body.className = "triggerPanelBody";
+  for (const trigger of triggers) body.append(createTriggerRow(trigger));
+
+  panel.append(summary, body);
+  return panel;
+}
+
+// 折りたたみ中でも中身が分かるように、先頭2件と除外件数だけ見せる。
+function describeTriggerPreview(triggers) {
+  const enabled = triggers.filter((item) => item.enabled);
+  const disabledCount = triggers.length - enabled.length;
+  const notes = [];
+  if (enabled.length) {
+    const shown = enabled.slice(0, TRIGGER_PREVIEW_COUNT).map((item) => item.text);
+    const rest = triggers.length - shown.length;
+    notes.push(`${shown.join(", ")}${rest > 0 ? ` ほか${rest}件` : ""}`);
+  }
+  if (disabledCount) notes.push(`${disabledCount}件を除外中`);
+  return notes.join("・");
+}
+
+function createTriggerRow(trigger) {
+  const row = document.createElement("div");
+  row.className = "triggerRow";
+  row.classList.toggle("disabled", !trigger.enabled);
+
+  const text = document.createElement("span");
+  text.className = "triggerText";
+  text.textContent = trigger.text;
+  const source = document.createElement("small");
+  source.className = "triggerSource";
+  const sourceNames = trigger.sourceLoraIds.map((name) => findLoraByName(name)?.displayName ?? name);
+  source.textContent = sourceNames.join(" / ");
+  source.title = `由来LoRA: ${sourceNames.join(" / ")}`;
+
+  const weightLabel = document.createElement("label");
+  weightLabel.className = "triggerWeight";
+  weightLabel.append("Weight");
+  const weightInput = document.createElement("input");
+  weightInput.type = "number";
+  weightInput.min = "0.05";
+  weightInput.max = "2";
+  weightInput.step = "0.05";
+  weightInput.value = String(trigger.weight);
+  weightInput.disabled = !trigger.enabled;
+  weightInput.setAttribute("aria-label", `${trigger.text}のトリガーワードWeight`);
+  weightLabel.append(weightInput);
+
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "triggerToggle";
+  toggle.textContent = trigger.enabled ? "×" : "↺";
+  toggle.title = trigger.enabled
+    ? "このトリガーワードだけを今回の生成から外す"
+    : "このトリガーワードを使う";
+  toggle.setAttribute("aria-label", `${trigger.text}を${trigger.enabled ? "外す" : "戻す"}`);
+
+  // LoRA本体のWeightとは別管理。ここを変えても<lora:...>のweightは動かない。
+  weightInput.addEventListener("input", () => {
+    trigger.weight = normalizeTriggerWeight(weightInput.value);
+    syncRawPromptFromSections();
+  });
+  weightInput.addEventListener("change", () => {
+    weightInput.value = String(trigger.weight);
+  });
+  toggle.addEventListener("click", () => {
+    trigger.enabled = !trigger.enabled;
+    renderTriggerLists();
+    syncRawPromptFromSections();
+  });
+
+  row.append(text, source, weightLabel, toggle);
+  return row;
+}
+
+// 生成リクエストへ載せるプロンプト一式（履歴の復元に必要な情報も含む）。
+function readPromptPayload() {
+  const sections = readStructuredSections();
+  return {
+    prompt: currentPositivePrompt(),
+    negativePrompt: elements.negativePrompt.value,
+    structuredPrompt: sections,
+    rawPromptOverride,
+    rawPrompt: rawPromptOverride ? elements.prompt.value : "",
+    appliedTriggerWords: appliedTriggerWords.map((trigger) => ({ ...trigger })),
+    // LoRAタグ同期の警告（重複・未インストールなど）も履歴へ残す。
+    loraNotices: loraSyncNotices.map((notice) => ({ ...notice }))
+  };
+}
+
+// 生成結果の確定プロンプトを画面へ戻す。
+// 分割入力を使っていた場合は、その内容をRaw Promptで上書きしない。
+function applyGeneratedPromptResult(data, description) {
+  if (rawPromptOverride) {
+    setPromptFields(data.prompt, data.negativePrompt, description, { source: rawPromptOverrideSource });
+    return;
+  }
+  settingPromptProgrammatically = true;
+  elements.negativePrompt.value = data.negativePrompt;
+  settingPromptProgrammatically = false;
+  promptDescription = description;
+  syncRawPromptFromSections();
+  syncPromptClearButtons();
+}
+
+// ---- AI出力の一括インポート ----
+
+// AI回答を貼り付け、解析結果を確認してから各欄へ反映する。
+function openAiPromptImport() {
+  let parsed = parseAiPromptOutput("");
+  let mode = "replace";
+
+  openModal({
+    title: "AI出力をインポート",
+    subtitle: "GrokやChatGPTの回答を全文そのまま貼り付けてください",
+    size: "large",
+    dismissValue: false,
+    build: (body, close) => {
+      const input = document.createElement("textarea");
+      input.className = "importInput";
+      input.rows = 12;
+      input.placeholder = "キャラクター\n1girl, character_name\n\n容姿・衣装\nlong hair, blue eyes\n…";
+      input.setAttribute("data-autofocus", "true");
+      input.setAttribute("aria-label", "AIの回答");
+
+      const modeRow = document.createElement("div");
+      modeRow.className = "importModeRow";
+      for (const [value, label] of [["replace", "現在の内容を置き換える"], ["append", "現在の内容の末尾へ追加する"]]) {
+        const choice = document.createElement("label");
+        choice.className = "importModeChoice";
+        const radio = document.createElement("input");
+        radio.type = "radio";
+        radio.name = "aiImportMode";
+        radio.value = value;
+        radio.checked = value === mode;
+        radio.addEventListener("change", () => { if (radio.checked) mode = value; });
+        choice.append(radio, label);
+        modeRow.append(choice);
+      }
+
+      const preview = document.createElement("div");
+      preview.className = "importPreview";
+
+      const renderPreview = () => {
+        parsed = parseAiPromptOutput(input.value);
+        preview.replaceChildren(...buildImportPreview(parsed, close));
+      };
+      input.addEventListener("input", renderPreview);
+      renderPreview();
+      body.append(input, modeRow, preview);
+    },
+    actions: [
+      { label: "キャンセル", value: false, variant: "secondary" },
+      {
+        label: "各欄へ反映",
+        primary: true,
+        onSelect: (close) => {
+          if (!parsed.recognized) {
+            toast.warning("取り込める見出しがありません");
+            return false;
+          }
+          applyImportedPrompt(parsed, mode);
+          close(true);
+          return true;
+        }
+      }
+    ]
+  });
+}
+
+// 反映前のプレビュー。取り込む内容と、取り込まなかった部分の両方を出す。
+function buildImportPreview(parsed, close) {
+  const nodes = [];
+  if (!parsed.recognized) {
+    const empty = document.createElement("p");
+    empty.className = "hint";
+    empty.textContent = parsed.ignoredLines.length || parsed.unknownHeadings.length
+      ? "分割形式を認識できませんでした"
+      : "AIの回答を貼り付けると、ここに解析結果が出ます";
+    nodes.push(empty);
+    if (parsed.ignoredLines.length || parsed.unknownHeadings.length) {
+      const fallback = document.createElement("button");
+      fallback.type = "button";
+      fallback.className = "secondary smallButton";
+      fallback.textContent = "全文をRaw Promptへ入れる";
+      fallback.addEventListener("click", () => {
+        applyRawPromptImport([...parsed.unknownHeadings, ...parsed.ignoredLines].join("\n"));
+        close(true);
+      });
+      nodes.push(fallback);
+    }
+    return nodes;
+  }
+
+  const list = document.createElement("dl");
+  list.className = "importPreviewFields";
+  const addRow = (label, value, className = "") => {
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const detail = document.createElement("dd");
+    detail.className = className;
+    detail.textContent = value;
+    list.append(term, detail);
+  };
+
+  for (const field of PROMPT_FIELDS) {
+    if (parsed.sections[field]) addRow(PROMPT_FIELD_LABELS[field], parsed.sections[field]);
+  }
+  for (const trigger of parsed.triggerWords) {
+    addRow(`LoRAトリガーワード（${PROMPT_FIELD_LABELS[trigger.field]}）`,
+      `${trigger.text}・Weight ${trigger.weight}`);
+  }
+  if (parsed.negativePrompt) addRow("Negative Prompt", parsed.negativePrompt);
+  if (parsed.combined) {
+    addRow("結合結果", parsed.hasSections
+      ? `${parsed.combined}（照合用・二重には追加しません）`
+      : `${parsed.combined}（分割項目が無いためRaw Promptへ入れます）`, "importPreviewNote");
+  }
+  nodes.push(list);
+
+  const notes = [];
+  if (parsed.hasSections) notes.push("記載の無い項目は今の内容のままにします");
+  if (parsed.unknownHeadings.length) notes.push(`取り込まない見出し: ${parsed.unknownHeadings.join(" / ")}`);
+  if (parsed.ignoredLines.length) notes.push(`取り込まない行が${parsed.ignoredLines.length}行あります`);
+  if (notes.length) {
+    const note = document.createElement("p");
+    note.className = "hint importPreviewWarning";
+    note.textContent = notes.join("・");
+    nodes.push(note);
+  }
+  return nodes;
+}
+
+function applyImportedPrompt(parsed, mode) {
+  if (parsed.hasSections) {
+    // 見出しがあった項目だけを書き換える。結合結果は照合用なので入れない。
+    for (const field of PROMPT_FIELDS) {
+      const value = parsed.sections[field];
+      if (!value) continue;
+      const element = promptFieldElement(field);
+      element.value = mergePromptValue(element.value, value, mode);
+    }
+  } else if (parsed.combined) {
+    applyRawPromptImport(parsed.combined, mode);
+  }
+
+  if (parsed.negativePrompt) {
+    elements.negativePrompt.value = mergePromptValue(elements.negativePrompt.value, parsed.negativePrompt, mode);
+  }
+  applyImportedTriggerWords(parsed.triggerWords, mode);
+  handleStructuredPromptInput();
+  syncPromptClearButtons();
+  if (parsed.hasSections) setPromptMode("structured");
+  toast.success("AI出力を各欄へ反映しました");
+}
+
+// 分割できなかった場合の逃げ道。Raw Promptとしてそのまま入れる。
+function applyRawPromptImport(text, mode = "replace") {
+  const next = mergePromptValue(rawPromptOverride ? elements.prompt.value : buildCombinedPrompt(), text, mode);
+  setPromptFields(next, elements.negativePrompt.value, promptDescription, { source: "manual" });
+  setPromptMode("raw");
+}
+
+function applyImportedTriggerWords(entries, mode) {
+  if (mode === "replace") {
+    // 前回インポートした枠だけを外す（LoRA由来・ユーザー操作の枠は残す）。
+    appliedTriggerWords = appliedTriggerWords
+      .map((trigger) => ({
+        ...trigger,
+        sourceLoraIds: trigger.sourceLoraIds.filter((id) => !id.startsWith(IMPORT_SOURCE_PREFIX))
+      }))
+      .filter((trigger) => trigger.sourceLoraIds.length)
+      .map((trigger) => ({ ...trigger, sourceLoraId: trigger.sourceLoraIds[0] }));
+  }
+
+  for (const entry of entries) {
+    const sourceId = `${IMPORT_SOURCE_PREFIX}${entry.field}`;
+    const key = triggerKey(entry.text);
+    const existing = appliedTriggerWords.find((trigger) => triggerKey(trigger.text) === key);
+    if (existing) {
+      // 既にある枠は消さず、由来と指定Weightだけ足す。
+      if (!existing.sourceLoraIds.includes(sourceId)) existing.sourceLoraIds.push(sourceId);
+      existing.weight = normalizeTriggerWeight(entry.weight);
+      existing.enabled = true;
+      continue;
+    }
+    appliedTriggerWords.push({
+      id: `trigger:${key}`,
+      sourceLoraId: sourceId,
+      sourceLoraIds: [sourceId],
+      text: entry.text,
+      weight: normalizeTriggerWeight(entry.weight),
+      targetField: entry.field,
+      enabled: true
+    });
+  }
+  syncAppliedTriggerWords();
+}
+
+// ---- Grok向け指示テンプレート ----
+
+async function loadPromptTemplate() {
+  try {
+    const { template } = await getJson("/api/prompt-template");
+    elements.grokInstructions.value = template.instructions || DEFAULT_GROK_INSTRUCTIONS;
+    elements.grokSetupDoc.value = template.setupDoc;
+    elements.grokLoraCsv.value = template.loraCsv;
+    renderPromptTemplateStatus(template);
+  } catch (error) {
+    elements.grokTemplateStatus.textContent = `指示テンプレートを取得できません: ${error.message}`;
+  }
+}
+
+function renderPromptTemplateStatus(template) {
+  const parts = [template.updatedAt ? `保存: ${formatDate(template.updatedAt)}` : "未保存"];
+  if (template.loraCsvUpdatedAt) parts.push(`lora_list.csv更新: ${formatDate(template.loraCsvUpdatedAt)}`);
+  elements.grokTemplateStatus.textContent = parts.join("・");
+}
+
+async function savePromptTemplate({ silent = false } = {}) {
+  const { template } = await patchJson("/api/prompt-template", {
+    instructions: elements.grokInstructions.value,
+    setupDoc: elements.grokSetupDoc.value,
+    loraCsv: elements.grokLoraCsv.value
+  });
+  renderPromptTemplateStatus(template);
+  if (!silent) toast.success("指示テンプレートを保存しました");
+  return template;
+}
+
+async function copyGrokTemplate() {
+  const text = buildGrokRequestText({
+    instructions: elements.grokInstructions.value,
+    setupDoc: elements.grokSetupDoc.value,
+    loraCsv: elements.grokLoraCsv.value
+  });
+  if (!text.trim()) return toast.warning("コピーできる内容がありません");
+  try {
+    await copyToClipboard(text);
+    flashLabel(elements.copyGrokTemplateButton, "Copied!");
+    // コピーした内容をそのまま次回も使えるよう、保存も済ませておく。
+    await savePromptTemplate({ silent: true });
+  } catch (error) {
+    toast.error(`コピーできませんでした: ${error.message}`);
+  }
+}
+
+// 導入済みLoRAからlora_list.csvを作り直す。
+async function updateLoraCsvFromInstalled() {
+  if (!installedLoras.length) return toast.warning("LoRAが読み込まれていません");
+  elements.grokLoraCsv.value = buildLoraCsv(installedLoras);
+  await savePromptTemplate({ silent: true });
+  toast.success(`lora_list.csvを${installedLoras.length}件で更新しました`);
+}
+
+async function resetGrokInstructions() {
+  const confirmed = await confirmModal("指示テンプレートを既定の内容へ戻します。よろしいですか？", {
+    title: "指示テンプレートの初期化",
+    confirmText: "戻す"
+  });
+  if (!confirmed) return;
+  elements.grokInstructions.value = DEFAULT_GROK_INSTRUCTIONS;
+  await savePromptTemplate({ silent: true });
+  toast.info("既定の指示文へ戻しました");
+}
+
+// 日本語からの自動生成が必要かどうか。
+// 分割入力に中身があれば生成せず、説明文が無い場合は自動生成そのものができない。
+function shouldRequestPrompt(description) {
+  if (!description) return false;
+  if (rawPromptOverride) return !elements.prompt.value.trim() || promptDescription !== description;
+  return !buildCombinedPrompt().trim();
 }
 
 function renderCandidates(images) {
@@ -2731,7 +3557,7 @@ function renderCandidates(images) {
       event.stopPropagation();
       selectCandidate(candidate, card);
     });
-    actions.append(favorite, toImg2Img, toInpaint, select, download);
+    actions.append(favorite, createDiscordStatusNode(candidate), toImg2Img, toInpaint, select, download);
     footer.append(label, actions);
     card.append(image, footer);
     elements.candidateGrid.append(card);
@@ -3084,12 +3910,18 @@ function clearBothPrompts() {
   const previous = {
     prompt: elements.prompt.value,
     negativePrompt: elements.negativePrompt.value,
-    description: promptDescription
+    description: promptDescription,
+    sections: readStructuredSections(),
+    rawPromptOverride,
+    rawPromptOverrideSource
   };
-  if (!previous.prompt.trim() && !previous.negativePrompt.trim()) {
+  const hasSections = hasSectionContent(previous.sections);
+  if (!previous.prompt.trim() && !previous.negativePrompt.trim() && !hasSections) {
     return toast.info("PromptとNegative promptはすでに空です");
   }
   clearedPromptSnapshot = previous;
+  // 手入力した分割入力もまとめて消す（トリガーワード枠はLoRA選択に従うので触らない）。
+  writeStructuredSections({});
   // setPromptFieldsがクリアボタンの表示も同期する。
   setPromptFields("", "", "");
   toast.info("プロンプトを削除しました", {
@@ -3097,10 +3929,12 @@ function clearBothPrompts() {
       label: "元に戻す",
       onSelect: () => {
         if (!clearedPromptSnapshot) return;
+        writeStructuredSections(clearedPromptSnapshot.sections);
         setPromptFields(
-          clearedPromptSnapshot.prompt,
+          clearedPromptSnapshot.rawPromptOverride ? clearedPromptSnapshot.prompt : "",
           clearedPromptSnapshot.negativePrompt,
-          clearedPromptSnapshot.description
+          clearedPromptSnapshot.description,
+          { source: clearedPromptSnapshot.rawPromptOverrideSource }
         );
         clearedPromptSnapshot = null;
         toast.success("プロンプトを元に戻しました");
@@ -3141,7 +3975,7 @@ function unlockComposition() {
 
 function loadRecipeFields(recipe, image) {
   elements.description.value = recipe.description ?? "";
-  setPromptFields(recipe.prompt ?? "", recipe.negativePrompt ?? "", recipe.description ?? "");
+  restorePromptFieldsFromRecipe(recipe);
   const settings = recipe.settings ?? {};
   for (const key of [
     "width", "height", "steps", "cfgScale", "samplerName", "scheduler", "noiseSchedule",
@@ -3161,9 +3995,12 @@ function loadRecipeFields(recipe, image) {
   handleInpaintSettingsChange();
 
   selectedLoras.clear();
+  loraSelectionSources.clear();
   for (const lora of recipe.loras ?? []) {
     if (!installedLoras.some((item) => item.name === lora.name)) continue;
+    // 履歴のWeightは実際に生成へ使った実効値。選択元もそのまま復元する。
     selectedLoras.set(lora.name, Number(lora.weight));
+    loraSelectionSources.set(lora.name, ["ui", "prompt", "both"].includes(lora.source) ? lora.source : "ui");
     loraWeights.set(lora.name, Number(lora.weight));
     if (lora.triggerWords) loraTriggers.set(lora.name, lora.triggerWords);
     if (lora.negativeWords) loraNegativeWords.set(lora.name, lora.negativeWords);
@@ -3173,22 +4010,212 @@ function loadRecipeFields(recipe, image) {
   saveLoraNegativeWords();
   renderLoras();
   renderSelectedLoraSummary();
+  // 復元直後からプロンプト表示とUI表示を一致させる。
+  syncLorasFromPrompt();
+}
+
+// 履歴からのプロンプト復元。
+// 構造化プロンプトが無い古い履歴は、分類し直さずRaw Promptとしてそのまま戻す。
+function restorePromptFieldsFromRecipe(recipe) {
+  const description = recipe.description ?? "";
+  const negativePrompt = recipe.negativePrompt ?? "";
+  const sections = recipe.structuredPrompt;
+  if (!sections) {
+    appliedTriggerWords = [];
+    writeStructuredSections({});
+    renderTriggerLists();
+    setPromptFields(recipe.prompt ?? "", negativePrompt, description, { source: "manual" });
+    return;
+  }
+
+  writeStructuredSections(sections);
+  appliedTriggerWords = normalizeAppliedTriggerWords(recipe.appliedTriggerWords);
+  renderTriggerLists();
+  if (recipe.rawPromptOverride) {
+    setPromptFields(recipe.rawPrompt || recipe.prompt || "", negativePrompt, description, { source: "manual" });
+    return;
+  }
+  setPromptFields("", negativePrompt, description, { source: "manual" });
 }
 
 async function toggleFavorite(image, button) {
   const next = !image.favorite;
   button.disabled = true;
   try {
+    // 確認ダイアログは出さない。Discord送信はサーバー側で非同期に始まる。
     const data = await patchJson(`/api/history/${image.id}/favorite`, { favorite: next });
     image.favorite = data.image.favorite;
     button.classList.toggle("active", image.favorite);
     preferenceData = data.preferences;
     renderPreferenceSummary();
+    applyDiscordState(image.id, data.image.discord);
     await loadHistory();
   } catch (error) {
     showError(error.message);
   } finally {
     button.disabled = false;
+  }
+}
+
+// ---- Discord送信状態の表示 ----
+
+function applyDiscordState(imageId, state) {
+  if (!imageId || !state) return;
+  discordStates.set(imageId, state);
+  refreshDiscordBadges(imageId);
+  if (state.status === "sending") void watchDiscordSend(imageId);
+}
+
+function rememberDiscordStates(generations) {
+  for (const generation of generations ?? []) {
+    for (const image of generation.images ?? []) {
+      if (image?.id && image.discord) discordStates.set(image.id, image.discord);
+    }
+  }
+}
+
+function createDiscordStatusNode(image) {
+  const node = document.createElement("span");
+  node.className = "discordStatus";
+  node.dataset.discordImage = image.id;
+  if (image.discord) discordStates.set(image.id, image.discord);
+  renderDiscordStatusNode(node, image.id);
+  return node;
+}
+
+function renderDiscordStatusNode(node, imageId) {
+  const state = discordStates.get(imageId) ?? { status: "not_sent", error: "" };
+  node.replaceChildren();
+  node.className = `discordStatus status-${state.status}`;
+  node.title = state.error || "";
+  if (state.status === "not_sent") {
+    node.classList.add("hidden");
+    return;
+  }
+  const label = document.createElement("span");
+  label.textContent = DISCORD_STATUS_LABELS[state.status] ?? "";
+  node.append(label);
+  // 失敗した画像だけ再送できる（sent / sendingは再送しない）。
+  if (state.status === "failed") {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "discordRetryButton";
+    retry.textContent = "再送";
+    retry.title = state.error || "Discordへ再送する";
+    retry.addEventListener("click", () => void resendToDiscord(imageId, retry));
+    node.append(retry);
+  }
+}
+
+function refreshDiscordBadges(imageId) {
+  const selector = `[data-discord-image="${CSS.escape(String(imageId))}"]`;
+  for (const node of document.querySelectorAll(selector)) renderDiscordStatusNode(node, imageId);
+  // 生成結果パネルのバッジはIDが固定なので、対象画像のときだけ更新する。
+  if (finalImage?.id === imageId) {
+    elements.finalDiscordStatus.dataset.discordImage = imageId;
+    renderDiscordStatusNode(elements.finalDiscordStatus, imageId);
+  }
+}
+
+// 送信は非同期なので、終わるまで状態だけ見に行く。
+async function watchDiscordSend(imageId) {
+  if (discordWatchers.has(imageId)) return;
+  discordWatchers.add(imageId);
+  try {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      await sleep(1200);
+      const { discord } = await getJson(`/api/history/${imageId}/discord`);
+      discordStates.set(imageId, discord);
+      refreshDiscordBadges(imageId);
+      if (discord.status === "sending") continue;
+      // 成功時は静かに。失敗時だけ知らせて再送できるようにする。
+      if (discord.status === "failed") notifyDiscordFailure(imageId, discord);
+      return;
+    }
+  } catch {
+    // 状態取得に失敗しても、Favoriteと画面表示は維持する。
+  } finally {
+    discordWatchers.delete(imageId);
+  }
+}
+
+function notifyDiscordFailure(imageId, state) {
+  toast.error(`Discordへ送信できませんでした: ${state.error || "原因不明"}`, {
+    action: { label: "再送", onSelect: () => void resendToDiscord(imageId) }
+  });
+}
+
+async function resendToDiscord(imageId, button = null) {
+  if (button) button.disabled = true;
+  try {
+    const { discord } = await postJson(`/api/history/${imageId}/discord/send`, {});
+    applyDiscordState(imageId, discord);
+  } catch (error) {
+    toast.error(error.message);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+// ---- Discord設定 ----
+
+async function loadDiscordSettings() {
+  try {
+    const { settings } = await getJson("/api/discord/settings");
+    elements.discordAutoSend.checked = settings.autoSend;
+    elements.discordIncludePrompt.checked = settings.includePrompt;
+    elements.discordIncludeMetadata.checked = settings.includeMetadata;
+    renderDiscordSettingsStatus(settings);
+  } catch (error) {
+    elements.discordSettingsStatus.textContent = `Discord設定を取得できません: ${error.message}`;
+  }
+}
+
+function renderDiscordSettingsStatus(settings) {
+  // Webhook URL自体は返ってこない。設定済みかどうかと、伏せ字の目印だけ出す。
+  const source = { env: "環境変数", config: "config.local.json", stored: "この画面で保存" }[settings.webhookSource];
+  elements.discordSettingsStatus.textContent = settings.webhookConfigured
+    ? `送信先: ${settings.webhookHint}（${source}）${settings.autoSend ? "・自動送信ON" : "・自動送信OFF"}`
+    : "送信先が未設定のため、Favoriteしても送信しません";
+  elements.discordWebhook.disabled = !settings.webhookEditable;
+  elements.discordWebhook.placeholder = settings.webhookEditable
+    ? "https://discord.com/api/webhooks/…"
+    : `${source}の設定を使用中`;
+  elements.clearDiscordWebhookButton.disabled = !settings.storedWebhookConfigured;
+}
+
+async function saveDiscordSettings() {
+  await withBusy(elements.saveDiscordSettingsButton, "保存中…", async () => {
+    try {
+      const { settings } = await patchJson("/api/discord/settings", {
+        autoSend: elements.discordAutoSend.checked,
+        includePrompt: elements.discordIncludePrompt.checked,
+        includeMetadata: elements.discordIncludeMetadata.checked,
+        webhookUrl: elements.discordWebhook.value
+      });
+      // 入力欄には残さない（画面・sessionStorageへ秘密情報を置かない）。
+      elements.discordWebhook.value = "";
+      renderDiscordSettingsStatus(settings);
+      toast.success("Discord設定を保存しました");
+    } catch (error) {
+      toast.error(error.message);
+    }
+  });
+}
+
+async function clearDiscordWebhook() {
+  const confirmed = await confirmModal("保存済みのDiscord送信先を削除します。よろしいですか？", {
+    title: "送信先の削除",
+    confirmText: "削除する"
+  });
+  if (!confirmed) return;
+  try {
+    const { settings } = await patchJson("/api/discord/settings", { clearWebhook: true });
+    elements.discordWebhook.value = "";
+    renderDiscordSettingsStatus(settings);
+    toast.info("Discordの送信先を削除しました");
+  } catch (error) {
+    toast.error(error.message);
   }
 }
 
@@ -3208,6 +4235,8 @@ async function loadHistory() {
 }
 
 function renderHistory(generations) {
+  // 送信中のバッジが再描画で消えないよう、最新状態を先に取り込む。
+  rememberDiscordStates(generations);
   elements.historyGrid.replaceChildren();
   const entries = generations.flatMap((generation) =>
     generation.images.map((image) => ({ generation, image }))
@@ -3562,6 +4591,7 @@ function createHistoryCard(generation, image) {
   favorite.title = "お気に入り";
   favorite.textContent = "👍";
   favorite.addEventListener("click", () => void toggleFavorite(image, favorite));
+  const discordBadge = createDiscordStatusNode(image);
 
   const del = document.createElement("button");
   del.type = "button";
@@ -3601,7 +4631,7 @@ function createHistoryCard(generation, image) {
     meta.append(badge);
   }
 
-  actions.append(favorite, del, load, detail, compare);
+  actions.append(favorite, discordBadge, del, load, detail, compare);
   body.append(meta, actions);
   card.append(preview, body);
   return card;
@@ -3735,6 +4765,7 @@ function openHistoryDetail(generation, image) {
   };
   addField("Checkpoint", settings.checkpoint || "Checkpoint記録なし");
   addField("LoRA", buildLoraDetailNode(generation.loras));
+  addField("LoRA警告", buildLoraNoticeNode(generation.loraNotices));
   addField("Seed", image.seed);
   addField("Sampler", settings.samplerName);
   addField("Scheduler", settings.scheduler);
@@ -3764,6 +4795,7 @@ function openHistoryDetail(generation, image) {
   prompts.className = "detailPrompts";
   prompts.append(buildPromptDetails("Prompt", generation.prompt));
   prompts.append(buildPromptDetails("Negative Prompt", generation.negativePrompt));
+  for (const details of buildStructuredPromptDetails(generation)) prompts.append(details);
 
   const footer = document.createElement("div");
   footer.className = "detailActions";
@@ -3883,7 +4915,7 @@ async function changeLoraOnly(generation, image) {
           const weight = document.createElement("input");
           weight.type = "number";
           weight.min = "0.05";
-          weight.max = "1.5";
+          weight.max = "2";
           weight.step = "0.05";
           weight.value = String(working.get(lora.name) ?? loraWeights.get(lora.name) ?? loraConfig.defaultWeight);
           weight.disabled = !checkbox.checked;
@@ -3978,11 +5010,61 @@ function buildLoraDetailNode(loras) {
     name.textContent = lora.name;
     const weight = document.createElement("span");
     weight.className = "detailLoraWeight";
+    // 実際に生成へ送ったWeightをそのまま出す（UIの古い値は使わない）。
     weight.textContent = Number(lora.weight).toFixed(2);
     row.append(name, weight);
+    if (lora.source) {
+      const source = document.createElement("small");
+      source.className = "detailLoraSource";
+      source.textContent = LORA_SOURCE_LABELS[lora.source] ?? lora.source;
+      source.title = "このLoRAの選択元";
+      row.append(source);
+    }
     list.append(row);
   }
   return list;
+}
+
+const LORA_SOURCE_LABELS = { ui: "Source: ui", prompt: "Source: prompt", both: "Source: both" };
+
+// LoRAタグ同期の警告を履歴詳細でも確認できるようにする。
+function buildLoraNoticeNode(notices) {
+  if (!Array.isArray(notices) || !notices.length) return null;
+  const list = document.createElement("div");
+  list.className = "detailLoraNotices";
+  for (const notice of notices) {
+    const row = document.createElement("div");
+    row.textContent = {
+      duplicate: () => `同じLoRAが複数記述: ${notice.name}（${(notice.weights ?? []).join(" / ")} → ${notice.weight}）`,
+      unresolved: () => `未インストール: ${notice.name}`,
+      ambiguous: () => `特定不能: ${notice.name}（候補: ${(notice.candidates ?? []).join(" / ")}）`,
+      invalidWeight: () => `Weightを読み取れず1を使用: ${notice.name}`
+    }[notice.type]?.() ?? `${notice.type}: ${notice.name}`;
+    list.append(row);
+  }
+  return list;
+}
+
+// 構造化プロンプトを保存した履歴だけ、内訳とトリガーワードを追加表示する。
+function buildStructuredPromptDetails(generation) {
+  const sections = generation?.structuredPrompt;
+  if (!sections) return [];
+  const lines = PROMPT_FIELDS
+    .map((field) => [PROMPT_FIELD_LABELS[field], String(sections[field] ?? "").trim()])
+    .filter(([, value]) => value)
+    .map(([label, value]) => `${label}: ${value}`);
+  const triggers = normalizeAppliedTriggerWords(generation.appliedTriggerWords)
+    .map((trigger) => {
+      const state = trigger.enabled ? formatTriggerWord(trigger) : `${trigger.text}（無効）`;
+      return `${PROMPT_FIELD_LABELS[trigger.targetField]}: ${state}`;
+    });
+  const result = [];
+  if (lines.length) result.push(buildPromptDetails("構造化プロンプト", lines.join("\n")));
+  if (triggers.length) result.push(buildPromptDetails("LoRAトリガーワード", triggers.join("\n")));
+  if (generation.rawPromptOverride) {
+    result.push(buildPromptDetails("Raw Prompt上書き", generation.rawPrompt || generation.prompt));
+  }
+  return result;
 }
 
 function buildPromptDetails(label, text) {
@@ -4640,12 +5722,21 @@ function readDerivationPayload() {
 }
 
 function readSelectedLoras() {
+  // 生成直前にプロンプト内のタグと突き合わせて、実効Weightのまま送る。
+  syncLorasFromPrompt();
   return [...selectedLoras].map(([name, weight]) => ({
     name,
     weight,
-    triggerWords: loraTriggers.get(name) ?? "",
+    source: loraSelectionSources.get(name) ?? "ui",
+    // トリガーワードは画面側でプロンプトへ組み込むため、サーバーの自動追記へは渡さない。
+    // 枠が無いLoRA（トリガーワード未設定）だけ従来どおりの値を送る。
+    triggerWords: hasManagedTriggerWords(name) ? "" : loraTriggers.get(name) ?? "",
     negativeWords: loraNegativeWords.get(name) ?? ""
   }));
+}
+
+function hasManagedTriggerWords(loraName) {
+  return appliedTriggerWords.some((trigger) => trigger.sourceLoraIds.includes(loraName));
 }
 
 function loadLoraCategory() {
@@ -4674,7 +5765,7 @@ function loadLoraWeights() {
     return new Map(
       Object.entries(stored)
         .map(([name, value]) => [name, Number(value)])
-        .filter(([name, value]) => name && Number.isFinite(value) && value >= 0.05 && value <= 1.5)
+        .filter(([name, value]) => name && Number.isFinite(value) && value >= 0.05 && value <= 2)
     );
   } catch {
     return new Map();

@@ -31,7 +31,11 @@ import {
   refreshLoras,
   switchCheckpoint
 } from "./reforge.js";
+// LoRAタグの解析は画面と共通の実装を使う（正規表現をここへ書かない）。
+import { applyPromptWeights, dedupeLoraTags, sameLoraName } from "../public/lora-tags.js";
+import { createDiscordService, normalizeDiscordState } from "./discord.js";
 import { createHistoryService } from "./history.js";
+import { createPromptTemplateService } from "./prompt-template.js";
 import { createJobManager } from "./job-manager.js";
 import { createCivitaiService } from "./civitai.js";
 import { createUpdater } from "./updater.js";
@@ -78,6 +82,15 @@ const updater = createUpdater(rootDir, {
 }, packageJson.version);
 const jobs = createJobManager(generateWithRecovery);
 const checkpointSets = createCheckpointSetService(dataDir);
+const promptTemplate = createPromptTemplateService(dataDir);
+// Webhook URLはサーバー内だけで保持する（APIレスポンスにも画面にも出さない）。
+const discord = createDiscordService({
+  dataDir,
+  history,
+  outputDir,
+  webhookFromEnv: process.env.LOCAL_IMAGE_CHAT_DISCORD_WEBHOOK ?? "",
+  webhookFromConfig: config.discord?.webhookUrl ?? ""
+});
 const experiments = createExperimentService(dataDir, {
   jobs,
   maxImages: config.experiments?.maxImages ?? MAX_EXPERIMENT_IMAGES
@@ -337,12 +350,90 @@ app.get("/api/history/:imageId/recipe", async (request, response) => {
 
 app.patch("/api/history/:imageId/favorite", async (request, response) => {
   try {
+    const imageId = requireId(request.params.imageId);
     const favorite = request.body.favorite !== false;
-    const image = await history.setFavorite(requireId(request.params.imageId), favorite);
+    const image = await history.setFavorite(imageId, favorite);
     await syncFavoriteFile(image, favorite);
-    response.json({ image, preferences: await history.getPreferences() });
+    // Favorite自体はここで完了。Discord送信は状態を確保するだけで、完了は待たない。
+    // 送信が失敗してもFavoriteは取り消さない。解除時は投稿を消さない。
+    const discordState = favorite
+      ? await discord.sendForFavorite(imageId).catch((error) => {
+        console.warn(`[Discord] 自動送信を開始できませんでした: ${error.message}`);
+        return normalizeDiscordState(image.discord);
+      })
+      : normalizeDiscordState(image.discord);
+    response.json({
+      image: { ...image, discord: discordState },
+      preferences: await history.getPreferences()
+    });
   } catch (error) {
     response.status(404).json({ error: readableError(error) });
+  }
+});
+
+app.get("/api/history/:imageId/discord", async (request, response) => {
+  try {
+    response.json({ discord: await discord.getState(requireId(request.params.imageId)) });
+  } catch (error) {
+    response.status(404).json({ error: readableError(error) });
+  }
+});
+
+// 失敗した画像の手動再送。sent / sending は拒否する（二重投稿の防止）。
+app.post("/api/history/:imageId/discord/send", async (request, response) => {
+  try {
+    response.json({ discord: await discord.resend(requireId(request.params.imageId)) });
+  } catch (error) {
+    response.status(409).json({ error: readableError(error) });
+  }
+});
+
+app.get("/api/prompt-template", async (_request, response) => {
+  try {
+    response.json({ template: await promptTemplate.get() });
+  } catch (error) {
+    response.status(500).json({ error: readableError(error) });
+  }
+});
+
+app.patch("/api/prompt-template", async (request, response) => {
+  try {
+    const body = request.body ?? {};
+    response.json({
+      template: await promptTemplate.update({
+        instructions: body.instructions,
+        setupDoc: body.setupDoc,
+        loraCsv: body.loraCsv
+      })
+    });
+  } catch (error) {
+    response.status(400).json({ error: readableError(error) });
+  }
+});
+
+app.get("/api/discord/settings", async (_request, response) => {
+  try {
+    response.json({ settings: await discord.getSettings() });
+  } catch (error) {
+    response.status(500).json({ error: readableError(error) });
+  }
+});
+
+app.patch("/api/discord/settings", async (request, response) => {
+  try {
+    const body = request.body ?? {};
+    response.json({
+      settings: await discord.updateSettings({
+        autoSend: body.autoSend,
+        includePrompt: body.includePrompt,
+        includeMetadata: body.includeMetadata,
+        // 受け取ったWebhook URLはサーバー内に保存するだけで、返却も記録もしない。
+        webhookUrl: typeof body.webhookUrl === "string" ? body.webhookUrl : undefined,
+        clearWebhook: body.clearWebhook === true
+      })
+    });
+  } catch (error) {
+    response.status(400).json({ error: readableError(error) });
   }
 });
 
@@ -585,6 +676,7 @@ app.listen(config.port, "127.0.0.1", () => {
 });
 
 backfillFavorites();
+recoverStuckDiscordSends();
 
 // 失敗時に原因を判定し、安全側の設定で1回だけ再試行する。
 // 自動再試行がOFFの場合は、提案内容をjob.recoveryへ載せてユーザーへ確認させる。
@@ -624,16 +716,24 @@ async function generateWithRecovery(body, context) {
 }
 
 async function performGeneration(body, { signal, report }) {
-  const description = requireText(body.description, "生成したい内容");
+  // 説明文は任意。Promptが直接指定されていれば日本語の説明文なしでも生成できる。
+  const description = passthroughText(body.description, 4000).trim();
+  const hasPrompt = Boolean(body.prompt?.trim());
+  if (!description && !hasPrompt) throw new Error("生成したい内容かPromptを入力してください");
   const mode = validateGenerationMode(body.mode);
   const settings = validateSettings(body.settings ?? {});
   const loras = validateLoras(body.loras);
   const promptBoosts = validatePromptBoosts(body.promptBoosts);
+  // 用途別プロンプトとトリガーワードは履歴の復元用。生成に使うのは従来どおりbody.prompt。
+  const structuredPrompt = validateStructuredPrompt(body.structuredPrompt);
+  const appliedTriggerWords = validateAppliedTriggerWords(body.appliedTriggerWords);
+  const rawPromptOverride = body.rawPromptOverride === true;
+  const rawPrompt = rawPromptOverride ? passthroughText(body.rawPrompt, 12000) : "";
   const sourceImage = await resolveSourceImage(body, mode);
   const maskImage = resolveMaskImage(body, mode, settings);
 
   report(5, "プロンプトを準備中");
-  const generatedPrompt = body.prompt?.trim()
+  const generatedPrompt = hasPrompt
     ? {
         prompt: body.prompt.trim(),
         negative_prompt: body.negativePrompt?.trim() ?? "",
@@ -652,8 +752,23 @@ async function performGeneration(body, { signal, report }) {
     report(19, "Ollamaの解放に失敗しましたが生成を続行します");
   }
 
-  const effectivePrompt = appendLoras(promptWithBoosts, loras);
+  // プロンプト内に同じLoRAタグが複数ある場合は、最後の1つだけを生成へ送る。
+  // 入力欄（prompt）は書き換えず、生成用のeffectivePromptだけを整える。
+  const deduped = dedupeLoraTags(appendLoras(promptWithBoosts, loras));
+  const effectivePrompt = deduped.text;
   const effectiveNegativePrompt = appendLoraNegatives(generatedPrompt.negative_prompt, loras);
+  // 履歴のWeightは、実際に生成へ送ったタグの値へ揃える（UIの古い値を残さない）。
+  const effectiveLoras = applyPromptWeights(loras, effectivePrompt);
+  const clientLoraNotices = validateLoraNotices(body.loraNotices);
+  const loraNotices = [
+    ...clientLoraNotices,
+    // 画面側で既に報告済みの重複は二重に記録しない。
+    ...deduped.duplicates
+      .filter((item) => !clientLoraNotices.some(
+        (notice) => notice.type === "duplicate" && sameLoraName(notice.name, item.name)
+      ))
+      .map((item) => ({ type: "duplicate", name: item.name, weights: item.weights, weight: item.weight }))
+  ];
   report(25, "ReForgeで生成を開始");
   const generated = await generateImages(config.reforge, {
     mode,
@@ -715,8 +830,13 @@ async function performGeneration(body, { signal, report }) {
     negativePrompt: generatedPrompt.negative_prompt,
     effectivePrompt,
     effectiveNegativePrompt,
+    structuredPrompt,
+    rawPromptOverride,
+    rawPrompt,
+    appliedTriggerWords,
     settings,
-    loras,
+    loras: effectiveLoras,
+    loraNotices,
     images: savedImages
   });
 
@@ -742,9 +862,14 @@ async function performGeneration(body, { signal, report }) {
     negativePrompt: generatedPrompt.negative_prompt,
     effectivePrompt,
     effectiveNegativePrompt,
-    loras,
-    explanation: loras.length
-      ? `${generatedPrompt.explanation_ja} LoRA: ${loras.map((item) => `${item.name} (${item.weight})${item.negativeWords ? "・標準衣装抑制" : ""}`).join(", ")}`
+    structuredPrompt,
+    rawPromptOverride,
+    rawPrompt,
+    appliedTriggerWords,
+    loras: effectiveLoras,
+    loraNotices,
+    explanation: effectiveLoras.length
+      ? `${generatedPrompt.explanation_ja} LoRA: ${effectiveLoras.map((item) => `${item.name} (${item.weight})${item.negativeWords ? "・標準衣装抑制" : ""}`).join(", ")}`
       : generatedPrompt.explanation_ja,
     settings
   };
@@ -1157,6 +1282,16 @@ async function deleteOutputImage(nameOrUrl) {
   await fs.rm(target, { force: true });
 }
 
+// 送信中のままプロセスが落ちた画像は、再送できるようにfailedへ戻す。
+async function recoverStuckDiscordSends() {
+  try {
+    const recovered = await history.recoverStuckDiscordSends();
+    if (recovered) console.warn(`[Discord] 中断された送信を${recovered}件だけ再送可能へ戻しました`);
+  } catch (error) {
+    console.warn(`[Discord] 送信状態の復旧に失敗: ${error.message}`);
+  }
+}
+
 async function backfillFavorites() {
   try {
     const generations = await history.list({ favoritesOnly: true, limit: 500 });
@@ -1217,11 +1352,41 @@ function validateLoras(input) {
       name,
       weight: Number(boundedNumber(item.weight, fallbackWeight, 0.05, 2).toFixed(2)),
       triggerWords: sanitizeTriggerWords(item.triggerWords),
-      negativeWords: sanitizeTriggerWords(item.negativeWords)
+      negativeWords: sanitizeTriggerWords(item.negativeWords),
+      // 選択元（UI操作 / プロンプト内タグ / 両方）。未指定は従来どおりUI扱い。
+      source: ["ui", "prompt", "both"].includes(item.source) ? item.source : "ui"
     });
   }
 
   return [...unique.values()];
+}
+
+// LoRAタグ同期で出た警告（重複・未インストール・特定不能）。表示済みの内容を履歴へ残す。
+const LORA_NOTICE_TYPES = ["duplicate", "unresolved", "ambiguous", "invalidWeight"];
+
+function validateLoraNotices(input) {
+  if (!Array.isArray(input)) return [];
+  return input
+    .filter((item) => isPlainObject(item) && LORA_NOTICE_TYPES.includes(item.type))
+    .slice(0, 20)
+    .map((item) => {
+      const notice = { type: item.type, name: passthroughText(item.name, 200) };
+      if (Array.isArray(item.weights)) {
+        notice.weights = item.weights
+          .map((value) => Number(value))
+          .filter((value) => Number.isFinite(value))
+          .slice(0, 10);
+      }
+      if (item.weight !== undefined) notice.weight = boundedNumber(item.weight, 1, 0.05, 2);
+      if (Array.isArray(item.candidates)) {
+        notice.candidates = item.candidates
+          .filter((value) => typeof value === "string")
+          .map((value) => value.slice(0, 200))
+          .slice(0, 10);
+      }
+      if (item.weightText !== undefined) notice.weightText = passthroughText(item.weightText, 40);
+      return notice;
+    });
 }
 
 function validatePromptBoosts(input) {
@@ -1232,6 +1397,53 @@ function validatePromptBoosts(input) {
     .map((value) => value.replace(/[<>]/g, "").slice(0, 120))
     .filter(Boolean)
     .slice(0, 40);
+}
+
+// 用途別プロンプト（分割入力）。中身の並び・タグは一切書き換えない。
+const STRUCTURED_PROMPT_FIELDS = ["character", "appearance", "composition", "situation", "style", "extra"];
+
+function validateStructuredPrompt(input) {
+  if (!isPlainObject(input)) return null;
+  const sections = {};
+  let filled = false;
+  for (const field of STRUCTURED_PROMPT_FIELDS) {
+    const value = passthroughText(input[field], 4000).trim();
+    sections[field] = value;
+    if (value) filled = true;
+  }
+  return filled ? sections : null;
+}
+
+// LoRAトリガーワードの編集枠。LoRA本体のweightとは別物として保存する。
+function validateAppliedTriggerWords(input) {
+  if (!Array.isArray(input)) return [];
+  const seen = new Set();
+  const result = [];
+  for (const item of input) {
+    if (result.length >= 60) break;
+    if (!isPlainObject(item)) continue;
+    const text = sanitizeTriggerWords(item.text).slice(0, 200).trim();
+    if (!text) continue;
+    const key = normalizeTag(text);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const sourceLoraIds = Array.isArray(item.sourceLoraIds)
+      ? [...new Set(item.sourceLoraIds
+        .filter((value) => typeof value === "string" && value.trim())
+        .map((value) => value.trim().slice(0, 200)))].slice(0, 8)
+      : [];
+    const sourceLoraId = passthroughText(item.sourceLoraId, 200).trim() || sourceLoraIds[0] || "";
+    result.push({
+      id: passthroughText(item.id, 200) || `trigger:${key}`,
+      sourceLoraId,
+      sourceLoraIds: sourceLoraIds.length ? sourceLoraIds : (sourceLoraId ? [sourceLoraId] : []),
+      text,
+      weight: Number(boundedNumber(item.weight, 1, 0.05, 2).toFixed(2)),
+      targetField: STRUCTURED_PROMPT_FIELDS.includes(item.targetField) ? item.targetField : "extra",
+      enabled: item.enabled !== false
+    });
+  }
+  return result;
 }
 
 function appendLoras(prompt, loras) {

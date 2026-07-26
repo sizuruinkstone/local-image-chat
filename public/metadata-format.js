@@ -19,7 +19,10 @@ function formatValue(value) {
 }
 
 // ポジティブプロンプトだけを返す。Negativeや生成設定は含めない。
+// LoRAタグを含む実効プロンプト（実際に生成へ送った内容）を優先する。
 export function buildPromptText(generation) {
+  const effective = generation?.effectivePrompt;
+  if (isMeaningful(effective)) return String(effective).trim();
   const prompt = generation?.prompt;
   return isMeaningful(prompt) ? String(prompt).trim() : "";
 }

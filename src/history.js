@@ -1,6 +1,9 @@
 import crypto from "node:crypto";
 import path from "node:path";
 import { JsonStore } from "./json-store.js";
+import { normalizeDiscordState } from "./discord.js";
+
+export const UNTITLED_DESCRIPTION = "無題";
 
 const IGNORED_TAGS = new Set([
   "masterpiece", "best quality", "amazing quality", "newest", "absurdres", "highres",
@@ -52,6 +55,69 @@ export function createHistoryService(dataDir, { limit = 500 } = {}) {
         return data;
       });
       return matched;
+    },
+
+    // ---- Discord送信状態 ----
+
+    // 「not_sent」または「failed」のときだけ「sending」を確保する。
+    // 既に sending / sent なら null を返し、二重送信を防ぐ。
+    async beginDiscordSend(imageId) {
+      let claimed = null;
+      await store.update((data) => {
+        const found = findImage(data, imageId);
+        if (!found) throw new Error("指定された画像が履歴にありません");
+        const state = normalizeDiscordState(found.image.discord);
+        if (state.status === "sending" || state.status === "sent") return data;
+        found.image.discord = { ...state, status: "sending", error: "" };
+        claimed = { generationId: found.generation.id, ...structuredClone(found.image) };
+        return data;
+      });
+      return claimed;
+    },
+
+    async completeDiscordSend(imageId, { messageId = null } = {}) {
+      return updateDiscordState(store, imageId, () => ({
+        status: "sent",
+        messageId: typeof messageId === "string" && messageId ? messageId.slice(0, 40) : null,
+        sentAt: new Date().toISOString(),
+        error: ""
+      }));
+    },
+
+    async failDiscordSend(imageId, message = "") {
+      return updateDiscordState(store, imageId, (state) => ({
+        ...state,
+        status: "failed",
+        error: String(message ?? "").slice(0, 500)
+      }));
+    },
+
+    async getDiscordState(imageId) {
+      const data = await store.read();
+      const found = findImage(data, imageId);
+      if (!found) throw new Error("指定された画像が履歴にありません");
+      return normalizeDiscordState(found.image.discord);
+    },
+
+    // サーバー再起動などで「sending」のまま残った画像を再送可能な状態へ戻す。
+    async recoverStuckDiscordSends() {
+      let recovered = 0;
+      await store.update((data) => {
+        for (const generation of data.generations) {
+          for (const image of generation.images) {
+            const state = normalizeDiscordState(image.discord);
+            if (state.status !== "sending") continue;
+            image.discord = {
+              ...state,
+              status: "failed",
+              error: "サーバー再起動により送信が中断されました"
+            };
+            recovered += 1;
+          }
+        }
+        return data;
+      });
+      return recovered;
     },
 
     async deleteImage(imageId) {
@@ -124,6 +190,26 @@ export function createHistoryService(dataDir, { limit = 500 } = {}) {
   };
 }
 
+function findImage(data, imageId) {
+  for (const generation of data.generations) {
+    const image = generation.images.find((item) => item.id === imageId);
+    if (image) return { generation, image };
+  }
+  return null;
+}
+
+async function updateDiscordState(store, imageId, mutate) {
+  let next = null;
+  await store.update((data) => {
+    const found = findImage(data, imageId);
+    if (!found) throw new Error("指定された画像が履歴にありません");
+    next = normalizeDiscordState(mutate(normalizeDiscordState(found.image.discord)));
+    found.image.discord = next;
+    return data;
+  });
+  return next;
+}
+
 export function analyzePreferences(generations) {
   const tagCounts = new Map();
   const loraCounts = new Map();
@@ -181,13 +267,23 @@ function normalizeGeneration(input) {
     sourceImageId: input.sourceImageId ?? null,
     sourceImageUrl: input.sourceImageUrl ?? null,
     maskImageUrl: input.maskImageUrl ?? null,
-    description: String(input.description ?? "").slice(0, 4000),
+    // 日本語の説明文は任意。無い場合は履歴上の見出しとして「無題」で保存する。
+    description: String(input.description ?? "").trim().slice(0, 4000) || UNTITLED_DESCRIPTION,
     prompt: String(input.prompt ?? "").slice(0, 12000),
     negativePrompt: String(input.negativePrompt ?? "").slice(0, 12000),
     effectivePrompt: String(input.effectivePrompt ?? "").slice(0, 16000),
     effectiveNegativePrompt: String(input.effectiveNegativePrompt ?? "").slice(0, 16000),
+    // 用途別プロンプトとトリガーワード（v2.14以降）。
+    // 古い履歴には無いので、読み出し側はnull / falseをRaw Promptとして扱う。
+    structuredPrompt: normalizeStructuredPrompt(input.structuredPrompt),
+    rawPromptOverride: input.rawPromptOverride === true,
+    rawPrompt: String(input.rawPrompt ?? "").slice(0, 16000),
+    appliedTriggerWords: normalizeAppliedTriggerWords(input.appliedTriggerWords),
     settings: structuredClone(input.settings ?? {}),
-    loras: structuredClone(input.loras ?? []),
+    // 実効LoRA一覧（Weightは実際に生成へ送った値、sourceは選択元）。
+    loras: normalizeLoras(input.loras),
+    // LoRAタグ同期の警告（重複・未インストールなど）。無ければ空配列。
+    loraNotices: Array.isArray(input.loraNotices) ? structuredClone(input.loraNotices).slice(0, 20) : [],
     images: (input.images ?? []).map((image) => ({
       id: image.id ?? crypto.randomUUID(),
       imageUrl: image.imageUrl,
@@ -196,9 +292,61 @@ function normalizeGeneration(input) {
       width: image.width ?? input.settings?.width ?? null,
       height: image.height ?? input.settings?.height ?? null,
       favorite: Boolean(image.favorite),
-      vote: image.vote ?? null
+      vote: image.vote ?? null,
+      // Discord送信状態（v2.15以降）。古い履歴は not_sent として読む。
+      discord: normalizeDiscordState(image.discord)
     }))
   };
+}
+
+// 古い履歴にはsourceが無い。UI選択だけで使っていた時代のものなので "ui" として読む。
+function normalizeLoras(input) {
+  if (!Array.isArray(input)) return [];
+  return input
+    .filter((lora) => lora && typeof lora === "object")
+    .map((lora) => ({
+      ...structuredClone(lora),
+      source: ["ui", "prompt", "both"].includes(lora.source) ? lora.source : "ui"
+    }));
+}
+
+const STRUCTURED_PROMPT_FIELDS = ["character", "appearance", "composition", "situation", "style", "extra"];
+
+// 6項目すべてを文字列として保存する。全部空なら「構造化プロンプト無し」としてnull。
+function normalizeStructuredPrompt(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  const sections = {};
+  let filled = false;
+  for (const field of STRUCTURED_PROMPT_FIELDS) {
+    const value = typeof input[field] === "string" ? input[field].slice(0, 4000) : "";
+    sections[field] = value;
+    if (value.trim()) filled = true;
+  }
+  return filled ? sections : null;
+}
+
+function normalizeAppliedTriggerWords(input) {
+  if (!Array.isArray(input)) return [];
+  return input
+    .filter((item) => item && typeof item === "object" && typeof item.text === "string" && item.text.trim())
+    .slice(0, 60)
+    .map((item) => {
+      const text = item.text.trim().slice(0, 200);
+      const sourceLoraIds = Array.isArray(item.sourceLoraIds)
+        ? item.sourceLoraIds.filter((value) => typeof value === "string" && value).slice(0, 8)
+        : [];
+      const sourceLoraId = typeof item.sourceLoraId === "string" ? item.sourceLoraId : sourceLoraIds[0] ?? "";
+      const weight = Number(item.weight);
+      return {
+        id: typeof item.id === "string" && item.id ? item.id.slice(0, 200) : `trigger:${text.toLowerCase()}`,
+        sourceLoraId,
+        sourceLoraIds: sourceLoraIds.length ? sourceLoraIds : (sourceLoraId ? [sourceLoraId] : []),
+        text,
+        weight: Number.isFinite(weight) ? Number(Math.min(2, Math.max(0.05, weight)).toFixed(2)) : 1,
+        targetField: STRUCTURED_PROMPT_FIELDS.includes(item.targetField) ? item.targetField : "extra",
+        enabled: item.enabled !== false
+      };
+    });
 }
 
 function splitTags(value) {

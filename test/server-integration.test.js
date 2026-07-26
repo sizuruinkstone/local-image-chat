@@ -94,10 +94,149 @@ test("生成キューからReForge、履歴、👍集計までAPIが往復する
   const savedRecipe = await (await fetch(`${baseUrl}/api/history/${image.id}/recipe`)).json();
   assert.equal(savedRecipe.settings.checkpoint, "waiNSFWIllustrious_v170.safetensors", "Checkpoint名が履歴へ保存される");
   assert.equal(savedRecipe.settings.checkpointHash, "abc123def", "Checkpoint hashが履歴へ保存される");
-  await patchJson(`${baseUrl}/api/history/${image.id}/favorite`, { favorite: true });
+
+  // 用途別プロンプトとLoRAトリガーワードが履歴へそのまま残る（復元用）。
+  const structuredQueued = await postJson(`${baseUrl}/api/jobs`, {
+    description: "構造化プロンプトのテスト",
+    prompt: "1girl, (character_name:1.2), classroom",
+    negativePrompt: "low quality",
+    structuredPrompt: { character: "1girl", situation: "classroom", unknown: "無視される" },
+    rawPromptOverride: false,
+    rawPrompt: "",
+    appliedTriggerWords: [{
+      id: "trigger:character_name",
+      sourceLoraId: "Characters/test",
+      sourceLoraIds: ["Characters/test"],
+      text: "character_name",
+      weight: 1.2,
+      targetField: "character",
+      enabled: true
+    }],
+    // 画面側でプロンプトへ組み込み済みなので、triggerWordsは空で送る。
+    loras: [{ name: "Characters/test", weight: 0.8, triggerWords: "" }],
+    settings: { width: 512, height: 512, steps: 5, candidateCount: 1 }
+  });
+  const structuredCompleted = await waitForJob(baseUrl, structuredQueued.job.id);
+  assert.equal(structuredCompleted.status, "done");
+  assert.deepEqual(structuredCompleted.result.structuredPrompt, {
+    character: "1girl", appearance: "", composition: "", situation: "classroom", style: "", extra: ""
+  });
+  assert.equal(structuredCompleted.result.appliedTriggerWords[0].weight, 1.2);
+  // LoRA本体のWeightとトリガーワードのWeightは別管理。
+  assert.equal(structuredCompleted.result.loras[0].weight, 0.8);
+  assert.equal(
+    structuredCompleted.result.effectivePrompt,
+    "1girl, (character_name:1.2), classroom, <lora:Characters/test:0.8>",
+    "組み込み済みのトリガーワードをサーバーが二重に追記しない"
+  );
+  const structuredRecipe = await (await fetch(
+    `${baseUrl}/api/history/${structuredCompleted.result.images[0].id}/recipe`
+  )).json();
+  assert.equal(structuredRecipe.structuredPrompt.situation, "classroom");
+  assert.equal(structuredRecipe.rawPromptOverride, false);
+  assert.equal(structuredRecipe.appliedTriggerWords[0].targetField, "character");
+  await fetch(`${baseUrl}/api/history/${structuredCompleted.result.images[0].id}`, { method: "DELETE" });
+
+  // プロンプト内のLoRAタグが実効Weightとして履歴へ残り、重複タグは1つにまとめられる。
+  const loraTagQueued = await postJson(`${baseUrl}/api/jobs`, {
+    description: "LoRAタグ同期",
+    prompt: "1girl, <lora:Characters/saileach_IL:0.6>, blue eyes, <lora:Characters/saileach_IL:0.65>",
+    negativePrompt: "low quality",
+    // UI側は古い1.0のまま送っても、実際に使ったWeightへ揃える。
+    loras: [{ name: "Characters/saileach_IL", weight: 1, source: "both" }],
+    loraNotices: [{ type: "duplicate", name: "Characters/saileach_IL", weights: [0.6, 0.65], weight: 0.65 }],
+    settings: { width: 512, height: 512, steps: 5, candidateCount: 1 }
+  });
+  const loraTagCompleted = await waitForJob(baseUrl, loraTagQueued.job.id);
+  assert.equal(loraTagCompleted.status, "done");
+  assert.equal(
+    loraTagCompleted.result.effectivePrompt,
+    "1girl, blue eyes, <lora:Characters/saileach_IL:0.65>",
+    "同一LoRAは最後の1つだけを生成へ送る"
+  );
+  assert.deepEqual(loraTagCompleted.result.loras, [{
+    name: "Characters/saileach_IL",
+    weight: 0.65,
+    triggerWords: "",
+    negativeWords: "",
+    source: "both"
+  }]);
+  const loraTagRecipe = await (await fetch(
+    `${baseUrl}/api/history/${loraTagCompleted.result.images[0].id}/recipe`
+  )).json();
+  assert.equal(loraTagRecipe.loras[0].weight, 0.65, "履歴のWeightがeffectivePromptと一致する");
+  assert.equal(loraTagRecipe.loras[0].source, "both");
+  assert.equal(loraTagRecipe.prompt.includes("<lora:Characters/saileach_IL:0.6>"), true, "元の入力は残す");
+  // 画面側で報告済みの重複は二重に記録しない。
+  assert.deepEqual(loraTagRecipe.loraNotices, [
+    { type: "duplicate", name: "Characters/saileach_IL", weights: [0.6, 0.65], weight: 0.65 }
+  ]);
+  await fetch(`${baseUrl}/api/history/${loraTagCompleted.result.images[0].id}`, { method: "DELETE" });
+
+  // 説明文なしでもPromptがあれば生成でき、履歴には「無題」で残る。
+  const untitledQueued = await postJson(`${baseUrl}/api/jobs`, {
+    prompt: "1girl, untitled run",
+    negativePrompt: "low quality",
+    loras: [],
+    settings: { width: 512, height: 512, steps: 5, candidateCount: 1 }
+  });
+  const untitledCompleted = await waitForJob(baseUrl, untitledQueued.job.id);
+  assert.equal(untitledCompleted.status, "done");
+  const untitledRecipe = await (await fetch(
+    `${baseUrl}/api/history/${untitledCompleted.result.images[0].id}/recipe`
+  )).json();
+  assert.equal(untitledRecipe.description, "無題");
+  assert.equal(untitledRecipe.prompt, "1girl, untitled run");
+  await fetch(`${baseUrl}/api/history/${untitledCompleted.result.images[0].id}`, { method: "DELETE" });
+
+  // 説明文もPromptも無い場合は拒否する。
+  const emptyQueued = await postJson(`${baseUrl}/api/jobs`, {
+    loras: [],
+    settings: { width: 512, height: 512, steps: 5, candidateCount: 1 }
+  });
+  const emptyFinished = await waitForJob(baseUrl, emptyQueued.job.id);
+  assert.equal(emptyFinished.status, "failed");
+  assert.match(emptyFinished.error, /生成したい内容かPrompt/);
+  const favorited = await patchJson(`${baseUrl}/api/history/${image.id}/favorite`, { favorite: true });
   const preferences = await (await fetch(`${baseUrl}/api/history/preferences`)).json();
   assert.equal(preferences.favoriteCount, 1);
   assert.equal(preferences.topTags[0].name, "blue hair");
+
+  // Discord: 送信先が未設定でもFavoriteは成功し、状態はnot_sentのまま。
+  assert.equal(favorited.image.favorite, true);
+  assert.deepEqual(favorited.image.discord, {
+    status: "not_sent", messageId: null, sentAt: null, error: ""
+  });
+  const discordState = await (await fetch(`${baseUrl}/api/history/${image.id}/discord`)).json();
+  assert.equal(discordState.discord.status, "not_sent");
+  const noTarget = await fetch(`${baseUrl}/api/history/${image.id}/discord/send`, { method: "POST" });
+  assert.equal(noTarget.status, 409);
+  assert.match((await noTarget.json()).error, /送信先が設定されていません/);
+
+  // 設定APIはWebhook URLを返さない。Discord以外のURLは拒否する。
+  const discordSettings = await (await fetch(`${baseUrl}/api/discord/settings`)).json();
+  assert.deepEqual(Object.keys(discordSettings.settings).sort(), [
+    "autoSend", "includeMetadata", "includePrompt", "storedWebhookConfigured",
+    "webhookConfigured", "webhookEditable", "webhookHint", "webhookSource"
+  ]);
+  assert.equal(discordSettings.settings.webhookConfigured, false);
+  const rejected = await fetch(`${baseUrl}/api/discord/settings`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ webhookUrl: "https://example.com/api/webhooks/1/abc" })
+  });
+  assert.equal(rejected.status, 400);
+  const savedSettings = await patchJson(`${baseUrl}/api/discord/settings`, {
+    webhookUrl: "https://discord.com/api/webhooks/123456789012345678/token-value-here",
+    autoSend: false,
+    includePrompt: false
+  });
+  assert.equal(savedSettings.settings.webhookConfigured, true);
+  assert.equal(savedSettings.settings.autoSend, false);
+  assert.equal(savedSettings.settings.includePrompt, false);
+  assert.equal(JSON.stringify(savedSettings).includes("token-value-here"), false, "Webhook URLを返さない");
+  assert.equal(savedSettings.settings.webhookHint, "discord.com/api/webhooks/123456789012345678/••••");
+  await patchJson(`${baseUrl}/api/discord/settings`, { clearWebhook: true, autoSend: true, includePrompt: true });
 
   const favoritesDir = path.join(temporaryDir, "outputs", "favorite");
   const favoritedFile = path.join(favoritesDir, path.basename(image.imageUrl));

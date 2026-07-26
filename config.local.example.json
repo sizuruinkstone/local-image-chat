@@ -1,5 +1,8 @@
 {
   "lora": {
     "installDir": "C:\\AI\\StabilityMatrix-win-x64\\Data\\Models\\Lora"
+  },
+  "discord": {
+    "webhookUrl": "https://discord.com/api/webhooks/000000000000000000/xxxxxxxxxxxxxxxxxxxxxxxx"
   }
 }

@@ -43,6 +43,125 @@ test("生成レシピを保存し、画像単位の👍から傾向を集計で�
   assert.equal((await history.list({ favoritesOnly: true }))[0].images.length, 1);
 });
 
+test("構造化プロンプトとトリガーワードを保存し、古い履歴とも両立する", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "local-image-chat-history-structured-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const history = createHistoryService(directory);
+
+  const stored = await history.addGeneration({
+    description: "教室の女の子",
+    prompt: "1girl, (character_name:1.2), classroom",
+    negativePrompt: "low quality",
+    effectivePrompt: "1girl, (character_name:1.2), classroom, <lora:char:0.8>",
+    structuredPrompt: { character: "1girl", situation: "classroom", extra: "" },
+    rawPromptOverride: false,
+    rawPrompt: "",
+    appliedTriggerWords: [
+      { id: "trigger:character_name", sourceLoraId: "char", sourceLoraIds: ["char"], text: "character_name", weight: 1.2, targetField: "character", enabled: true },
+      { text: "dropped", weight: 5, targetField: "見知らぬ項目", enabled: false },
+      { text: "   " }
+    ],
+    settings: { width: 512, height: 512 },
+    loras: [{ name: "char", weight: 0.8 }],
+    images: [{ filename: "one.png", imageUrl: "/outputs/one.png", seed: 7 }]
+  });
+
+  assert.deepEqual(stored.structuredPrompt, {
+    character: "1girl", appearance: "", composition: "", situation: "classroom", style: "", extra: ""
+  });
+  assert.equal(stored.rawPromptOverride, false);
+  assert.equal(stored.appliedTriggerWords.length, 2);
+  assert.equal(stored.appliedTriggerWords[0].weight, 1.2);
+  // 未知の反映先はextraへ寄せ、Weightは上限で丸める。LoRA本体のweightは触らない。
+  assert.equal(stored.appliedTriggerWords[1].targetField, "extra");
+  assert.equal(stored.appliedTriggerWords[1].weight, 2);
+  assert.equal(stored.appliedTriggerWords[1].enabled, false);
+  assert.equal(stored.loras[0].weight, 0.8);
+
+  // 古い形式（構造化プロンプト無し）はnull・空配列として読める
+  const legacy = await history.addGeneration({
+    description: "旧履歴",
+    prompt: "1girl, masterpiece",
+    settings: {},
+    images: [{ filename: "old.png", imageUrl: "/outputs/old.png", seed: 1 }]
+  });
+  assert.equal(legacy.structuredPrompt, null);
+  assert.equal(legacy.rawPromptOverride, false);
+  assert.deepEqual(legacy.appliedTriggerWords, []);
+
+  const recipe = await history.getRecipe(stored.images[0].id);
+  assert.equal(recipe.structuredPrompt.situation, "classroom");
+  assert.equal(recipe.appliedTriggerWords[0].text, "character_name");
+});
+
+test("LoRAの実効Weightと選択元・警告を履歴へ残す", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "local-image-chat-history-lora-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const history = createHistoryService(directory);
+
+  const stored = await history.addGeneration({
+    description: "LoRAタグ同期",
+    prompt: "1girl, <lora:Characters/saileach_IL:0.65>",
+    effectivePrompt: "1girl, <lora:Characters/saileach_IL:0.65>, <lora:Style/soft:0.7>",
+    settings: {},
+    loras: [
+      { name: "Characters/saileach_IL", weight: 0.65, source: "prompt" },
+      { name: "Style/soft", weight: 0.7 }
+    ],
+    loraNotices: [{ type: "unresolved", name: "unknown_lora", weight: 0.7 }],
+    images: [{ filename: "a.png", imageUrl: "/outputs/a.png", seed: 1 }]
+  });
+
+  assert.equal(stored.loras[0].weight, 0.65, "実効Weightを保存する");
+  assert.equal(stored.loras[0].source, "prompt");
+  // sourceが無い古い形式は "ui" として読む
+  assert.equal(stored.loras[1].source, "ui");
+  assert.deepEqual(stored.loraNotices, [{ type: "unresolved", name: "unknown_lora", weight: 0.7 }]);
+
+  const recipe = await history.getRecipe(stored.images[0].id);
+  assert.equal(recipe.loras[0].weight, 0.65);
+  assert.equal(recipe.effectivePrompt.includes("<lora:Characters/saileach_IL:0.65>"), true);
+
+  const legacy = await history.addGeneration({
+    description: "旧履歴",
+    prompt: "1girl",
+    settings: {},
+    loras: [{ name: "Characters/saileach_IL", weight: 1 }],
+    images: [{ filename: "b.png", imageUrl: "/outputs/b.png", seed: 2 }]
+  });
+  assert.equal(legacy.loras[0].source, "ui");
+  assert.deepEqual(legacy.loraNotices, []);
+});
+
+test("説明文が無い生成は「無題」として履歴へ残る", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "local-image-chat-history-untitled-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const history = createHistoryService(directory);
+
+  const untitled = await history.addGeneration({
+    prompt: "1girl, masterpiece",
+    settings: {},
+    images: [{ filename: "a.png", imageUrl: "/outputs/a.png", seed: 1 }]
+  });
+  assert.equal(untitled.description, "無題");
+
+  const blank = await history.addGeneration({
+    description: "   ",
+    prompt: "1girl",
+    settings: {},
+    images: [{ filename: "b.png", imageUrl: "/outputs/b.png", seed: 2 }]
+  });
+  assert.equal(blank.description, "無題");
+
+  const titled = await history.addGeneration({
+    description: " 夜の秋葉原 ",
+    prompt: "1girl",
+    settings: {},
+    images: [{ filename: "c.png", imageUrl: "/outputs/c.png", seed: 3 }]
+  });
+  assert.equal(titled.description, "夜の秋葉原");
+});
+
 test("複数画像から1枚だけ削除でき、最後の1枚で世代ごと消える", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "local-image-chat-history-del-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
