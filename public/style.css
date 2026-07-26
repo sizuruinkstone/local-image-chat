@@ -619,3 +619,14 @@ details label { margin-top: 13px; }
 .loraSyncNotice { margin-top: 6px; padding: 7px 10px; border: 1px solid rgba(255,183,77,.4); border-radius: 10px; background: rgba(255,183,77,.07); color: #ffb74d; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
 .detailLoraSource { flex: 0 0 auto; color: var(--muted); font-size: 10px; }
 .detailLoraNotices { display: grid; gap: 3px; color: #ffb74d; font-size: 11px; overflow-wrap: anywhere; }
+
+/* ===== AI共有バー（上部ツールバー） ===== */
+.shareBar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 0 0 14px; padding: 12px 14px; border: 1px solid rgba(185,255,77,.22); border-radius: 14px; background: rgba(185,255,77,.05); }
+.shareBarButtons { display: flex; flex-wrap: wrap; gap: 8px; }
+.shareBarButtons button { padding: 9px 16px; font-size: 12px; }
+.shareBarStatus { flex: 1 1 260px; min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.sharePreview { max-height: 60vh; margin: 0; padding: 12px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; background: rgba(0,0,0,.28); font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 11px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 720px) {
+  .shareBar { flex-direction: column; align-items: stretch; }
+  .shareBarButtons button { flex: 1 1 auto; }
+}

@@ -249,7 +249,12 @@ export async function copyToClipboard(text) {
   if (!value) throw new Error("コピーする内容がありません");
   if (navigator.clipboard?.writeText) {
     try {
-      await navigator.clipboard.writeText(value);
+      // 画面が非アクティブだと writeText が解決も失敗もしないままになることがある。
+      // ボタンが「コピー中」のまま固まらないよう、待ちすぎたらフォールバックへ進む。
+      await Promise.race([
+        navigator.clipboard.writeText(value),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("clipboard timeout")), 3000))
+      ]);
       return true;
     } catch {
       // フォールバックへ進む

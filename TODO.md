@@ -3,6 +3,28 @@
 v2.12の総合改造で意図的に簡略化した項目と、次に手を入れるとよい箇所。
 機能自体は動作しており、以下は「あると better」の残作業。
 
+## v2.18で対応済み（Issue #10）
+
+- 画面上部のAI共有バー（`Grok用に全コピー` / `AI共有CSVを更新`）
+- AI共有CSVの生成・保存（`src/ai-share.js` + `data/lora_list.csv`）と、手入力Trigger Wordsの優先反映
+- Grok用Markdown（環境・Checkpoint・所有LoRA・運用ルール）の組み立てとコピー
+- LoRA一覧更新・Civitai再取得・Trigger Words編集後の自動同期（best-effort）
+- クリップボード書き込みが応答しない場合のタイムアウト（`public/ui-kit.js`。ボタンが「コピー中」で固まらない）
+
+## v2.18で見送った項目
+
+### CSVの取り込み（読み込み側）
+
+- 現状: `data/lora_list.csv` は出力専用。既存CSVはTrigger Wordsの優先順位3として読むだけで、
+  外部で編集したCSVをレジストリへ書き戻す機能は無い。
+- 次にやるなら: `parseAiShareCsv`（`src/ai-share.js`）の結果を
+  `civitai.updateEntry` の手動編集（`manualFields`）として流し込む。
+
+### コピー前プレビューの常時表示
+
+- 現状: コピーは1クリックで実行し、直後のトーストの`内容を確認`でプレビューを開く方式。
+- 次にやるなら: 設定で「コピー前に必ずプレビューする」を選べるようにする。
+
 ## v2.17で対応済み
 
 - プロンプト内LoRAタグとLoRA選択UIの双方向同期（`public/lora-tags.js`）

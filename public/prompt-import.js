@@ -224,24 +224,3 @@ export function buildGrokRequestText({ instructions = "", setupDoc = "", loraCsv
   if (String(loraCsv).trim()) blocks.push(`## lora_list.csv\n\n\`\`\`csv\n${String(loraCsv).trim()}\n\`\`\``);
   return blocks.join("\n\n");
 }
-
-function csvCell(value) {
-  const text = String(value ?? "").replace(/[\r\n]+/g, " ").trim();
-  return /[",]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
-}
-
-// 導入済みLoRAからlora_list.csvを作る。値は保存済みのメタデータをそのまま出す。
-export function buildLoraCsv(loras = []) {
-  const header = "name,displayName,category,baseModel,recommendedWeight,triggerWords";
-  const rows = (Array.isArray(loras) ? loras : [])
-    .filter((lora) => lora && typeof lora.name === "string" && lora.name)
-    .map((lora) => [
-      lora.name,
-      lora.displayName ?? "",
-      lora.registry?.subcategory ?? lora.registry?.category ?? lora.category ?? "",
-      lora.registry?.baseModel ?? "",
-      lora.registry?.recommendedWeight ?? "",
-      lora.registry?.triggerWords ?? ""
-    ].map(csvCell).join(","));
-  return [header, ...rows].join("\n");
-}

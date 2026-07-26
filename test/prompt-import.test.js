@@ -3,7 +3,6 @@ import test from "node:test";
 import {
   DEFAULT_GROK_INSTRUCTIONS,
   buildGrokRequestText,
-  buildLoraCsv,
   mergePromptValue,
   normalizeHeading,
   parseAiPromptOutput,
@@ -223,21 +222,4 @@ test("Grokへ渡す全文を組み立てる", () => {
   assert.equal(buildGrokRequestText({ instructions: "指示文" }), "指示文");
   assert.equal(buildGrokRequestText({}), "");
   assert.ok(DEFAULT_GROK_INSTRUCTIONS.includes("結合結果"));
-});
-
-test("導入済みLoRAからCSVを作る", () => {
-  const csv = buildLoraCsv([
-    {
-      name: "Character/char_a",
-      displayName: "char_a",
-      registry: { subcategory: "character", baseModel: "Illustrious", recommendedWeight: 0.8, triggerWords: "char_a, costume" }
-    },
-    { name: "Style/style_b", displayName: "style_b", category: "direction" },
-    { name: "", displayName: "無視される" }
-  ]);
-  assert.deepEqual(csv.split("\n"), [
-    "name,displayName,category,baseModel,recommendedWeight,triggerWords",
-    'Character/char_a,char_a,character,Illustrious,0.8,"char_a, costume"',
-    "Style/style_b,style_b,direction,,,"
-  ]);
 });

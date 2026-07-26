@@ -30,6 +30,14 @@
         </div>
       </header>
 
+      <section class="shareBar" aria-label="AIへの共有">
+        <div class="shareBarButtons">
+          <button id="copyGrokShareButton" class="primary" type="button" title="環境・Checkpoint・所有LoRA・運用ルールをまとめてコピーします">Grok用に全コピー</button>
+          <button id="updateShareCsvButton" class="secondary" type="button" title="導入済みLoRAからAI共有CSVを作り直します">AI共有CSVを更新</button>
+        </div>
+        <p id="shareBarStatus" class="hint shareBarStatus" aria-live="polite">AI共有CSVを確認中…</p>
+      </section>
+
       <section id="health" class="health" aria-live="polite">
         <span class="status waiting">Ollama 確認中</span>
         <span class="status waiting">ReForge 確認中</span>

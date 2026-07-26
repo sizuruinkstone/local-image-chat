@@ -33,6 +33,7 @@ import {
 } from "./reforge.js";
 // LoRAタグの解析は画面と共通の実装を使う（正規表現をここへ書かない）。
 import { applyPromptWeights, dedupeLoraTags, sameLoraName } from "../public/lora-tags.js";
+import { buildGrokShareMarkdown, createAiShareService } from "./ai-share.js";
 import { createDiscordService, normalizeDiscordState } from "./discord.js";
 import { createHistoryService } from "./history.js";
 import { createPromptTemplateService } from "./prompt-template.js";
@@ -83,6 +84,7 @@ const updater = createUpdater(rootDir, {
 const jobs = createJobManager(generateWithRecovery);
 const checkpointSets = createCheckpointSetService(dataDir);
 const promptTemplate = createPromptTemplateService(dataDir);
+const aiShare = createAiShareService(dataDir);
 // Webhook URLはサーバー内だけで保持する（APIレスポンスにも画面にも出さない）。
 const discord = createDiscordService({
   dataDir,
@@ -385,6 +387,62 @@ app.post("/api/history/:imageId/discord/send", async (request, response) => {
     response.json({ discord: await discord.resend(requireId(request.params.imageId)) });
   } catch (error) {
     response.status(409).json({ error: readableError(error) });
+  }
+});
+
+// ---- AI共有（CSV更新 / Grok用全コピー） ----
+
+app.get("/api/ai-share", async (_request, response) => {
+  try {
+    response.json({ state: await aiShare.getState(), csv: await aiShare.readCsv() });
+  } catch (error) {
+    response.status(500).json({ error: readableError(error) });
+  }
+});
+
+// 画面の手入力Trigger Wordsを受け取り、レジストリの値とマージしてCSVを作り直す。
+app.post("/api/ai-share/csv", async (request, response) => {
+  try {
+    await aiShare.saveManualTriggerWords(request.body?.triggerWords);
+    const result = await aiShare.updateCsv(await getInstalledLoras());
+    response.json({
+      path: result.path,
+      csv: result.csv,
+      rowCount: result.rowCount,
+      triggerWordCount: result.triggerWordCount,
+      changed: result.changed,
+      generatedAt: result.generatedAt
+    });
+  } catch (error) {
+    response.status(500).json({ error: readableError(error) });
+  }
+});
+
+// Grokへ貼り付けるMarkdown。CSVと同じ値をそのまま載せる。
+app.post("/api/ai-share/grok", async (request, response) => {
+  try {
+    await aiShare.saveManualTriggerWords(request.body?.triggerWords);
+    const loras = await getInstalledLoras();
+    const result = await aiShare.updateCsv(loras);
+    const template = await promptTemplate.get();
+    // ReForgeが落ちていてもコピー自体は成功させる。
+    const checkpointInfo = await listCheckpoints(config.reforge).catch(() => ({ checkpoints: [], activeCheckpoint: "" }));
+    response.json({
+      markdown: buildGrokShareMarkdown({
+        rows: result.rows,
+        csv: result.csv,
+        setupDoc: template.setupDoc,
+        instructions: template.instructions,
+        checkpoints: checkpointInfo.checkpoints,
+        activeCheckpoint: checkpointInfo.activeCheckpoint,
+        version: packageJson.version
+      }),
+      rowCount: result.rowCount,
+      triggerWordCount: result.triggerWordCount,
+      path: result.path
+    });
+  } catch (error) {
+    response.status(500).json({ error: readableError(error) });
   }
 });
 

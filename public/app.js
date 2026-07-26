@@ -47,7 +47,6 @@ import {
 import {
   DEFAULT_GROK_INSTRUCTIONS,
   buildGrokRequestText,
-  buildLoraCsv,
   mergePromptValue,
   parseAiPromptOutput
 } from "./prompt-import.js";
@@ -128,6 +127,7 @@ const elements = Object.fromEntries(
     "discordDetails", "discordAutoSend", "discordWebhook", "discordIncludePrompt",
     "discordIncludeMetadata", "saveDiscordSettingsButton", "clearDiscordWebhookButton",
     "discordSettingsStatus", "finalDiscordStatus", "importAiPromptButton", "loraSyncNotice",
+    "copyGrokShareButton", "updateShareCsvButton", "shareBarStatus",
     "promptTemplateDetails", "grokInstructions", "grokSetupDoc", "grokLoraCsv",
     "copyGrokTemplateButton", "saveGrokTemplateButton", "generateLoraCsvButton",
     "resetGrokInstructionsButton", "grokTemplateStatus"
@@ -162,6 +162,9 @@ const IMPORT_SOURCE_PREFIX = "import:";
 // プロンプト入力中に同期を走らせすぎないための待ち時間。
 const LORA_SYNC_DEBOUNCE = 400;
 let loraSyncTimer = null;
+// AI共有CSVの自動更新も、続けて走らせない。
+const SHARE_SYNC_DEBOUNCE = 1500;
+let shareSyncTimer = null;
 
 const TRIGGER_LIST_ELEMENTS = {
   character: "triggerListCharacter",
@@ -268,7 +271,8 @@ renderPromptModeState();
 syncRawPromptFromSections();
 await Promise.all([
   checkHealth(), loadCheckpoints(), loadLoras(), loadHistory(), loadCivitaiFolders(), loadLoraRoot(),
-  loadExperiments(), loadCheckpointSets(), loadDiscordSettings(), loadPromptTemplate()
+  loadExperiments(), loadCheckpointSets(), loadDiscordSettings(), loadPromptTemplate(),
+  loadShareState()
 ]);
 markSettingsApplied();
 setGenerationMode("txt2img");
@@ -402,6 +406,8 @@ elements.civitaiCategory.addEventListener("change", () => applyCategoryFolder(el
 elements.civitaiFolder.addEventListener("change", onCivitaiFolderChange);
 elements.civitaiFolderFavorite.addEventListener("click", toggleCivitaiFolderFavorite);
 elements.civitaiNewFolder.addEventListener("input", refreshCivitaiFolderHint);
+elements.copyGrokShareButton.addEventListener("click", copyGrokShare);
+elements.updateShareCsvButton.addEventListener("click", updateShareCsv);
 elements.importAiPromptButton.addEventListener("click", openAiPromptImport);
 elements.copyGrokTemplateButton.addEventListener("click", copyGrokTemplate);
 elements.saveGrokTemplateButton.addEventListener("click", () => void savePromptTemplate());
@@ -1676,6 +1682,8 @@ async function loadLoras(refresh = false) {
       : "LoRAが見つかりません。追加後に「再読込」を押してください。";
     renderLoras();
     renderSelectedLoraSummary();
+    // AI共有CSVはLoRA一覧に追随させる（失敗しても操作は止めない）。
+    scheduleShareCsvSync();
   } catch (error) {
     elements.loraStatus.textContent = `LoRA一覧を取得できません: ${error.message}`;
   } finally {
@@ -1915,6 +1923,7 @@ function createLoraRow(lora) {
     if (triggerWords) loraTriggers.set(lora.name, triggerWords);
     else loraTriggers.delete(lora.name);
     saveLoraTriggers();
+    scheduleShareCsvSync();
     if (selectedLoras.has(lora.name)) renderSelectedLoraSummary();
   });
 
@@ -3417,6 +3426,98 @@ function applyImportedTriggerWords(entries, mode) {
   syncAppliedTriggerWords();
 }
 
+// ---- AI共有（上部ツールバー: Grok用に全コピー / AI共有CSVを更新） ----
+
+// 画面で手入力したTrigger Words。サーバーはこれを最優先でCSVへ入れる。
+function manualTriggerWordsPayload() {
+  return Object.fromEntries(loraTriggers);
+}
+
+function renderShareStatus(state) {
+  if (!state?.generatedAt) {
+    elements.shareBarStatus.textContent = "AI共有CSVは未作成です。「AI共有CSVを更新」で作成できます。";
+    return;
+  }
+  elements.shareBarStatus.textContent =
+    `AI共有CSV: ${state.rowCount}件（Trigger Words ${state.triggerWordCount}件）・${formatDate(state.generatedAt)}・${state.path}`;
+}
+
+async function loadShareState() {
+  try {
+    const { state } = await getJson("/api/ai-share");
+    renderShareStatus(state);
+  } catch (error) {
+    elements.shareBarStatus.textContent = `AI共有CSVの状態を取得できません: ${error.message}`;
+  }
+}
+
+async function updateShareCsv() {
+  await withBusy(elements.updateShareCsvButton, "更新中…", async () => {
+    try {
+      const result = await postJson("/api/ai-share/csv", { triggerWords: manualTriggerWordsPayload() });
+      renderShareStatus(result);
+      // 指示テンプレート側のlora_list.csvも同じ内容へ合わせる。
+      if (elements.grokLoraCsv.value !== result.csv) {
+        elements.grokLoraCsv.value = result.csv;
+        await patchJson("/api/prompt-template", { loraCsv: result.csv }).catch(() => {});
+      }
+      toast.success(
+        `AI共有CSVを更新しました: ${result.rowCount}件（Trigger Words ${result.triggerWordCount}件）\n${result.path}`
+      );
+    } catch (error) {
+      toast.error(`AI共有CSVを更新できませんでした: ${error.message}`);
+    }
+  });
+}
+
+async function copyGrokShare() {
+  await withBusy(elements.copyGrokShareButton, "作成中…", async () => {
+    try {
+      const result = await postJson("/api/ai-share/grok", { triggerWords: manualTriggerWordsPayload() });
+      await copyToClipboard(result.markdown);
+      flashLabel(elements.copyGrokShareButton, "Copied!");
+      renderShareStatus({ ...result, generatedAt: new Date().toISOString() });
+      toast.success(`Grok用データをコピーしました（LoRA ${result.rowCount}件）`, {
+        action: { label: "内容を確認", onSelect: () => openSharePreview(result.markdown) }
+      });
+    } catch (error) {
+      toast.error(`Grok用データをコピーできませんでした: ${error.message}`);
+    }
+  });
+}
+
+function openSharePreview(markdown) {
+  openModal({
+    title: "Grok用データ",
+    subtitle: "クリップボードへコピーした内容です",
+    size: "large",
+    build: (body) => {
+      const preview = document.createElement("pre");
+      preview.className = "sharePreview";
+      preview.textContent = markdown;
+      body.append(preview);
+    },
+    actions: [{ label: "閉じる", value: true, primary: true }]
+  });
+}
+
+// LoRA一覧やTrigger Wordsが変わったときの自動同期。
+// 失敗しても通常の操作を止めない（best-effort）。
+function scheduleShareCsvSync() {
+  clearTimeout(shareSyncTimer);
+  shareSyncTimer = setTimeout(() => void syncShareCsvQuietly(), SHARE_SYNC_DEBOUNCE);
+}
+
+async function syncShareCsvQuietly() {
+  clearTimeout(shareSyncTimer);
+  try {
+    const result = await postJson("/api/ai-share/csv", { triggerWords: manualTriggerWordsPayload() });
+    renderShareStatus(result);
+  } catch (error) {
+    console.warn(`[AI共有] CSVの自動更新に失敗しました: ${error.message}`);
+  }
+}
+
 // ---- Grok向け指示テンプレート ----
 
 async function loadPromptTemplate() {
@@ -3465,12 +3566,19 @@ async function copyGrokTemplate() {
   }
 }
 
-// 導入済みLoRAからlora_list.csvを作り直す。
+// 導入済みLoRAからlora_list.csvを作り直す（生成はサーバー側のAI共有CSVと共通）。
 async function updateLoraCsvFromInstalled() {
-  if (!installedLoras.length) return toast.warning("LoRAが読み込まれていません");
-  elements.grokLoraCsv.value = buildLoraCsv(installedLoras);
-  await savePromptTemplate({ silent: true });
-  toast.success(`lora_list.csvを${installedLoras.length}件で更新しました`);
+  await withBusy(elements.generateLoraCsvButton, "更新中…", async () => {
+    try {
+      const result = await postJson("/api/ai-share/csv", { triggerWords: manualTriggerWordsPayload() });
+      elements.grokLoraCsv.value = result.csv;
+      renderShareStatus(result);
+      await savePromptTemplate({ silent: true });
+      toast.success(`lora_list.csvを${result.rowCount}件で更新しました（Trigger Words ${result.triggerWordCount}件）`);
+    } catch (error) {
+      toast.error(`lora_list.csvを更新できませんでした: ${error.message}`);
+    }
+  });
 }
 
 async function resetGrokInstructions() {

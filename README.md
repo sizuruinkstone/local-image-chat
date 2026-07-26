@@ -2,6 +2,14 @@
 
 日本語の指示をOllamaでStable Diffusion向けタグに変換し、ReForge APIでローカル画像生成するツールです。
 
+## v2.18の主な機能
+
+- 画面上部にAI共有バーを追加（`Grok用に全コピー` / `AI共有CSVを更新`）。スクロール前に常に見える位置に固定
+- `Grok用に全コピー`: 環境情報・使用可能Checkpoint・所有LoRA一覧（CSV）・運用ルールをMarkdownで一括コピー
+- `AI共有CSVを更新`: 導入済みLoRAから`data/lora_list.csv`を生成。更新件数・Trigger Words取得件数・出力先を表示
+- Trigger Wordsは「画面で手入力した値 → レジストリ（Civitaiの`trainedWords`）→ 既存CSV → 空欄」の優先順。Civitai再解析でも手入力値は消えない
+- LoRA一覧更新・Civitai再取得・Trigger Words編集の後は自動でCSVを更新（best-effort。失敗しても生成やLoRA操作は止めない）
+
 ## v2.17の主な機能
 
 - プロンプト内LoRAタグとLoRA選択UIの双方向同期: `<lora:name:0.65>`を入力欄へ書くと、そのLoRAがUIで選択され、Weightも0.65になる
@@ -207,6 +215,33 @@ Negative promptは入力方式に関わらず共通の1欄です。
 - 取り込まなかった見出し・行はプレビューに件数と内容を出します。想定した見出しが1つも無い場合は`分割形式を認識できませんでした`と表示し、`全文をRaw Promptへ入れる`だけを提示します（AIによる再分類・推測はしません）
 
 インポートしたトリガーワードはLoRAの選択状態とは独立して残ります。`置き換える`で再インポートすると、前回インポート分だけが入れ替わります（LoRA由来の枠と手入力は残ります）。
+
+### AI共有バー（画面上部）
+
+タイトル直下に、AIへ環境情報を渡すためのボタンが2つ並びます。スクロールしなくても常に見える位置です。
+
+- **Grok用に全コピー**: 次の内容をMarkdownでまとめてクリップボードへコピーします。コピー後のトーストの`内容を確認`で全文をプレビューできます
+  1. プロンプト方針（`Grok向け指示テンプレート`の指示文）
+  2. 環境（`MY_SD_SETUP.md`。未入力なら既定の説明）
+  3. 使用可能Checkpoint（ReForgeが応答しない場合は`取得できませんでした`と表示してコピー自体は成功させます）
+  4. 所有LoRA一覧（下のCSVそのもの）
+  5. 運用ルール（CSVに無いLoRAを使わない／LoRA名とTrigger Wordsを変えない／Trigger Wordsと容姿・衣装欄を重複させない／LoRA構文・重み構文・タグ順を壊さない／分割入力の順番を維持する）
+- **AI共有CSVを更新**: 導入済みLoRAから`data/lora_list.csv`を作り直します。完了時に更新件数・Trigger Words取得件数・出力先パスを表示します
+
+CSVの列は次のとおりです。カンマや引用符を含む値は標準のCSVクォートで囲み、括弧・バックスラッシュ・綴り・タグの順序は一切変更しません。
+
+```csv
+Name,RelativePath,Category,TriggerWords,RecommendedWeight,RecommendedWeightMin,RecommendedWeightMax,BaseModel,Notes
+```
+
+`Name`は`<lora:Name:Weight>`にそのまま使える名前です。Trigger Wordsは次の優先順で決まります。
+
+1. 画面のLoRA行で手入力した`Trigger Words`（`data/ai-share.json`へ保存。Civitai再解析でも上書きされません）
+2. `data/lora-registry.json`の`triggerWords`（Civitaiの`trainedWords`）
+3. 既存の`lora_list.csv`の値
+4. どれも無ければ空欄
+
+LoRA一覧の再読込・Civitai登録情報の再取得・Trigger Wordsの手入力の後は自動でCSVを更新します。自動更新が失敗しても通常のLoRA操作や画像生成は止まりません（詳しいエラーは手動ボタンを押したときだけ表示します）。
 
 ### Grok向け指示テンプレート
 
