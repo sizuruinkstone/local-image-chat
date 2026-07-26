@@ -7,7 +7,23 @@ export function createJobManager(execute, { retentionMs = 60 * 60 * 1000 } = {})
   const listeners = new Set();
   let processing = false;
 
-  function create(payload) {
+  // metaはキュー表示用の短い説明だけを持つ。payloadと違い完了後も保持するため、
+  // 秘密情報や絶対パスを入れないこと（呼び出し側が明示的に組み立てる）。
+  function normalizeMeta(meta) {
+    const source = meta ?? {};
+    const text = (value, max) => (typeof value === "string" && value.trim() ? value.trim().slice(0, max) : null);
+    const count = (value) => (Number.isFinite(Number(value)) ? Number(value) : null);
+    return {
+      kind: source.kind === "comparison" ? "comparison" : "generation",
+      label: text(source.label, 120) ?? "",
+      experimentId: text(source.experimentId, 80),
+      experimentName: text(source.experimentName, 120),
+      index: count(source.index),
+      total: count(source.total)
+    };
+  }
+
+  function create(payload, meta = {}) {
     cleanup();
     const id = crypto.randomUUID();
     const job = {
@@ -22,6 +38,7 @@ export function createJobManager(execute, { retentionMs = 60 * 60 * 1000 } = {})
       error: null,
       // 失敗時の自動リカバリ提案（設定を下げた再試行案）
       recovery: null,
+      meta: normalizeMeta(meta),
       payload,
       controller: new AbortController()
     };
@@ -154,6 +171,7 @@ function publicJob(job) {
     finishedAt: job.finishedAt,
     result: job.result,
     error: job.error,
-    recovery: job.recovery
+    recovery: job.recovery,
+    meta: job.meta
   };
 }

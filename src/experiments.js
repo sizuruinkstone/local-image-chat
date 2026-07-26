@@ -104,6 +104,16 @@ export function describeExperimentValue(parameter, target, value) {
   return target ? `${target} ${label}: ${value}` : `${label}: ${value}`;
 }
 
+// キュー表示用の「何を比べているか」。内部IDではなく人が読める形にする。
+export function describeExperimentSubject(experiment) {
+  const label = COMPARABLE_PARAMETERS[experiment?.parameter]?.label ?? experiment?.parameter ?? "比較";
+  const values = Array.isArray(experiment?.values) ? experiment.values : [];
+  const listed = values.slice(0, 6).join(" / ");
+  const suffix = values.length > 6 ? ` ほか${values.length - 6}件` : "";
+  const prefix = experiment?.target ? `${experiment.target} ` : "";
+  return values.length ? `${prefix}${label} ${listed}${suffix}` : `${prefix}${label}`;
+}
+
 // runの状態は experiments.json を正とする。JobManagerのメモリ状態は
 // 進捗表示の補助にだけ使い、終端状態（done/failed/cancelled）は上書きしない。
 export const RUN_STATUSES = ["queued", "running", "done", "failed", "cancelled"];
@@ -409,7 +419,15 @@ export function createExperimentService(dataDir, { jobs, maxImages = MAX_EXPERIM
             total: normalizedValues.length,
             baseSeed: experiment.fixedSeed ?? experiment.baseSeed
           };
-          const job = jobs.create(payload);
+          // キュー表示で通常生成と区別できるよう、実験の情報をjobへ添える。
+          const job = jobs.create(payload, {
+            kind: "comparison",
+            label: describeExperimentValue(parameter, experiment.target, value),
+            experimentId: id,
+            experimentName: experiment.name,
+            index: index + 1,
+            total: normalizedValues.length
+          });
           createdJobIds.push(job.id);
           jobIndex.set(job.id, id);
           experiment.runs.push(normalizeRun({ value, index: index + 1, jobId: job.id }));

@@ -376,6 +376,10 @@ details label { margin-top: 13px; }
 .toastText { overflow-wrap: anywhere; white-space: pre-wrap; }
 .toastClose { padding: 0 4px; border: 0; background: none; color: var(--muted); font-size: 15px; line-height: 1; cursor: pointer; }
 .toastClose:hover { color: var(--text); }
+/* 操作付きトーストだけ列を増やす（通常のトーストの見た目は変えない） */
+.toast.hasAction { grid-template-columns: auto minmax(0, 1fr) auto auto; }
+.toastAction { padding: 3px 9px; border: 1px solid rgba(185,255,77,.4); border-radius: 99px; background: rgba(185,255,77,.1); color: var(--accent); font-size: 11px; font-weight: 700; white-space: nowrap; cursor: pointer; }
+.toastAction:hover { background: rgba(185,255,77,.18); }
 .toast-success { border-color: rgba(185,255,77,.35); } .toast-success .toastIcon { background: rgba(185,255,77,.18); color: var(--accent); }
 .toast-info .toastIcon { background: rgba(255,255,255,.12); color: #cdd2dc; }
 .toast-warning { border-color: rgba(255,196,77,.35); } .toast-warning .toastIcon { background: rgba(255,196,77,.16); color: #ffc44d; }
@@ -504,6 +508,48 @@ details label { margin-top: 13px; }
 .experimentVote { padding: 2px 7px; border: 1px solid var(--line); border-radius: 99px; font-size: 10px; }
 .experimentVote.vote-win { border-color: rgba(185,255,77,.4); color: var(--accent); }
 .experimentVote.vote-lose { color: var(--muted); }
+/* ===== ヘッダー右上の生成キュー表示 ===== */
+.queueIndicator { display: inline-flex; align-items: center; gap: 7px; padding: 7px 12px; border: 1px solid var(--line); border-radius: 99px; background: rgba(255,255,255,.05); color: var(--text); font-size: 12px; font-weight: 700; white-space: nowrap; cursor: pointer; }
+.queueIndicator:hover { border-color: rgba(185,255,77,.45); }
+.queueIndicatorDot { color: var(--muted); font-size: 9px; line-height: 1; }
+.queueIndicator[data-tone="busy"] { border-color: rgba(185,255,77,.32); background: rgba(185,255,77,.08); }
+.queueIndicator[data-tone="busy"] .queueIndicatorDot { color: var(--accent); animation: queuePulse 1.4s ease-in-out infinite; }
+.queueIndicator[data-tone="done"] { border-color: rgba(185,255,77,.4); color: var(--accent); }
+.queueIndicator[data-tone="done"] .queueIndicatorDot { color: var(--accent); }
+.queueIndicator[data-tone="error"] { border-color: rgba(255,102,122,.4); color: #ffc2ca; }
+.queueIndicator[data-tone="error"] .queueIndicatorDot { color: var(--danger); }
+@keyframes queuePulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+.queuePanel { display: grid; gap: 16px; }
+.queueSection { display: grid; gap: 7px; }
+.queueSectionHeading { font-size: 12px; }
+.queueRow { display: grid; gap: 4px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: rgba(255,255,255,.03); }
+.queueRow.status-running, .queueRow.status-saving { border-color: rgba(185,255,77,.28); }
+.queueRow.status-failed { border-color: rgba(255,102,122,.32); }
+.queueRowHead { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.queueRowStatus { flex: 0 0 auto; padding: 1px 8px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted); font-size: 10px; }
+.queueRow.status-running .queueRowStatus, .queueRow.status-saving .queueRowStatus { border-color: rgba(185,255,77,.4); color: var(--accent); }
+.queueRow.status-failed .queueRowStatus { border-color: rgba(255,102,122,.4); color: var(--danger); }
+.queueRowTitle { flex: 1 1 auto; min-width: 0; font-weight: 700; overflow-wrap: anywhere; }
+.queueRowProgress { flex: 0 0 auto; color: var(--accent); font-size: 11px; }
+.queueRowMeta { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.queueRowError { color: var(--danger); font-size: 11px; overflow-wrap: anywhere; }
+.queueRowActions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+
+/* ===== 入力欄の個別クリアボタン ===== */
+.clearableField { position: relative; display: block; }
+.clearableField > textarea, .clearableField > input { width: 100%; }
+.clearableField > textarea { padding-right: 34px; }
+.clearableField > input { padding-right: 32px; }
+.fieldClearButton { position: absolute; top: 8px; right: 8px; display: grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 1px solid var(--line); border-radius: 999px; background: rgba(20,22,28,.9); color: var(--muted); font-size: 13px; line-height: 1; cursor: pointer; }
+.fieldClearButton:hover { border-color: var(--danger); color: var(--danger); }
+/* input用: 入力欄自身のmargin-topを包み側へ移し、ボタンを縦中央へ置く */
+.clearableInput { margin-top: 6px; }
+.clearableInput > input { margin-top: 0; }
+.clearableInput > .fieldClearButton { top: 50%; transform: translateY(-50%); }
+.detailCopyActions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 0; }
+.detailCopyActions .flashed { border-color: rgba(185,255,77,.5); color: var(--accent); }
+
 /* 自動リカバリで設定を下げて再試行したrun・画像の目印 */
 .experimentRecovered { flex: 0 0 auto; padding: 2px 7px; border: 1px solid rgba(255,183,77,.42); border-radius: 99px; color: #ffb74d; font-size: 10px; white-space: nowrap; cursor: help; }
 .compareBadge.recovered { border-color: rgba(255,183,77,.42); color: #ffb74d; cursor: help; }

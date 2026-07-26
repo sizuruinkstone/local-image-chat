@@ -15,6 +15,16 @@
           <p class="subtitle">日本語で話して、ReForgeで生成。<span id="versionText" class="version">v2.4</span></p>
         </div>
         <div class="headerActions">
+          <button
+            id="queueIndicator"
+            class="queueIndicator hidden"
+            type="button"
+            aria-haspopup="dialog"
+            title="生成キューの詳細を表示"
+          >
+            <span class="queueIndicatorDot" aria-hidden="true">●</span>
+            <span id="queueIndicatorText" aria-live="polite">待機中</span>
+          </button>
           <button id="updateStatusButton" class="ghost">最新版確認</button>
           <button id="healthButton" class="ghost">接続確認</button>
         </div>
@@ -181,9 +191,18 @@
           <details>
             <summary>プロンプトを確認・編集</summary>
             <label for="prompt">Prompt</label>
-            <textarea id="prompt" rows="5" placeholder="空なら日本語から自動作成"></textarea>
+            <div class="clearableField">
+              <textarea id="prompt" rows="5" placeholder="空なら日本語から自動作成"></textarea>
+              <button id="clearPromptButton" class="fieldClearButton" type="button" aria-label="Promptを消す" title="Promptだけを消す">×</button>
+            </div>
             <label for="negativePrompt">Negative prompt</label>
-            <textarea id="negativePrompt" rows="4"></textarea>
+            <div class="clearableField">
+              <textarea id="negativePrompt" rows="4"></textarea>
+              <button id="clearNegativePromptButton" class="fieldClearButton" type="button" aria-label="Negative promptを消す" title="Negative promptだけを消す">×</button>
+            </div>
+            <div class="buttonRow compactButtons">
+              <button id="clearPromptsButton" class="ghost" type="button" title="PromptとNegative promptをまとめて消す">Clear Prompts</button>
+            </div>
           </details>
 
           <details>
@@ -314,7 +333,10 @@
               <button id="openLoraRootButton" class="ghost smallButton" type="button">LoRAフォルダを開く</button>
             </div>
             <label>Civitaiモデルページ
-              <input id="civitaiUrl" type="url" placeholder="https://civitai.com/models/..." />
+              <div class="clearableField clearableInput">
+                <input id="civitaiUrl" type="url" placeholder="https://civitai.com/models/..." />
+                <button id="clearCivitaiUrlButton" class="fieldClearButton" type="button" aria-label="Civitai URLを消す" title="入力中のURLだけを消す">×</button>
+              </div>
             </label>
             <div class="settingsGrid">
               <label>分類
@@ -355,7 +377,12 @@
               <label>高さ<input id="height" type="number" step="64" /></label>
               <label>Steps<input id="steps" type="number" /></label>
               <label>CFG<input id="cfgScale" type="number" step="0.5" /></label>
-              <label>Seed<input id="seed" type="number" value="-1" /></label>
+              <label>Seed
+                <div class="clearableField clearableInput">
+                  <input id="seed" type="number" value="-1" />
+                  <button id="clearSeedButton" class="fieldClearButton" type="button" aria-label="Seedをランダムへ戻す" title="Seedだけをランダム（-1）へ戻す">×</button>
+                </div>
+              </label>
               <label>Sampler<input id="samplerName" type="text" /></label>
               <label>Scheduler<input id="scheduler" type="text" /></label>
               <label>Noise schedule for sampling

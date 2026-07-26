@@ -18,6 +18,8 @@ import {
   COMPARABLE_PARAMETERS,
   MAX_EXPERIMENT_IMAGES,
   createExperimentService,
+  describeExperimentSubject,
+  describeExperimentValue,
   isComparableParameter
 } from "./experiments.js";
 import { checkOllama, createPrompt, unloadOllama } from "./ollama.js";
@@ -360,8 +362,18 @@ app.get("/api/jobs", (_request, response) => {
 });
 
 app.post("/api/jobs", (request, response) => {
-  const job = jobs.create(request.body ?? {});
+  const body = request.body ?? {};
+  const job = jobs.create(body, { kind: "generation", label: describeGenerationJob(body) });
   response.status(202).json({ job });
+});
+
+// ヘッダー右上のキュー表示用。通常生成と比較実験をまとめて返す。
+app.get("/api/queue", async (_request, response) => {
+  try {
+    response.json(await buildQueueSnapshot());
+  } catch (error) {
+    response.status(500).json({ error: readableError(error) });
+  }
 });
 
 app.get("/api/jobs/:jobId", (request, response) => {
@@ -736,6 +748,136 @@ async function performGeneration(body, { signal, report }) {
       : generatedPrompt.explanation_ja,
     settings
   };
+}
+
+// ---- キュー表示（ヘッダー右上） ----
+
+// 完了直後の結果も出したいので、終了から一定時間はキューへ残す。
+const QUEUE_RECENT_MS = 10 * 60 * 1000;
+const TERMINAL_JOB_STATUSES = ["done", "failed", "cancelled"];
+
+// payloadは完了時に破棄されるため、表示用ラベルは投入時に作る。
+// 秘密情報・絶対パスは載せず、モードと枚数だけを使う。
+function describeGenerationJob(body) {
+  const modeLabel = { img2img: "img2img", inpaint: "部分修正" }[body?.mode] ?? "新規生成";
+  const settings = isPlainObject(body?.settings) ? body.settings : {};
+  if (settings.hiresEnabled === true || settings.hiresEnabled === "true") return `${modeLabel}・Hires仕上げ`;
+  const count = Number(settings.candidateCount);
+  return Number.isFinite(count) && count > 0
+    ? `${modeLabel}・候補${Math.min(Math.trunc(count), 4)}枚`
+    : modeLabel;
+}
+
+async function buildQueueSnapshot() {
+  const now = Date.now();
+  const isRecent = (finishedAt) => !finishedAt || now - new Date(finishedAt).getTime() <= QUEUE_RECENT_MS;
+
+  // jobs.list()は新しい順。待機番号は投入順（古い順）で数える。
+  const generation = [];
+  let generationQueuePosition = 0;
+  for (const job of jobs.list().reverse()) {
+    if (job.meta?.kind === "comparison") continue;
+    if (!isRecent(job.finishedAt)) continue;
+    if (job.status === "queued") generationQueuePosition += 1;
+    generation.push({
+      id: job.id,
+      type: "generation",
+      label: job.meta?.label || "画像生成",
+      status: job.status,
+      // 取得できない状態では偽の進捗率を出さずnullにする。
+      progress: job.status === "running" ? numberOrNull(job.progress) : job.status === "done" ? 100 : null,
+      message: job.message ?? "",
+      queuePosition: job.status === "queued" ? generationQueuePosition : null,
+      errorMessage: job.error ?? null,
+      recoverable: Boolean(job.recovery),
+      createdAt: job.createdAt,
+      finishedAt: job.finishedAt
+    });
+  }
+
+  const comparison = [];
+  let comparisonQueuePosition = 0;
+  const experimentList = await experiments.list({ limit: 20 });
+  for (const experiment of [...experimentList].reverse()) {
+    const entry = toComparisonQueueEntry(experiment);
+    if (!entry) continue;
+    if (entry.status === "queued") {
+      comparisonQueuePosition += 1;
+      entry.queuePosition = comparisonQueuePosition;
+    }
+    // 失敗・完了も一定時間は残す（失敗した実験がキューから消えないようにする）。
+    if (entry.status === "queued" || entry.status === "running" || entry.status === "saving" || isRecent(entry.finishedAt)) {
+      comparison.push(entry);
+    }
+  }
+
+  const activeGeneration = generation.filter((item) => !TERMINAL_JOB_STATUSES.includes(item.status));
+  const activeComparison = comparison.filter((item) => ["queued", "running", "saving"].includes(item.status));
+  return {
+    generation,
+    comparison,
+    summary: {
+      activeCount: activeGeneration.length + activeComparison.length,
+      generationActive: activeGeneration.length,
+      comparisonActive: activeComparison.length,
+      hasError: generation.some((item) => item.status === "failed")
+        || comparison.some((item) => item.status === "failed" || item.failedCases > 0)
+    }
+  };
+}
+
+// 実験1件をキュー1行へ変換する。人が読める比較内容と、完了/総パターン数を持たせる。
+function toComparisonQueueEntry(experiment) {
+  const runs = experiment.runs ?? [];
+  if (!runs.length) return null;
+  const completedCases = runs.filter((run) => run.status === "done").length;
+  const failedCases = runs.filter((run) => run.status === "failed").length;
+  const cancelledCases = runs.filter((run) => run.status === "cancelled").length;
+  const pendingCases = runs.filter((run) => run.status === "queued").length;
+  const running = runs.find((run) => run.status === "running");
+  const failedRun = runs.find((run) => run.status === "failed" && run.error);
+  const finishedAt = runs.map((run) => run.finishedAt).filter(Boolean).sort().at(-1) ?? null;
+
+  const status = running
+    ? (Number(running.progress) >= 94 ? "saving" : "running")
+    : experiment.status === "cancelled"
+      ? "cancelled"
+      : pendingCases
+        ? "queued"
+        : failedCases === runs.length
+          ? "failed"
+          : "completed";
+
+  return {
+    id: experiment.id,
+    type: "comparison",
+    name: experiment.name,
+    subject: describeExperimentSubject(experiment),
+    status,
+    queuePosition: null,
+    completedCases,
+    failedCases,
+    cancelledCases,
+    pendingCases,
+    totalCases: runs.length,
+    // 1パターン1枚で生成するため、画像数は記録済みの画像IDから数える。
+    completedImages: runs.reduce((total, run) => total + (run.imageIds?.length ?? 0), 0),
+    totalImages: runs.length,
+    currentCaseLabel: running
+      ? describeExperimentValue(experiment.parameter, experiment.target, running.value)
+      : null,
+    progress: running ? numberOrNull(running.progress) : null,
+    message: running?.message ?? "",
+    resultId: completedCases ? experiment.id : null,
+    errorMessage: failedRun?.error ?? null,
+    createdAt: experiment.createdAt,
+    finishedAt
+  };
+}
+
+function numberOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 async function getInstalledLoras() {

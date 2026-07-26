@@ -3,6 +3,28 @@
 v2.12の総合改造で意図的に簡略化した項目と、次に手を入れるとよい箇所。
 機能自体は動作しており、以下は「あると better」の残作業。
 
+## v2.13で対応済み
+
+- ヘッダー右上の生成キュー表示（`GET /api/queue` + `public/queue-view.js`）。
+  通常生成と比較実験を`job.meta.kind`で区別し、実行順・完了数・処理中の条件を出す
+- 履歴詳細の`Copy Prompt` / `Copy All Metadata`（整形は`public/metadata-format.js`）
+- Prompt・Negative prompt・Civitai URL・Seedの個別クリアと`Clear Prompts`（Undo付き）
+
+## v2.13で見送った項目
+
+### リンク追加欄のクリア
+
+- 指示にあった「リンク追加のURL入力欄」は、このアプリに該当機能が無いため対象外。
+  URL入力欄はCivitaiモデルページのみで、そこへはクリアボタンを追加済み。
+  将来リンク管理を追加する場合は`setupClearableField`（`public/app.js`）を再利用する。
+
+### 失敗した比較実験の再実行・キューの並べ替え
+
+- 現状: サーバーに再実行（resume）とキュー並べ替えのAPIが無いため、見た目だけの
+  ボタンは追加していない。キュー詳細では中止・中断と結果表示だけを出す。
+- 次にやるなら`src/experiments.js`へ`resume(id)`を追加してから、
+  `public/queue-view.js`の`buildComparisonRow`へ`onRetryComparison`を渡す。
+
 ## v2.12.1で対応済み
 
 - run状態（`queued`/`running`/`done`/`failed`/`cancelled`）の永続化と、
@@ -84,5 +106,7 @@ v2.12の総合改造で意図的に簡略化した項目と、次に手を入れ
 | 画像比較 | `src/experiments.js`（`addComparison`） | `public/compare-view.js` |
 | Checkpointセット | `src/checkpoint-sets.js` | `public/app.js`（LoRAセット） |
 | 自動リカバリ | `src/recovery.js`、`src/job-manager.js` | `public/app.js`（`confirmRecovery`） |
-| 共通UI | — | `public/ui-kit.js` |
+| 生成キュー表示 | `src/server.js`（`/api/queue`）、`src/job-manager.js`（`job.meta`） | `public/queue-view.js` |
+| 履歴のコピー | — | `public/metadata-format.js` |
+| 共通UI | — | `public/ui-kit.js`（`copyToClipboard`・`flashLabel`・トーストの`action`） |
 | マイグレーション | `src/migrations.js` | — |

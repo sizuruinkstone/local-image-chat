@@ -2,6 +2,13 @@
 
 日本語の指示をOllamaでStable Diffusion向けタグに変換し、ReForge APIでローカル画像生成するツールです。
 
+## v2.13の主な機能
+
+- 生成キュー表示: ヘッダー右上に`● 生成中 58%`のような状態を出し、クリックで画像生成と比較実験のキュー詳細（実行順・完了数・処理中の条件・エラー）を確認できる
+- 生成中のギャラリー閲覧: 生成はサーバー側のジョブとして進むため、`ギャラリー`タブへ切り替えても中断されず、完成画像は自動でギャラリーへ反映される
+- 履歴詳細のコピー: `Copy Prompt`でポジティブプロンプトだけ、`Copy All Metadata`でPNG Info形式の生成情報をコピーできる
+- 入力欄の個別クリア: Prompt・Negative prompt・Civitai URL・Seedに`×`ボタンを追加。`Clear Prompts`で両プロンプトを一括削除し、トーストから`元に戻す`ことができる
+
 ## v2.12.1の修正
 
 - 比較実験のrun状態（`queued` / `running` / `done` / `failed` / `cancelled`）を`data/experiments.json`へ永続化。
@@ -176,6 +183,64 @@ Denoisingが低いほど元画像に近く、高いほどPromptとLoRAの影響�
 その後にキャラLoRAや衣装プリセットだけ変更して生成すると、構図をなるべく維持した差分を作れます。
 Seed固定は厳密なポーズ固定ではないため、キャラクターの体格やLoRAの影響が強い場合は構図も多少変化します。
 `削除`は確認のうえ、その画像を履歴と`outputs/`から削除します（同じ生成の最後の1枚を消すと生成ごと削除します）。カード画像をクリックすると拡大表示、`詳細`でCheckpoint・LoRA+Weight・生成設定・Prompt・Negative Promptを確認でき、詳細の最下部から`img2imgへ`・`部分修正`を実行できます。過去の履歴でCheckpoint情報がない場合は`Checkpoint記録なし`と表示します。
+
+### 履歴詳細からのコピー
+
+`詳細`の中ほどに2つのコピーボタンがあります。コピーに成功するとボタンが一時的に`Copied!`へ変わり、失敗した場合はトーストでエラーを表示します（成功扱いにはしません）。
+
+- `Copy Prompt`: ポジティブプロンプトだけをコピーします。Negative prompt・Seed・Steps・Sampler・CFG・Modelなどは含みません
+- `Copy All Metadata`: Stable Diffusion WebUIのPNG Infoに近い形式でコピーします
+
+```text
+anime screencap, solo, 1girl, smile, <lora:Style/Flat:0.7>
+
+Negative prompt: worst quality, low quality, bad anatomy
+
+Steps: 20, Sampler: DPM++ 2M SDE, Schedule type: Karras, CFG scale: 5, Seed: 2123974969, Size: 1120x1440, Model: waiNSFWIllustrious_v90, LoRA: Style/Flat:0.7
+```
+
+保存されていない項目は行ごと省略し、`undefined`・`null`・`NaN`は出力しません。内部ID・ファイル名・ローカルパス・APIキーは含みません。整形処理は`public/metadata-format.js`にまとめています。
+
+### 生成キュー（ヘッダー右上）
+
+生成や比較実験を開始すると、ヘッダー右上へ状態が表示されます。生成はサーバー側のキューで進むため、`ギャラリー`タブへ移動しても中断されず、完成画像は自動でギャラリーへ反映されます。
+
+```text
+● 生成中 58%      … 進捗率が取れる場合
+● 保存中          … 進捗率が取れない場合は状態だけを表示
+● 処理中 3件      … 通常生成と比較実験が同時にある場合
+```
+
+クリックすると詳細パネルが開き、`画像生成`と`比較実験`に分けて以下を確認できます。
+
+```text
+画像生成
+[生成中] 新規生成・候補4枚          58%
+
+比較実験
+[生成中] Flat Painting weight test   条件 4/12
+         Style/FlatPainting LoRA weight 0.5 / 0.6 / 0.7
+         処理中: Style/FlatPainting LoRA weight: 0.6   33%
+         [中断] [結果を見る]
+```
+
+- 待機中の項目には実行順（`待機中 1`・`待機中 2`）が付きます
+- 進捗率を取得できない状態では、偽のパーセントを出さず状態だけを表示します
+- 中止・中断は既存APIがある操作だけを表示します（通常生成は`DELETE /api/jobs/:id`、比較実験は`POST /api/experiments/:id/cancel`）
+- 完了時はトーストと`結果を見る`から比較結果へ移動できます。失敗した項目は約10分キューに残り、簡潔なエラーだけを表示します
+
+### 入力欄のクリア
+
+以下の入力欄には、空でないときだけ右端に`×`が出ます。押した欄だけを消し、他の設定は変更しません。確認ダイアログは出しません。
+
+| 欄 | 動作 |
+| --- | --- |
+| Prompt | ポジティブプロンプトだけを空にする |
+| Negative prompt | ネガティブプロンプトだけを空にする |
+| Civitai モデルページ | 入力中のURLと確認結果・エラー表示だけを消す（追加済みLoRAは残る） |
+| Seed | Seedだけをランダム（`-1`）へ戻す（構図固定中なら固定も解除する） |
+
+`Clear Prompts`はPromptとNegative promptだけをまとめて削除します。削除後のトーストの`元に戻す`で、両方を削除前の内容へ戻せます。
 
 ## LoRA
 

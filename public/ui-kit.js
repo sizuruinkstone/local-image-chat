@@ -19,7 +19,8 @@ function ensureToastHost() {
 }
 
 // type: success | info | warning | error
-export function showToast(message, { type = "info", timeout = 5000 } = {}) {
+// action: { label, onSelect } を渡すと「元に戻す」などの1操作を付けられる。
+export function showToast(message, { type = "info", timeout = 5000, action = null } = {}) {
   if (!message) return () => {};
   const host = ensureToastHost();
   const toast = document.createElement("div");
@@ -42,7 +43,20 @@ export function showToast(message, { type = "info", timeout = 5000 } = {}) {
     setTimeout(() => toast.remove(), 180);
   };
   close.addEventListener("click", dismiss);
-  toast.append(icon, text, close);
+  toast.append(icon, text);
+  if (action?.label && typeof action.onSelect === "function") {
+    toast.classList.add("hasAction");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "toastAction";
+    button.textContent = action.label;
+    button.addEventListener("click", () => {
+      dismiss();
+      action.onSelect();
+    });
+    toast.append(button);
+  }
+  toast.append(close);
   host.append(toast);
   // 通知が溜まりすぎないよう、古いものから捨てる。
   while (host.children.length > 4) host.firstElementChild.remove();
@@ -226,6 +240,55 @@ export function confirmModal(message, {
       { label: confirmText, value: true, primary: true, variant: danger ? "dangerButton" : "primary" }
     ]
   }).promise;
+}
+
+// クリップボードへコピーする。失敗時は必ず例外を投げる（成功扱いにしない）。
+// navigator.clipboardはhttps以外や権限拒否で使えないため、選択コピーへ退避する。
+export async function copyToClipboard(text) {
+  const value = String(text ?? "");
+  if (!value) throw new Error("コピーする内容がありません");
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch {
+      // フォールバックへ進む
+    }
+  }
+  const area = document.createElement("textarea");
+  area.value = value;
+  area.setAttribute("readonly", "true");
+  area.style.position = "fixed";
+  area.style.top = "-1000px";
+  area.style.opacity = "0";
+  document.body.append(area);
+  area.select();
+  let copied = false;
+  try {
+    copied = document.execCommand?.("copy") === true;
+  } catch {
+    copied = false;
+  } finally {
+    area.remove();
+  }
+  if (!copied) throw new Error("クリップボードへアクセスできません");
+  return true;
+}
+
+// 一時的にラベルを差し替える（「Copied!」表示など）。
+export function flashLabel(button, label, timeout = 1400) {
+  if (!button) return;
+  if (button.dataset.flashOriginal === undefined) button.dataset.flashOriginal = button.textContent;
+  const original = button.dataset.flashOriginal;
+  button.textContent = label;
+  button.classList.add("flashed");
+  clearTimeout(Number(button.dataset.flashTimer));
+  button.dataset.flashTimer = String(setTimeout(() => {
+    button.textContent = original;
+    button.classList.remove("flashed");
+    delete button.dataset.flashOriginal;
+    delete button.dataset.flashTimer;
+  }, timeout));
 }
 
 // 二重押し防止。処理中はボタンを無効化し、ラベルを差し替える。

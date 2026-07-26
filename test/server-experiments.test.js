@@ -94,6 +94,36 @@ test("比較実験は同時に1本だけ開始でき、実行中に削除する�
 
   // 1枚目の生成が始まってから削除する
   await waitUntil(() => txt2imgCount >= 1, "1枚目の生成が始まらない");
+
+  // キュー表示: 通常生成と比較実験を区別し、実行順と進捗を返す
+  const queue = await waitUntil(async () => {
+    const snapshot = await getJson(`${baseUrl}/api/queue`);
+    return snapshot.comparison?.[0]?.status === "running" ? snapshot : null;
+  }, "キューに実行中の比較実験が出ない");
+  const [entry] = queue.comparison;
+  assert.equal(entry.id, experimentId);
+  assert.equal(entry.type, "comparison");
+  assert.match(entry.subject, /CFG 5 \/ 6 \/ 7 \/ 8/, "比較内容が人間に分かる形で入る");
+  assert.equal(entry.totalCases, 4);
+  assert.ok(entry.currentCaseLabel, "処理中の条件が分かる");
+  assert.equal(queue.generation.length, 0, "実験のジョブは通常生成へ混ざらない");
+  assert.equal(queue.summary.comparisonActive, 1);
+  assert.equal(queue.summary.generationActive, 0);
+
+  // 通常生成のジョブはラベル付きで通常生成側へ並ぶ
+  await postJson(`${baseUrl}/api/jobs`, {
+    description: "通常生成",
+    prompt: "masterpiece, 1girl",
+    settings: { width: 512, height: 512, steps: 5, candidateCount: 2 }
+  });
+  const mixed = await waitUntil(async () => {
+    const snapshot = await getJson(`${baseUrl}/api/queue`);
+    return snapshot.generation?.length ? snapshot : null;
+  }, "通常生成がキューへ出ない");
+  assert.equal(mixed.generation[0].type, "generation");
+  assert.equal(mixed.generation[0].label, "新規生成・候補2枚");
+  assert.ok(["queued", "running"].includes(mixed.generation[0].status));
+  await deleteJson(`${baseUrl}/api/jobs/${mixed.generation[0].id}`);
   const generatedBeforeDelete = txt2imgCount;
   const deleted = await deleteJson(`${baseUrl}/api/experiments/${experimentId}`);
   assert.equal(deleted.ok, true);
@@ -171,7 +201,8 @@ async function waitForServer(url, child) {
 async function waitUntil(check, message) {
   const deadline = Date.now() + 8000;
   while (Date.now() < deadline) {
-    if (await check()) return;
+    const value = await check();
+    if (value) return value;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error(message);

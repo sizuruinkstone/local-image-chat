@@ -11,9 +11,11 @@ import {
   getCheckpointProfile,
   inferCheckpointProfile
 } from "./checkpoint-profiles.js";
-import { confirmModal, openModal, toast, withBusy } from "./ui-kit.js";
+import { confirmModal, copyToClipboard, flashLabel, openModal, toast, withBusy } from "./ui-kit.js";
 import { openLoraEditor } from "./lora-editor.js";
 import { describeRetryInfo, openCompareView } from "./compare-view.js";
+import { buildMetadataText, buildPromptText } from "./metadata-format.js";
+import { buildQueuePanel, summarizeQueue } from "./queue-view.js";
 import {
   NEW_FOLDER_VALUE,
   buildFolderGroups,
@@ -81,7 +83,9 @@ const elements = Object.fromEntries(
     "maskUndoButton", "maskRedoButton", "maskClearButton", "maskBrushSize",
     "maskBrushSizeValue", "inpaintDenoising", "inpaintDenoisingValue", "maskBlur",
     "inpaintFill", "inpaintFullRes", "inpaintFullResPadding",
-    "sendFinalToImg2ImgButton", "sendFinalToInpaintButton", "finalEyebrow", "finalTitle"
+    "sendFinalToImg2ImgButton", "sendFinalToInpaintButton", "finalEyebrow", "finalTitle",
+    "queueIndicator", "queueIndicatorText", "clearPromptButton", "clearNegativePromptButton",
+    "clearPromptsButton", "clearSeedButton", "clearCivitaiUrlButton"
   ].map((id) => [id, document.getElementById(id)])
 );
 
@@ -124,6 +128,22 @@ let activeCheckpoint = null;
 let activeLoraCategory = loadLoraCategory();
 let pinnedLoraName = null;
 let displayedLoraName = null;
+// Seedの「ランダム」はアプリ全体で-1。空欄と同じ扱いにはしない。
+const RANDOM_SEED = "-1";
+// ヘッダー右上のキュー表示。サーバーのジョブ状態が正で、画面はそれを映すだけ。
+// 起動処理より前に評価されるよう、定数もここへ置く。
+const QUEUE_POLL_INTERVAL = 1200;
+// 完了・失敗の表示を少し残してから停止する（1.2秒 × 8回 ≒ 10秒）。
+const QUEUE_IDLE_TICKS = 8;
+const QUEUE_TERMINAL_STATUSES = ["done", "completed", "failed", "cancelled"];
+let queueSnapshot = { generation: [], comparison: [], summary: { activeCount: 0 } };
+let queuePolling = false;
+let queuePanel = null;
+let queueSeenTerminal = null;
+// Clear PromptsのUndo用スナップショット。
+let clearedPromptSnapshot = null;
+// Seedクリアボタンの表示同期（setupClearableFieldsで実体を入れる）。
+let syncSeedClearButton = () => {};
 let generationMode = "txt2img";
 let initImageReference = null;
 let defaultInpaintFullRes = true;
@@ -156,6 +176,9 @@ await Promise.all([
 markSettingsApplied();
 setGenerationMode("txt2img");
 updateGenerateButton();
+setupClearableFields();
+// 再読み込み後も、サーバー側で走っているジョブを拾って右上へ表示する。
+startQueuePolling();
 
 elements.healthButton.addEventListener("click", checkHealth);
 elements.promptButton.addEventListener("click", buildPrompt);
@@ -233,6 +256,8 @@ elements.sendFinalToInpaintButton.addEventListener("click", () => {
 });
 elements.unlockCompositionButton.addEventListener("click", unlockComposition);
 elements.cancelJobButton.addEventListener("click", cancelActiveJob);
+elements.queueIndicator.addEventListener("click", openQueuePanel);
+elements.clearPromptsButton.addEventListener("click", clearBothPrompts);
 elements.candidateCount.addEventListener("change", handleCandidateCountChange);
 elements.description.addEventListener("input", handleDescriptionChange);
 elements.prompt.addEventListener("input", markPromptAsCurrent);
@@ -2511,6 +2536,7 @@ async function runExperiment() {
       });
       activeExperimentId = experiment.id;
       toast.info(`比較生成を開始しました（${experiment.total}枚）`);
+      startQueuePolling();
       void pollExperiment(experiment.id);
     } catch (error) {
       elements.experimentStatus.textContent = error.message;
@@ -2618,6 +2644,7 @@ function setPromptFields(prompt, negativePrompt, description) {
   elements.negativePrompt.value = negativePrompt;
   settingPromptProgrammatically = false;
   promptDescription = description;
+  syncPromptClearButtons();
 }
 
 function handleDescriptionChange() {
@@ -2629,6 +2656,7 @@ function handleDescriptionChange() {
     elements.negativePrompt.value = "";
     settingPromptProgrammatically = false;
     promptDescription = "";
+    syncPromptClearButtons();
   }
 }
 
@@ -2728,12 +2756,17 @@ function selectCandidate(candidate, card) {
 }
 
 async function submitGeneration(payload, { allowRecovery = true } = {}) {
+  // 二重投入を防ぐ（タブ移動やギャラリー操作から重ねて呼ばれても1本だけ走らせる）。
+  if (activeJobId) throw new Error("生成中です。完了または中止してから実行してください");
   const request = { ...payload, autoRetry: elements.autoRetryOnFailure.checked };
   const { job } = await postJson("/api/jobs", request);
   activeJobId = job.id;
   setJobProgress(job);
   elements.jobBar.classList.remove("hidden");
   elements.cancelJobButton.disabled = false;
+  // 生成はサーバー側のジョブとして進むので、タブを移動しても継続する。
+  // 右上のキュー表示へ即座に反映させる。
+  startQueuePolling();
 
   try {
     while (true) {
@@ -2745,7 +2778,11 @@ async function submitGeneration(payload, { allowRecovery = true } = {}) {
         // 設定を下げれば通る見込みがある場合だけ、確認して1回だけ再試行する。
         if (allowRecovery && current.recovery) {
           const retryPayload = await confirmRecovery(current.recovery, request);
-          if (retryPayload) return submitGeneration(retryPayload, { allowRecovery: false });
+          if (retryPayload) {
+            // 再試行は同じ生成の続きなので、二重投入チェックを通す。
+            activeJobId = null;
+            return submitGeneration(retryPayload, { allowRecovery: false });
+          }
         }
         throw new Error(current.error ?? current.message);
       }
@@ -2829,6 +2866,260 @@ async function cancelActiveJob() {
   }
 }
 
+// ---- ヘッダー右上のキュー表示 ----
+
+const queueHandlers = {
+  onCancelGeneration: async (entry) => {
+    try {
+      await deleteJson(`/api/jobs/${entry.id}`);
+      toast.info("生成を中止しました");
+    } catch (error) {
+      toast.error(error.message);
+    }
+    await refreshQueue();
+  },
+  onCancelComparison: async (entry) => {
+    try {
+      await postJson(`/api/experiments/${entry.id}/cancel`, {});
+      toast.warning("比較実験を中断しました");
+    } catch (error) {
+      toast.error(error.message);
+    }
+    await refreshQueue();
+    await loadExperiments();
+  },
+  onOpenComparisonResult: (entry) => void openComparisonResult(entry.id)
+};
+
+async function refreshQueue() {
+  try {
+    queueSnapshot = await getJson("/api/queue");
+  } catch {
+    // 取得できないときは前回の表示を保つ（偽の状態を出さない）
+    return null;
+  }
+  renderQueueIndicator();
+  notifyQueueChanges(queueSnapshot);
+  queuePanel?.render(queueSnapshot);
+  return queueSnapshot;
+}
+
+function startQueuePolling() {
+  if (queuePolling) return;
+  queuePolling = true;
+  void (async () => {
+    let idle = 0;
+    try {
+      while (idle < QUEUE_IDLE_TICKS) {
+        const snapshot = await refreshQueue();
+        const active = Number(snapshot?.summary?.activeCount) || 0;
+        idle = active || queuePanel ? 0 : idle + 1;
+        await sleep(QUEUE_POLL_INTERVAL);
+      }
+    } finally {
+      queuePolling = false;
+      // 「生成完了」は一時表示なので、落ち着いたら消す（失敗表示は残す）。
+      hideIdleQueueIndicator();
+    }
+  })();
+}
+
+function hideIdleQueueIndicator() {
+  if (queuePanel) return;
+  if (Number(queueSnapshot?.summary?.activeCount) || 0) return;
+  if (summarizeQueue(queueSnapshot).tone === "error") return;
+  elements.queueIndicator.classList.add("hidden");
+}
+
+function renderQueueIndicator() {
+  const summary = summarizeQueue(queueSnapshot);
+  elements.queueIndicator.classList.toggle("hidden", !summary.visible);
+  elements.queueIndicator.dataset.tone = summary.tone;
+  elements.queueIndicatorText.textContent = summary.text;
+  elements.queueIndicator.title = summary.visible
+    ? `${summary.text} / クリックで詳細`
+    : "生成キューの詳細を表示";
+}
+
+// 完了・失敗を検知して通知し、ギャラリーを自動更新する。
+function notifyQueueChanges(snapshot) {
+  const terminal = new Set();
+  const fresh = [];
+  for (const entry of [...(snapshot.generation ?? []), ...(snapshot.comparison ?? [])]) {
+    if (!QUEUE_TERMINAL_STATUSES.includes(entry.status)) continue;
+    const key = `${entry.type}:${entry.id}:${entry.status}`;
+    terminal.add(key);
+    if (queueSeenTerminal && !queueSeenTerminal.has(key)) fresh.push(entry);
+  }
+  const firstLoad = queueSeenTerminal === null;
+  queueSeenTerminal = terminal;
+  if (firstLoad || !fresh.length) return;
+
+  let refreshGallery = false;
+  for (const entry of fresh) {
+    if (entry.status === "cancelled") continue;
+    if (entry.status === "failed") {
+      toast.error(entry.type === "comparison"
+        ? `比較実験が失敗しました: ${friendlyQueueError(entry.errorMessage)}`
+        : `生成に失敗しました: ${friendlyQueueError(entry.errorMessage)}`);
+      continue;
+    }
+    refreshGallery = true;
+    if (entry.type === "comparison") {
+      const failed = Number(entry.failedCases) || 0;
+      toast.success(failed
+        ? `比較実験が終了しました（${entry.completedCases}/${entry.totalCases}完了・${failed}件失敗）`
+        : "比較実験が完了しました", {
+        action: { label: "結果を見る", onSelect: () => void openComparisonResult(entry.id) }
+      });
+      continue;
+    }
+    // 生成結果タブを見ているときは画面に出るので、通知はギャラリー閲覧中だけにする。
+    if (isGalleryTabVisible()) toast.success("生成が完了しました");
+  }
+  if (refreshGallery) void loadHistory();
+}
+
+function isGalleryTabVisible() {
+  return !elements.galleryTab.classList.contains("hidden");
+}
+
+// 内部エラーをそのまま出さないよう、短いメッセージへ丸める。
+function friendlyQueueError(message) {
+  const text = String(message ?? "").split("\n")[0].trim();
+  if (!text) return "詳細不明のエラーです";
+  return text.length > 160 ? `${text.slice(0, 160)}…` : text;
+}
+
+function openQueuePanel() {
+  if (queuePanel) return;
+  let panelBody = null;
+  const modal = openModal({
+    title: "生成キュー",
+    subtitle: "画像生成と比較実験の実行状況",
+    size: "medium",
+    build: (body) => {
+      panelBody = body;
+      body.append(buildQueuePanel(queueSnapshot, queueHandlers));
+    },
+    actions: [{ label: "閉じる", primary: true }]
+  });
+  queuePanel = {
+    close: () => modal.close(),
+    render: (snapshot) => {
+      if (!panelBody?.isConnected) return;
+      panelBody.replaceChildren(buildQueuePanel(snapshot, queueHandlers));
+    }
+  };
+  void modal.promise.then(() => { queuePanel = null; });
+  startQueuePolling();
+}
+
+// 比較実験の結果へ移動する導線。ギャラリーの実験詳細を開く。
+async function openComparisonResult(experimentId) {
+  queuePanel?.close();
+  await loadHistory();
+  await loadExperiments();
+  const experiment = knownExperiments.find((item) => item.id === experimentId);
+  if (!experiment) return toast.warning("実験が見つかりません");
+  setResultTab("gallery");
+  setGalleryView("experiments");
+  renderExperimentCards();
+  openExperimentDetail(experiment);
+}
+
+// ---- 入力欄のクリア ----
+
+// 共通のクリアボタン。空のときは隠し、その欄だけを消す。
+function setupClearableField(input, button, { onClear, isEmpty } = {}) {
+  if (!input || !button) return () => {};
+  const empty = () => (typeof isEmpty === "function" ? isEmpty(input) : !String(input.value ?? "").trim());
+  const sync = () => button.classList.toggle("hidden", empty());
+  button.addEventListener("click", () => {
+    if (empty()) return;
+    if (typeof onClear === "function") {
+      onClear();
+    } else {
+      input.value = "";
+      // 既存の入力ハンドラ（プロンプト状態・検証など）へ通常の入力として伝える。
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    sync();
+    input.focus();
+  });
+  for (const eventName of ["input", "change"]) input.addEventListener(eventName, sync);
+  sync();
+  return sync;
+}
+
+function setupClearableFields() {
+  setupClearableField(elements.prompt, elements.clearPromptButton);
+  setupClearableField(elements.negativePrompt, elements.clearNegativePromptButton);
+  setupClearableField(elements.civitaiUrl, elements.clearCivitaiUrlButton, {
+    onClear: () => {
+      elements.civitaiUrl.value = "";
+      // 取得済みの確認結果と検証エラーだけを解除する（追加済みLoRAには触らない）。
+      elements.civitaiUrl.dispatchEvent(new Event("input", { bubbles: true }));
+      elements.civitaiPreview.classList.add("hidden");
+      elements.civitaiPreview.replaceChildren();
+      elements.civitaiStatus.textContent = "";
+    }
+  });
+  // Seedは「空」ではなくランダム値(-1)へ戻す。見た目だけ空にはしない。
+  syncSeedClearButton = setupClearableField(elements.seed, elements.clearSeedButton, {
+    isEmpty: (input) => {
+      const value = String(input.value ?? "").trim();
+      return !value || Number(value) < 0;
+    },
+    onClear: () => {
+      if (compositionLock) unlockComposition();
+      else elements.seed.value = RANDOM_SEED;
+      toast.info("Seedをランダム（-1）へ戻しました");
+    }
+  });
+}
+
+// PromptとNegative promptだけをまとめて消す（他の生成設定は変えない）。
+function clearBothPrompts() {
+  const previous = {
+    prompt: elements.prompt.value,
+    negativePrompt: elements.negativePrompt.value,
+    description: promptDescription
+  };
+  if (!previous.prompt.trim() && !previous.negativePrompt.trim()) {
+    return toast.info("PromptとNegative promptはすでに空です");
+  }
+  clearedPromptSnapshot = previous;
+  // setPromptFieldsがクリアボタンの表示も同期する。
+  setPromptFields("", "", "");
+  toast.info("プロンプトを削除しました", {
+    action: {
+      label: "元に戻す",
+      onSelect: () => {
+        if (!clearedPromptSnapshot) return;
+        setPromptFields(
+          clearedPromptSnapshot.prompt,
+          clearedPromptSnapshot.negativePrompt,
+          clearedPromptSnapshot.description
+        );
+        clearedPromptSnapshot = null;
+        toast.success("プロンプトを元に戻しました");
+      }
+    }
+  });
+}
+
+// プログラム的に値を変えたときは、input イベントが飛ばないので明示的に同期する。
+function syncPromptClearButtons() {
+  for (const [input, button] of [
+    [elements.prompt, elements.clearPromptButton],
+    [elements.negativePrompt, elements.clearNegativePromptButton]
+  ]) {
+    button.classList.toggle("hidden", !String(input.value ?? "").trim());
+  }
+  syncSeedClearButton();
+}
+
 function lockSelectedComposition() {
   if (lastGeneration && selectedCandidate) activateCompositionLock(lastGeneration, selectedCandidate);
 }
@@ -2844,7 +3135,8 @@ function activateCompositionLock(recipe, image) {
 function unlockComposition() {
   compositionLock = null;
   elements.compositionLockStatus.classList.add("hidden");
-  elements.seed.value = "-1";
+  elements.seed.value = RANDOM_SEED;
+  syncSeedClearButton();
 }
 
 function loadRecipeFields(recipe, image) {
@@ -3458,6 +3750,16 @@ function openHistoryDetail(generation, image) {
   addField("生成モード", historyModeLabel(generation.mode) ?? "txt2img");
   addField("生成日時", formatDate(generation.createdAt));
 
+  // コピー操作。整形はmetadata-format.jsへ分離してある。
+  const copyRow = document.createElement("div");
+  copyRow.className = "detailCopyActions";
+  copyRow.append(
+    createCopyButton("Copy Prompt", "secondary smallButton", () => buildPromptText(generation),
+      "ポジティブプロンプトだけをコピー"),
+    createCopyButton("Copy All Metadata", "secondary smallButton", () => buildMetadataText(generation, image),
+      "PNG Info形式で生成情報をコピー")
+  );
+
   const prompts = document.createElement("div");
   prompts.className = "detailPrompts";
   prompts.append(buildPromptDetails("Prompt", generation.prompt));
@@ -3499,9 +3801,34 @@ function openHistoryDetail(generation, image) {
   overlay.addEventListener("click", (event) => { if (event.target === overlay) closeDetail(); });
   document.addEventListener("keydown", onKey);
 
-  box.append(header, dl, prompts, footer);
+  box.append(header, dl, copyRow, prompts, footer);
   overlay.append(box);
   document.body.append(overlay);
+}
+
+// コピー用ボタン。成功時だけ「Copied!」へ変え、失敗はエラーとして知らせる。
+function createCopyButton(label, className, buildText, title = "") {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.textContent = label;
+  if (title) button.title = title;
+  button.addEventListener("click", async () => {
+    let text = "";
+    try {
+      text = buildText();
+    } catch {
+      text = "";
+    }
+    if (!text) return toast.warning("コピーできる情報が保存されていません");
+    try {
+      await copyToClipboard(text);
+      flashLabel(button, "Copied!");
+    } catch (error) {
+      toast.error(`コピーできませんでした: ${error.message}`);
+    }
+  });
+  return button;
 }
 
 // ---- ギャラリーからの派生生成 ----
@@ -3522,7 +3849,8 @@ function regenerateWithSameSeed(generation, image) {
 // Seedは固定せず設定だけ複製する。
 function duplicateRecipe(generation, image) {
   loadRecipeFields(generation, image);
-  elements.seed.value = "-1";
+  elements.seed.value = RANDOM_SEED;
+  syncSeedClearButton();
   compositionLock = null;
   elements.compositionLockStatus.classList.add("hidden");
   pendingDerivation = { type: "duplicate", instruction: "", parentGenerationId: generation.id };
