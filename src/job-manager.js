@@ -3,6 +3,8 @@ import crypto from "node:crypto";
 export function createJobManager(execute, { retentionMs = 60 * 60 * 1000 } = {}) {
   const jobs = new Map();
   const queue = [];
+  // ジョブの状態遷移を外部（実験サービスなど）へ通知するための購読者。
+  const listeners = new Set();
   let processing = false;
 
   function create(payload) {
@@ -41,6 +43,25 @@ export function createJobManager(execute, { retentionMs = 60 * 60 * 1000 } = {})
       .map(publicJob);
   }
 
+  // running / done / failed / cancelled への遷移だけを通知する。
+  // 購読側の例外でキュー処理を止めないよう、必ず握りつぶさずログへ出す。
+  function subscribe(listener) {
+    if (typeof listener !== "function") return () => {};
+    listeners.add(listener);
+    return () => listeners.delete(listener);
+  }
+
+  function notify(job) {
+    const snapshot = publicJob(job);
+    for (const listener of listeners) {
+      try {
+        listener(snapshot);
+      } catch (error) {
+        console.warn(`[Job] 状態通知に失敗しました: ${error?.message ?? error}`);
+      }
+    }
+  }
+
   function cancel(id) {
     const job = jobs.get(id);
     if (!job) throw new Error("生成ジョブが見つかりません");
@@ -66,6 +87,7 @@ export function createJobManager(execute, { retentionMs = 60 * 60 * 1000 } = {})
         job.status = "running";
         job.startedAt = new Date().toISOString();
         update(job, { progress: 1, message: "生成を開始します" });
+        notify(job);
         try {
           job.result = await execute(job.payload, {
             signal: job.controller.signal,
@@ -101,6 +123,7 @@ export function createJobManager(execute, { retentionMs = 60 * 60 * 1000 } = {})
     job.finishedAt = new Date().toISOString();
     // img2imgの元画像やInpaintマスクなど、大きなData URLは完了後すぐ解放する。
     job.payload = null;
+    notify(job);
   }
 
   function updateQueuePositions() {
@@ -117,7 +140,7 @@ export function createJobManager(execute, { retentionMs = 60 * 60 * 1000 } = {})
     }
   }
 
-  return { create, get, list, cancel };
+  return { create, get, list, cancel, subscribe };
 }
 
 function publicJob(job) {

@@ -13,7 +13,7 @@ import {
 } from "./checkpoint-profiles.js";
 import { confirmModal, openModal, toast, withBusy } from "./ui-kit.js";
 import { openLoraEditor } from "./lora-editor.js";
-import { openCompareView } from "./compare-view.js";
+import { describeRetryInfo, openCompareView } from "./compare-view.js";
 import {
   NEW_FOLDER_VALUE,
   buildFolderGroups,
@@ -2382,6 +2382,26 @@ async function loadExperiments() {
   }
   renderExperimentParameterSelect();
   renderExperimentBadge();
+  restoreExperimentMonitoring();
+}
+
+// 起動時やギャラリー再読込時に、未完了の実験が残っていれば監視を復元する。
+// サーバー側でジョブが消えた実験は取得時に終端状態へ正規化されるため、ここには出てこない。
+function restoreExperimentMonitoring() {
+  if (experimentPolling) return;
+  const running = knownExperiments.find((item) => item.status === "running");
+  if (running) {
+    activeExperimentId = running.id;
+    void pollExperiment(running.id);
+  }
+  syncExperimentControls();
+}
+
+// 比較実験は同時に1本だけ。実行中は開始ボタンを押せないようにする。
+function syncExperimentControls() {
+  const running = Boolean(activeExperimentId);
+  elements.runExperimentButton.disabled = running;
+  elements.cancelExperimentButton.disabled = !running;
 }
 
 function renderExperimentParameterSelect() {
@@ -2423,6 +2443,9 @@ function renderExperimentBadge() {
 
 async function runExperiment() {
   clearError();
+  if (activeExperimentId) {
+    return toast.warning("別の比較実験が実行中です。完了または中断してから開始してください");
+  }
   const parameter = elements.experimentParameter.value;
   const definition = experimentParameters[parameter];
   const needsTarget = definition?.needsTarget === true || parameter === "loraWeight";
@@ -2488,18 +2511,22 @@ async function runExperiment() {
       });
       activeExperimentId = experiment.id;
       toast.info(`比較生成を開始しました（${experiment.total}枚）`);
-      elements.cancelExperimentButton.disabled = false;
       void pollExperiment(experiment.id);
     } catch (error) {
       elements.experimentStatus.textContent = error.message;
       toast.error(error.message);
     }
   });
+  // withBusyがdisabledを元へ戻すため、実行状態を最後に反映し直す。
+  syncExperimentControls();
 }
 
 async function pollExperiment(experimentId) {
+  // 監視は1本だけ。実行中の実験IDは上書きしない。
   if (experimentPolling) return;
   experimentPolling = true;
+  activeExperimentId = experimentId;
+  syncExperimentControls();
   elements.experimentProgress.classList.remove("hidden");
   try {
     while (true) {
@@ -2522,7 +2549,7 @@ async function pollExperiment(experimentId) {
   } finally {
     experimentPolling = false;
     activeExperimentId = null;
-    elements.cancelExperimentButton.disabled = true;
+    syncExperimentControls();
   }
 }
 
@@ -2541,7 +2568,11 @@ function renderExperimentProgress(experiment) {
       queued: "待機中", running: run.message || "生成中", done: "完了",
       failed: run.error || "失敗", cancelled: "中止"
     }[run.status] ?? run.status;
+    // 中断理由（サーバー再起動によるものなど）はツールチップで確認できる。
+    if (run.error) state.title = run.error;
     row.append(label, state);
+    // 自動リカバリで設定を下げたrunは、公平な比較にならないことを明示する。
+    if (run.recovered) row.append(recoveredBadge(run.retryInfo));
     elements.experimentProgress.append(row);
   }
   const running = experiment.runs.find((run) => run.status === "running");
@@ -2549,6 +2580,15 @@ function renderExperimentProgress(experiment) {
     ? `${running.index} / ${experiment.total} 生成中・${experiment.target ? `${experiment.target}: ` : ""}${running.value}`
     : `${experiment.completed} / ${experiment.total} 完了`;
   renderExperimentBadge();
+}
+
+// 「設定を下げて再試行」バッジ。何を下げたかはtitleで確認できる。
+function recoveredBadge(retryInfo) {
+  const badge = document.createElement("span");
+  badge.className = "experimentRecovered";
+  badge.textContent = "設定を下げて再試行";
+  badge.title = describeRetryInfo(retryInfo) || "自動リカバリのため設定を下げて再試行しました";
+  return badge;
 }
 
 async function cancelExperiment() {
@@ -2560,6 +2600,7 @@ async function cancelExperiment() {
       toast.error(error.message);
     }
   });
+  syncExperimentControls();
 }
 
 async function requestPrompt(description) {
@@ -3027,10 +3068,15 @@ function openExperimentDetail(experiment) {
           const placeholder = document.createElement("div");
           placeholder.className = "experimentDetailPlaceholder";
           placeholder.textContent = { queued: "待機中", running: "生成中", failed: "失敗", cancelled: "中止" }[run.status] ?? "—";
+          if (run.error) placeholder.title = run.error;
           cell.append(placeholder);
         }
         const caption = document.createElement("figcaption");
         caption.textContent = `${run.value}`;
+        // リカバリされた画像は比較条件が変わっているため、必ず判別できるようにする。
+        if (run.recovered || entry?.generation?.retryInfo) {
+          caption.append(recoveredBadge(run.retryInfo ?? entry?.generation?.retryInfo));
+        }
         if (entry?.image.vote) {
           // A/B比較の結果を実験詳細でも確認できるようにする。
           const vote = document.createElement("span");

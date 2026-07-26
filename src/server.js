@@ -447,7 +447,8 @@ app.post("/api/experiments", async (request, response) => {
     });
     response.status(202).json({ experiment });
   } catch (error) {
-    response.status(400).json({ error: readableError(error) });
+    // 未完了の比較実験が残っている場合は409（GPUキューが直列なので同時実行させない）。
+    response.status(error?.statusCode ?? 400).json({ error: readableError(error) });
   }
 });
 
@@ -485,6 +486,9 @@ app.delete("/api/experiments/:experimentId", async (request, response) => {
   try {
     const experimentId = requireId(request.params.experimentId);
     const deleteImages = request.query.deleteImages === "1";
+    // 履歴を消す前に必ずジョブを止める。止めないと削除後に画像と履歴が増える。
+    await experiments.get(experimentId);
+    await experiments.stopJobs(experimentId);
     const generations = await history.listByExperiment(experimentId);
     let removedImages = 0;
     for (const generation of generations) {
@@ -676,6 +680,7 @@ async function performGeneration(body, { signal, report }) {
 
   const experiment = validateExperimentMeta(body.experiment);
   const derivation = validateDerivation(body.derivation);
+  const retryInfo = validateRetryInfo(body.retryInfo);
   const stored = await history.addGeneration({
     kind: settings.hiresEnabled ? "hires" : "candidates",
     mode,
@@ -689,7 +694,7 @@ async function performGeneration(body, { signal, report }) {
     baseSeed: experiment?.baseSeed ?? null,
     derivationType: derivation?.type ?? null,
     derivationInstruction: derivation?.instruction ?? null,
-    retryInfo: validateRetryInfo(body.retryInfo),
+    retryInfo,
     sourceImageId: sourceImage?.imageId,
     sourceImageUrl,
     maskImageUrl,
@@ -704,9 +709,11 @@ async function performGeneration(body, { signal, report }) {
   });
 
   if (experiment) {
-    await experiments.recordRun(experiment.id, experiment.value, {
+    // retryInfoが付いていれば、自動リカバリで設定を下げて生成したrunだと分かるようにする。
+    await experiments.recordRunCompleted(experiment.id, experiment.value, {
       generationId: stored.id,
-      imageIds: stored.images.map((image) => image.id)
+      imageIds: stored.images.map((image) => image.id),
+      retryInfo
     }).catch((error) => console.warn(`[Experiment] 記録に失敗: ${error.message}`));
   }
 

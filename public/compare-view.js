@@ -60,6 +60,20 @@ export function diffPrompts(entries) {
   });
 }
 
+// 自動リカバリで下げた設定を「幅: 896 → 832」の形にまとめる。
+export function describeRetryInfo(retryInfo) {
+  if (!retryInfo) return "";
+  const label = retryInfo.retryReasonLabel || "自動リカバリ";
+  const original = retryInfo.originalSettings ?? {};
+  const retry = retryInfo.retrySettings ?? {};
+  const changes = Object.entries(retry)
+    .filter(([key, value]) => String(original[key]) !== String(value))
+    .map(([key, value]) => `${key}: ${original[key]} → ${value}`);
+  return changes.length
+    ? `${label}のため設定を下げて再試行しました（${changes.join("・")}）`
+    : `${label}のため再試行しました`;
+}
+
 export function openCompareView({ entries, onVote }) {
   if (!Array.isArray(entries) || entries.length < 2) {
     toast.warning("比較するには2枚以上を選んでください");
@@ -101,6 +115,15 @@ export function openCompareView({ entries, onVote }) {
           badge.className = "compareBadge";
           badge.textContent = compared;
           caption.append(badge);
+        }
+        // 自動リカバリで設定を下げて生成した画像は、同条件の比較にならないため明示する。
+        const retryInfo = entry.generation?.retryInfo;
+        if (retryInfo) {
+          const recovered = document.createElement("span");
+          recovered.className = "compareBadge recovered";
+          recovered.textContent = "設定を下げて再試行";
+          recovered.title = describeRetryInfo(retryInfo);
+          caption.append(recovered);
         }
         const size = document.createElement("span");
         size.className = "compareMeta";

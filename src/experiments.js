@@ -104,21 +104,241 @@ export function describeExperimentValue(parameter, target, value) {
   return target ? `${target} ${label}: ${value}` : `${label}: ${value}`;
 }
 
-export function createExperimentService(dataDir, { jobs, maxImages = MAX_EXPERIMENT_IMAGES } = {}) {
+// runの状態は experiments.json を正とする。JobManagerのメモリ状態は
+// 進捗表示の補助にだけ使い、終端状態（done/failed/cancelled）は上書きしない。
+export const RUN_STATUSES = ["queued", "running", "done", "failed", "cancelled"];
+export const TERMINAL_RUN_STATUSES = ["done", "failed", "cancelled"];
+export const INTERRUPTED_RUN_MESSAGE = "サーバー再起動またはジョブ消失により中断されました";
+export const EXPERIMENT_RUNNING_MESSAGE = "別の比較実験が実行中です。完了または中断してから開始してください";
+
+export function isTerminalRunStatus(status) {
+  return TERMINAL_RUN_STATUSES.includes(status);
+}
+
+// 既存データにフィールドが無くても読めるようにする（後方互換のための既定値）。
+export function normalizeRun(run) {
+  const source = run ?? {};
+  return {
+    value: source.value,
+    index: Number.isFinite(Number(source.index)) ? Number(source.index) : 0,
+    jobId: source.jobId ?? null,
+    generationId: source.generationId ?? null,
+    imageIds: Array.isArray(source.imageIds) ? source.imageIds : [],
+    status: RUN_STATUSES.includes(source.status) ? source.status : "queued",
+    error: source.error ?? null,
+    // 自動リカバリで設定を下げて生成し直したrunは、公平な比較対象ではないと分かるようにする。
+    recovered: source.recovered === true,
+    retryInfo: source.retryInfo ?? null,
+    startedAt: source.startedAt ?? null,
+    finishedAt: source.finishedAt ?? null
+  };
+}
+
+// 実験全体の状態は、常にrunの永続状態から導出する。
+export function deriveExperimentStatus(experiment) {
+  const runs = (experiment?.runs ?? []).map(normalizeRun);
+  const cancelledExperiment = experiment?.status === "cancelled";
+  if (runs.some((run) => !isTerminalRunStatus(run.status))) return cancelledExperiment ? "cancelled" : "running";
+  if (cancelledExperiment || runs.some((run) => run.status === "cancelled")) return "cancelled";
+  return "done";
+}
+
+// 未完了のrunが残っている実験は「実行中」とみなす（同時実行の判定に使う）。
+export function isActiveExperiment(experiment) {
+  if (!experiment) return false;
+  const runs = (experiment.runs ?? []).map(normalizeRun);
+  if (runs.some((run) => !isTerminalRunStatus(run.status))) return true;
+  return experiment.status === "running";
+}
+
+export function createExperimentService(dataDir, { jobs, maxImages = MAX_EXPERIMENT_IMAGES, stopTimeoutMs = 3000 } = {}) {
   const store = new JsonStore(path.join(dataDir, "experiments.json"), {
     schemaVersion: 1,
     experiments: [],
     comparisons: []
   });
+  // jobIdはプロセス内メモリにしか存在しないため、実験との対応も同じ寿命で持つ。
+  const jobIndex = new Map();
+
+  if (jobs && typeof jobs.subscribe === "function") {
+    jobs.subscribe((job) => {
+      const experimentId = jobIndex.get(job.id);
+      if (!experimentId) return;
+      if (isTerminalRunStatus(job.status)) jobIndex.delete(job.id);
+      void applyJobEvent(experimentId, job)
+        .catch((error) => console.warn(`[Experiment] run状態の保存に失敗: ${error?.message ?? error}`));
+    });
+  }
+
+  function safeJob(id) {
+    if (!jobs || !id) return null;
+    try {
+      return jobs.get(id);
+    } catch {
+      return null;
+    }
+  }
+
+  // JobManagerの状態をrunへ反映する。終端状態は絶対に巻き戻さない。
+  function applyLiveJob(run, job) {
+    if (isTerminalRunStatus(run.status)) return false;
+    if (job.status === "running") {
+      if (run.status === "running") return false;
+      run.status = "running";
+      run.startedAt = run.startedAt ?? job.startedAt ?? new Date().toISOString();
+      return true;
+    }
+    if (!isTerminalRunStatus(job.status)) return false;
+    run.status = job.status;
+    run.finishedAt = job.finishedAt ?? new Date().toISOString();
+    if (job.status === "failed") run.error = job.error ?? "生成に失敗しました";
+    return true;
+  }
+
+  // 実ジョブが存在しない未完了run（サーバー再起動・保持期間切れ）を終端状態へ正規化する。
+  function reconcileData(data) {
+    if (!jobs) return false;
+    let changed = false;
+    for (const experiment of data.experiments ?? []) {
+      const runs = (experiment.runs ?? []).map(normalizeRun);
+      let touched = false;
+      for (const run of runs) {
+        if (isTerminalRunStatus(run.status)) continue;
+        const job = safeJob(run.jobId);
+        if (!job) {
+          run.status = "cancelled";
+          run.error = INTERRUPTED_RUN_MESSAGE;
+          run.finishedAt = run.finishedAt ?? new Date().toISOString();
+          touched = true;
+          continue;
+        }
+        if (applyLiveJob(run, job)) touched = true;
+      }
+      if (!touched) continue;
+      experiment.runs = runs;
+      experiment.status = deriveExperimentStatus(experiment);
+      changed = true;
+    }
+    return changed;
+  }
+
+  // 読み込み時に正規化し、変化があった場合だけ書き戻す（毎回の書き込みを避ける）。
+  async function readReconciled() {
+    const data = await store.read();
+    if (!reconcileData(data)) return data;
+    return store.update((current) => {
+      reconcileData(current);
+      return current;
+    });
+  }
+
+  async function applyJobEvent(experimentId, job) {
+    await store.update((data) => {
+      const experiment = data.experiments.find((item) => item.id === experimentId);
+      if (!experiment) return data;
+      const runs = (experiment.runs ?? []).map(normalizeRun);
+      const run = runs.find((item) => item.jobId === job.id);
+      if (!run || !applyLiveJob(run, job)) return data;
+      experiment.runs = runs;
+      experiment.status = deriveExperimentStatus(experiment);
+      return data;
+    });
+  }
+
+  // run単位の状態遷移はすべてここを通す。
+  // 既定では永続化済みの終端状態を上書きしない（guardで条件を変えられる）。
+  const notTerminal = (run) => !isTerminalRunStatus(run.status);
+
+  async function mutateRun(experimentId, matcher, mutate, guard = notTerminal) {
+    let touched = false;
+    await store.update((data) => {
+      const experiment = data.experiments.find((item) => item.id === experimentId);
+      if (!experiment) return data;
+      const runs = (experiment.runs ?? []).map(normalizeRun);
+      const run = runs.find(matcher);
+      if (!run || !guard(run)) return data;
+      mutate(run);
+      experiment.runs = runs;
+      experiment.status = deriveExperimentStatus(experiment);
+      touched = true;
+      return data;
+    });
+    return touched;
+  }
+
+  const byValue = (value) => (run) => String(run.value) === String(value);
+
+  function conflictError() {
+    const error = new Error(EXPERIMENT_RUNNING_MESSAGE);
+    error.statusCode = 409;
+    error.code = "EXPERIMENT_ALREADY_RUNNING";
+    return error;
+  }
+
+  async function waitForJobsSettled(jobIds, timeoutMs) {
+    if (!jobIds.length) return;
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    while (Date.now() < deadline) {
+      const pending = jobIds.filter((jobId) => {
+        const job = safeJob(jobId);
+        return job !== null && !isTerminalRunStatus(job.status);
+      });
+      if (!pending.length) return;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+
+  // 実験に紐づく実行中・待機中ジョブを止める。停止の責務はサービス側だけが持つ。
+  async function stopJobs(id, { wait = true } = {}) {
+    const data = await store.read();
+    const experiment = data.experiments.find((item) => item.id === id);
+    if (!experiment) return [];
+    const cancelledJobIds = [];
+    for (const run of (experiment.runs ?? []).map(normalizeRun)) {
+      // runの記録ではなく実ジョブの状態で判断する（記録済みでも走っている場合がある）。
+      const job = safeJob(run.jobId);
+      if (!job || isTerminalRunStatus(job.status)) continue;
+      jobIndex.delete(run.jobId);
+      try {
+        jobs.cancel(run.jobId);
+        cancelledJobIds.push(run.jobId);
+      } catch {
+        // 既に消えたジョブは無視する
+      }
+    }
+    if (wait) await waitForJobsSettled(cancelledJobIds, stopTimeoutMs);
+
+    await store.update((current) => {
+      const target = current.experiments.find((item) => item.id === id);
+      if (!target) return current;
+      const runs = (target.runs ?? []).map(normalizeRun);
+      for (const run of runs) {
+        if (isTerminalRunStatus(run.status)) continue;
+        const job = safeJob(run.jobId);
+        // 停止処理中に完了していたジョブは、その結果を優先する。
+        if (job && isTerminalRunStatus(job.status)) applyLiveJob(run, job);
+        else {
+          run.status = "cancelled";
+          run.finishedAt = run.finishedAt ?? new Date().toISOString();
+        }
+      }
+      target.runs = runs;
+      target.status = deriveExperimentStatus(target);
+      return current;
+    });
+    return cancelledJobIds;
+  }
 
   function decorate(experiment) {
     if (!experiment) return experiment;
-    const runs = experiment.runs.map((run) => {
-      const job = run.jobId && jobs ? safeJob(run.jobId) : null;
+    const runs = (experiment.runs ?? []).map(normalizeRun).map((run) => {
+      // 終端状態のrunはJobManagerを見ない（保持期間切れで状態が消えるため）。
+      const job = isTerminalRunStatus(run.status) ? null : safeJob(run.jobId);
+      const status = isTerminalRunStatus(run.status) ? run.status : job?.status ?? run.status;
       return {
         ...run,
-        status: run.status === "done" ? "done" : job?.status ?? run.status,
-        progress: job?.progress ?? (run.status === "done" ? 100 : 0),
+        status,
+        progress: status === "done" ? 100 : job?.progress ?? 0,
         message: job?.message ?? "",
         error: run.error ?? job?.error ?? null
       };
@@ -131,24 +351,25 @@ export function createExperimentService(dataDir, { jobs, maxImages = MAX_EXPERIM
       completed,
       failed,
       total: runs.length,
-      status: completed + failed >= runs.length ? (experiment.status === "cancelled" ? "cancelled" : "done") : "running"
+      status: deriveExperimentStatus({ ...experiment, runs })
     };
-  }
-
-  function safeJob(id) {
-    try {
-      return jobs.get(id);
-    } catch {
-      return null;
-    }
   }
 
   return {
     limits: () => ({ maxImages, hardLimit: MAX_EXPERIMENT_IMAGES_LIMIT }),
 
+    // 未完了の実験があるか（GPUキューが直列なので比較実験は同時に1本だけ）。
+    async findActive() {
+      const data = await readReconciled();
+      const active = data.experiments.find(isActiveExperiment);
+      return active ? decorate(active) : null;
+    },
+
     async create({ baseRequest, parameter, target = "", values, fixedSeed = null, name = "" }) {
       if (!isComparableParameter(parameter)) throw new Error("比較できないパラメータです");
       const normalizedValues = validateExperimentValues(parameter, values, { maxImages });
+      if (await this.findActive()) throw conflictError();
+
       const id = crypto.randomUUID();
       const definition = COMPARABLE_PARAMETERS[parameter];
       const experiment = {
@@ -167,66 +388,109 @@ export function createExperimentService(dataDir, { jobs, maxImages = MAX_EXPERIM
         runs: []
       };
 
-      // 生成は並列にせず、既存キューへ順番に積む（キューは直列処理）。
-      for (const [index, value] of normalizedValues.entries()) {
-        const payload = applyExperimentValue(baseRequest, {
-          parameter,
-          target,
-          value,
-          fixedSeed: experiment.fixedSeed
-        });
-        payload.experiment = {
-          id,
-          name: experiment.name,
-          type: "parameter",
-          parameter,
-          target: experiment.target,
-          value,
-          index: index + 1,
-          total: normalizedValues.length,
-          baseSeed: experiment.fixedSeed ?? experiment.baseSeed
-        };
-        const job = jobs.create(payload);
-        experiment.runs.push({
-          value,
-          index: index + 1,
-          jobId: job.id,
-          generationId: null,
-          imageIds: [],
-          status: "queued",
-          error: null
-        });
-      }
+      const createdJobIds = [];
+      try {
+        // 生成は並列にせず、既存キューへ順番に積む（キューは直列処理）。
+        for (const [index, value] of normalizedValues.entries()) {
+          const payload = applyExperimentValue(baseRequest, {
+            parameter,
+            target,
+            value,
+            fixedSeed: experiment.fixedSeed
+          });
+          payload.experiment = {
+            id,
+            name: experiment.name,
+            type: "parameter",
+            parameter,
+            target: experiment.target,
+            value,
+            index: index + 1,
+            total: normalizedValues.length,
+            baseSeed: experiment.fixedSeed ?? experiment.baseSeed
+          };
+          const job = jobs.create(payload);
+          createdJobIds.push(job.id);
+          jobIndex.set(job.id, id);
+          experiment.runs.push(normalizeRun({ value, index: index + 1, jobId: job.id }));
+        }
 
-      await store.update((data) => {
-        data.experiments.unshift(experiment);
-        data.experiments = data.experiments.slice(0, 200);
-        return data;
-      });
+        // 1枚目はキュー投入と同時に走り始めるため、保存前に実状態を取り込む。
+        for (const run of experiment.runs) {
+          const job = safeJob(run.jobId);
+          if (job) applyLiveJob(run, job);
+        }
+
+        await store.update((data) => {
+          // 保存直前にもう一度だけ排他を確認する。
+          if ((data.experiments ?? []).some(isActiveExperiment)) throw conflictError();
+          data.experiments.unshift(experiment);
+          data.experiments = data.experiments.slice(0, 200);
+          return data;
+        });
+      } catch (error) {
+        // 実験データを保存できなかったジョブは孤児になるため、必ず止める。
+        for (const jobId of createdJobIds) {
+          jobIndex.delete(jobId);
+          try {
+            jobs.cancel(jobId);
+          } catch {
+            // 既に終わったジョブは無視する
+          }
+        }
+        throw error;
+      }
       return decorate(experiment);
     },
 
-    // 生成完了時に、どの画像がどの値に対応するかを記録する。
-    async recordRun(experimentId, value, { generationId, imageIds }) {
-      await store.update((data) => {
-        const experiment = data.experiments.find((item) => item.id === experimentId);
-        if (!experiment) return data;
-        const run = experiment.runs.find((item) => String(item.value) === String(value));
-        if (!run) return data;
-        run.generationId = generationId;
-        run.imageIds = imageIds;
-        run.status = "done";
-        return data;
+    async recordRunStarted(experimentId, value) {
+      return mutateRun(experimentId, byValue(value), (run) => {
+        run.status = "running";
+        run.startedAt = run.startedAt ?? new Date().toISOString();
       });
     },
 
+    // 生成完了時に、どの画像がどの値に対応するかを記録する。
+    // ジョブ完了通知が先に届いてdoneになっていても結果は書き込むが、
+    // failed / cancelled として確定したrunは成功へ戻さない。
+    async recordRunCompleted(experimentId, value, { generationId, imageIds, retryInfo = null } = {}) {
+      return mutateRun(experimentId, byValue(value), (run) => {
+        run.generationId = generationId ?? null;
+        run.imageIds = Array.isArray(imageIds) ? imageIds : [];
+        run.status = "done";
+        run.finishedAt = new Date().toISOString();
+        run.retryInfo = retryInfo ?? null;
+        run.recovered = Boolean(retryInfo);
+      }, (run) => !["failed", "cancelled"].includes(run.status));
+    },
+
+    async recordRunFailed(experimentId, value, error) {
+      return mutateRun(experimentId, byValue(value), (run) => {
+        run.status = "failed";
+        run.error = String(error?.message ?? error ?? "生成に失敗しました").slice(0, 500);
+        run.finishedAt = new Date().toISOString();
+      });
+    },
+
+    async recordRunCancelled(experimentId, value) {
+      return mutateRun(experimentId, byValue(value), (run) => {
+        run.status = "cancelled";
+        run.finishedAt = new Date().toISOString();
+      });
+    },
+
+    // v2.12.0の呼び出し名。互換のため残す。
+    async recordRun(experimentId, value, payload) {
+      return this.recordRunCompleted(experimentId, value, payload ?? {});
+    },
+
     async list({ limit = 50 } = {}) {
-      const data = await store.read();
+      const data = await readReconciled();
       return data.experiments.slice(0, Math.max(1, Math.min(Number(limit) || 50, 200))).map(decorate);
     },
 
     async get(id) {
-      const data = await store.read();
+      const data = await readReconciled();
       const experiment = data.experiments.find((item) => item.id === id);
       if (!experiment) throw new Error("指定された実験が見つかりません");
       return decorate(experiment);
@@ -246,17 +510,16 @@ export function createExperimentService(dataDir, { jobs, maxImages = MAX_EXPERIM
       return decorate(updated);
     },
 
+    // 実験に紐づくジョブだけを止める（削除前など、データを消す前に呼ぶ）。
+    async stopJobs(id, options = {}) {
+      return stopJobs(id, options);
+    },
+
     // 実行中・待機中のジョブを止める。完了済みの画像は履歴に残す。
     async cancel(id) {
-      const experiment = await this.get(id);
-      for (const run of experiment.runs) {
-        if (!run.jobId || run.status === "done") continue;
-        try {
-          jobs.cancel(run.jobId);
-        } catch {
-          // 既に消えたジョブは無視する
-        }
-      }
+      await this.get(id);
+      // UIの応答性を優先し、ジョブの終了は待たずに中断状態を確定させる。
+      await stopJobs(id, { wait: false });
       await store.update((data) => {
         const target = data.experiments.find((item) => item.id === id);
         if (target) target.status = "cancelled";
@@ -266,6 +529,8 @@ export function createExperimentService(dataDir, { jobs, maxImages = MAX_EXPERIM
     },
 
     async remove(id) {
+      // 削除前に必ずジョブを止める（止めないと削除後に履歴が増える）。
+      await stopJobs(id);
       let removed = null;
       await store.update((data) => {
         const index = data.experiments.findIndex((item) => item.id === id);
@@ -273,6 +538,9 @@ export function createExperimentService(dataDir, { jobs, maxImages = MAX_EXPERIM
         removed = data.experiments.splice(index, 1)[0];
         return data;
       });
+      for (const run of (removed?.runs ?? [])) {
+        if (run?.jobId) jobIndex.delete(run.jobId);
+      }
       return removed;
     },
 

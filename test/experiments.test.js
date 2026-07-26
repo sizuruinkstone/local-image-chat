@@ -151,6 +151,271 @@ test("実験名の変更・最良画像の記録・削除ができる", async (t
   await assert.rejects(() => service.get(experiment.id), /見つかりません/);
 });
 
+// ---- v2.12.1: run状態の永続化まわりの回帰テスト ----
+
+// JobManagerの保持期間切れ・サーバー再起動を再現するため、ジョブを「見えなく」できるようにする。
+function createForgettableJobs(execute) {
+  const inner = createJobManager(execute);
+  let forgotten = false;
+  return {
+    create: (payload) => inner.create(payload),
+    get: (id) => {
+      if (forgotten) throw new Error("生成ジョブが見つかりません");
+      return inner.get(id);
+    },
+    list: () => inner.list(),
+    cancel: (id) => inner.cancel(id),
+    subscribe: (listener) => inner.subscribe(listener),
+    forget: () => { forgotten = true; }
+  };
+}
+
+// 中止されるまで終わらない生成。中止シグナルは必ず尊重する。
+function blockingExecute(executed) {
+  return (payload, { signal }) => new Promise((_resolve, reject) => {
+    executed.push(payload);
+    if (signal.aborted) return reject(signal.reason ?? new Error("中止しました"));
+    signal.addEventListener("abort", () => reject(signal.reason ?? new Error("中止しました")), { once: true });
+  });
+}
+
+async function waitUntil(check, message) {
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    const value = await check();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+}
+
+function readStore(dataDir) {
+  return fs.readFile(path.join(dataDir, "experiments.json"), "utf8").then(JSON.parse);
+}
+
+test("失敗したrunはfailedとして永続化され、ジョブが消えても戻らない", async (t) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "lic-exp-failed-"));
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  const jobs = createForgettableJobs(async (payload) => {
+    if (payload?.experiment?.value === 6) throw new Error("CUDA out of memory");
+    return { ok: true };
+  });
+  const service = createExperimentService(dataDir, { jobs });
+  const experiment = await service.create({
+    baseRequest: BASE_REQUEST, parameter: "cfgScale", values: [5, 6, 7]
+  });
+
+  const settled = await waitUntil(
+    async () => {
+      const current = await service.get(experiment.id);
+      return current.status !== "running" ? current : null;
+    },
+    "実験が終わらない"
+  );
+  assert.equal(settled.runs[1].status, "failed");
+  assert.match(settled.runs[1].error, /CUDA out of memory/);
+
+  const stored = await readStore(dataDir);
+  assert.equal(stored.experiments[0].runs[1].status, "failed", "experiments.jsonへ保存される");
+  assert.match(stored.experiments[0].runs[1].error, /CUDA out of memory/);
+
+  // JobManagerから対象ジョブが消えても、失敗は失敗のまま。
+  jobs.forget();
+  const afterCleanup = await service.get(experiment.id);
+  assert.equal(afterCleanup.runs[1].status, "failed");
+  assert.match(afterCleanup.runs[1].error, /CUDA out of memory/);
+  assert.equal(afterCleanup.runs[0].status, "done");
+  assert.equal(afterCleanup.runs[2].status, "done");
+  assert.notEqual(afterCleanup.status, "running", "時間が経っても実験がrunningへ戻らない");
+});
+
+test("中断したrunはcancelledとして永続化され、完了済みrunは残る", async (t) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "lic-exp-cancelled-"));
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  const executed = [];
+  const jobs = createForgettableJobs(blockingExecute(executed));
+  const service = createExperimentService(dataDir, { jobs });
+  const experiment = await service.create({
+    baseRequest: BASE_REQUEST, parameter: "cfgScale", values: [5, 6, 7]
+  });
+  await service.recordRunCompleted(experiment.id, 5, { generationId: "gen-a", imageIds: ["img-a"] });
+
+  const cancelled = await service.cancel(experiment.id);
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(cancelled.runs[0].status, "done");
+  assert.equal(cancelled.runs[1].status, "cancelled");
+  assert.equal(cancelled.runs[2].status, "cancelled");
+
+  const stored = await readStore(dataDir);
+  assert.deepEqual(
+    stored.experiments[0].runs.map((run) => run.status),
+    ["done", "cancelled", "cancelled"],
+    "experiments.jsonへ保存される"
+  );
+
+  jobs.forget();
+  const afterCleanup = await service.get(experiment.id);
+  assert.deepEqual(afterCleanup.runs.map((run) => run.status), ["done", "cancelled", "cancelled"]);
+  assert.equal(afterCleanup.runs[0].generationId, "gen-a");
+  assert.equal(afterCleanup.status, "cancelled");
+});
+
+test("実行中の実験を削除すると関連ジョブが停止する", async (t) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "lic-exp-remove-"));
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  const executed = [];
+  const jobs = createForgettableJobs(blockingExecute(executed));
+  const service = createExperimentService(dataDir, { jobs });
+  const experiment = await service.create({
+    baseRequest: BASE_REQUEST, parameter: "cfgScale", values: [5, 6, 7]
+  });
+  await waitUntil(() => executed.length >= 1, "1枚目が始まらない");
+
+  await service.remove(experiment.id);
+  assert.ok(
+    jobs.list().every((job) => ["done", "failed", "cancelled"].includes(job.status)),
+    "関連ジョブが全件終端状態になる"
+  );
+
+  const startedBefore = executed.length;
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(executed.length, startedBefore, "削除後に新しい生成が始まらない");
+  await assert.rejects(() => service.get(experiment.id), /見つかりません/);
+  assert.equal((await service.list()).length, 0);
+});
+
+test("未完了の実験があるうちは2本目を開始できない", async (t) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "lic-exp-single-"));
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  const executed = [];
+  const jobs = createForgettableJobs(blockingExecute(executed));
+  const service = createExperimentService(dataDir, { jobs });
+  const first = await service.create({
+    baseRequest: BASE_REQUEST, parameter: "cfgScale", values: [5, 6]
+  });
+
+  await assert.rejects(
+    () => service.create({ baseRequest: BASE_REQUEST, parameter: "steps", values: [20, 30] }),
+    (error) => {
+      assert.equal(error.statusCode, 409);
+      assert.match(error.message, /別の比較実験が実行中です/);
+      return true;
+    }
+  );
+  assert.equal(jobs.list().length, 2, "拒否した実験のジョブは作られない");
+  assert.equal((await service.list()).length, 1);
+
+  // 1本目を中断すれば2本目を開始できる。
+  await service.cancel(first.id);
+  const second = await service.create({
+    baseRequest: BASE_REQUEST, parameter: "steps", values: [20, 30]
+  });
+  assert.equal(second.total, 2);
+  assert.equal((await service.list()).length, 2);
+  await service.cancel(second.id);
+});
+
+test("実験データを保存できなければ作成済みジョブを全てキャンセルする", async (t) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "lic-exp-orphan-"));
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  // 読み込みは成功し、書き込み（一時ファイル作成）だけが失敗する状態を作る。
+  await fs.writeFile(
+    path.join(dataDir, "experiments.json"),
+    JSON.stringify({ schemaVersion: 1, experiments: [], comparisons: [] })
+  );
+  await fs.mkdir(path.join(dataDir, `experiments.json.${process.pid}.tmp`));
+
+  const executed = [];
+  const jobs = createForgettableJobs(blockingExecute(executed));
+  const service = createExperimentService(dataDir, { jobs });
+
+  await assert.rejects(() => service.create({
+    baseRequest: BASE_REQUEST, parameter: "cfgScale", values: [5, 6, 7]
+  }), /EISDIR|illegal operation/i);
+
+  await waitUntil(
+    () => jobs.list().length === 3 && jobs.list().every((job) => job.status === "cancelled"),
+    "孤児ジョブが残っている"
+  );
+  const startedBefore = executed.length;
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(executed.length, startedBefore, "保存失敗後に生成が続かない");
+  assert.equal((await service.list()).length, 0, "実験データが残らない");
+});
+
+test("サーバー再起動でジョブが消えた実験は中断として正規化される", async (t) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "lic-exp-restart-"));
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  const experimentId = "restart-experiment-0001";
+  // v2.12.0が書いた形（recovered/retryInfoなどが無い）をそのまま読み込ませる。
+  await fs.writeFile(path.join(dataDir, "experiments.json"), JSON.stringify({
+    schemaVersion: 1,
+    experiments: [{
+      id: experimentId,
+      name: "再起動テスト",
+      type: "parameter",
+      parameter: "cfgScale",
+      target: "",
+      values: [5, 6],
+      fixedSeed: null,
+      baseSeed: -1,
+      createdAt: "2026-07-25T00:00:00.000Z",
+      status: "running",
+      bestImageId: null,
+      note: "",
+      runs: [
+        { value: 5, index: 1, jobId: "lost-job-a", generationId: "gen-a", imageIds: ["img-a"], status: "done", error: null },
+        { value: 6, index: 2, jobId: "lost-job-b", generationId: null, imageIds: [], status: "queued", error: null }
+      ]
+    }],
+    comparisons: []
+  }));
+
+  // 再起動直後のJobManagerには該当ジョブが存在しない。
+  const jobs = createJobManager(async () => ({ ok: true }));
+  const service = createExperimentService(dataDir, { jobs });
+
+  const experiment = await service.get(experimentId);
+  assert.notEqual(experiment.status, "running", "永遠にrunningにならない");
+  assert.equal(experiment.status, "cancelled");
+  assert.equal(experiment.runs[0].status, "done", "完了済みrunは残る");
+  assert.equal(experiment.runs[0].generationId, "gen-a");
+  assert.equal(experiment.runs[1].status, "cancelled");
+  assert.match(experiment.runs[1].error, /サーバー再起動またはジョブ消失/);
+
+  const stored = await readStore(dataDir);
+  assert.equal(stored.experiments[0].status, "cancelled", "正規化結果が永続化される");
+  assert.equal(stored.experiments[0].runs[1].status, "cancelled");
+  assert.equal((await service.list())[0].status, "cancelled");
+  assert.equal(await service.findActive(), null, "中断済みなので新しい実験を開始できる");
+});
+
+test("自動リカバリされたrunはrecoveredとして記録される", async (t) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "lic-exp-recovered-"));
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  const jobs = createJobManager(async () => ({ ok: true }));
+  const service = createExperimentService(dataDir, { jobs });
+  const experiment = await service.create({
+    baseRequest: BASE_REQUEST, parameter: "cfgScale", values: [5, 6]
+  });
+
+  await service.recordRunCompleted(experiment.id, 6, {
+    generationId: "gen-b",
+    imageIds: ["img-b"],
+    retryInfo: {
+      retryReason: "oom",
+      retryReasonLabel: "VRAM不足",
+      retryCount: 1,
+      originalSettings: { width: 896, candidateCount: 4 },
+      retrySettings: { width: 832, candidateCount: 1 }
+    }
+  });
+  const fetched = await service.get(experiment.id);
+  assert.equal(fetched.runs[1].recovered, true);
+  assert.equal(fetched.runs[1].retryInfo.retryReasonLabel, "VRAM不足");
+  assert.equal(fetched.runs[0].recovered, false, "通常のrunはfalseのまま");
+});
+
 test("A/B比較の投票を保存する", async (t) => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "lic-exp-vote-"));
   t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
