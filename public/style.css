@@ -1,7 +1,9 @@
 :root {
   color-scheme: dark;
   --background: #08090c;
-  --panel: rgba(20, 22, 28, 0.88);
+  /* パネルはほぼ不透明にする。背景ぼかし（backdrop-filter）はスクロールのたびに
+     再合成が走って重いため使わない。 */
+  --panel: rgba(20, 22, 28, 0.97);
   --line: rgba(255, 255, 255, 0.09);
   --muted: #969ca8;
   --text: #f4f5f7;
@@ -47,7 +49,7 @@ h1 { margin: 0; font-size: clamp(32px, 5vw, 60px); letter-spacing: -.045em; }
 
 /* デスクトップ既定: 情報量の多い操作パネル(左)を広く（約58:42）。 */
 .layout { display: grid; grid-template-columns: minmax(660px, 1.38fr) minmax(460px, 1fr); gap: 14px; }
-.panel { border: 1px solid var(--line); border-radius: 20px; background: var(--panel); box-shadow: 0 18px 70px rgba(0,0,0,.28); backdrop-filter: blur(20px); }
+.panel { border: 1px solid var(--line); border-radius: 20px; background: var(--panel); box-shadow: 0 10px 30px rgba(0,0,0,.22); }
 .controls { padding: 22px; }
 .result { position: relative; min-height: 650px; padding: 16px; display: flex; flex-direction: column; overflow: hidden; }
 .resultTabs { display: flex; gap: 8px; margin-bottom: 14px; }
@@ -236,7 +238,8 @@ details label { margin-top: 13px; }
 
 .emptyState { text-align: center; color: var(--muted); }
 .spark { color: var(--accent); font-size: 52px; }
-.loading { position: absolute; inset: 0; z-index: 2; display: grid; place-content: center; place-items: center; gap: 12px; color: var(--muted); background: rgba(8,9,12,.82); backdrop-filter: blur(5px); }
+/* 生成中の覆い。パネル全体を覆う大きな要素なので、ぼかしは使わず不透明度で見せる。 */
+.loading { position: absolute; inset: 0; z-index: 2; display: grid; place-content: center; place-items: center; gap: 12px; color: var(--muted); background: rgba(8,9,12,.93); }
 .spinner { width: 38px; height: 38px; border: 3px solid rgba(255,255,255,.1); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
