@@ -848,3 +848,68 @@ img, canvas, video { max-width: 100%; }
   .optionPickerList { max-height: 60dvh; }
 }
 
+
+/* ===== 生成枚数ステッパー ===== */
+.generateActionRow { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.candidateStepper { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.candidateStepperLabel { color: var(--muted); font-size: 11px; }
+.candidateStepper input { width: 56px; margin: 0; padding: 8px 6px; text-align: center; font-variant-numeric: tabular-nums; }
+.candidateStepper input.invalid { border-color: var(--danger); color: var(--danger); }
+.stepperButton { width: 36px; height: 36px; padding: 0; border: 1px solid var(--line); border-radius: 10px; background: rgba(255,255,255,.04); color: var(--text); font-size: 16px; line-height: 1; cursor: pointer; }
+.stepperButton:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.stepperButton:disabled { opacity: .4; cursor: default; }
+.generateActionRow .generateActionButtons { flex: 1 1 260px; }
+
+/* ===== キャラ・衣装のクイック選択 ===== */
+.quickPickRow { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
+.quickPick { display: flex; align-items: center; gap: 8px; flex: 1 1 200px; }
+.quickPickLabel { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.quickPick button { flex: 1 1 auto; }
+
+/* ===== LoRA・キャラ・衣装の選択画面 ===== */
+.pickerToolbar { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; gap: 8px; padding-bottom: 8px; background: var(--panel); }
+.pickerToolbar .optionPickerSearch { flex: 1 1 200px; margin: 0; }
+.pickerFavoriteFilter { display: flex; gap: 6px; }
+.pickerFilterButton { padding: 8px 12px; border: 1px solid var(--line); border-radius: 99px; background: rgba(255,255,255,.03); color: var(--muted); font-size: 11px; cursor: pointer; }
+.pickerFilterButton.active { border-color: rgba(185,255,77,.45); color: var(--accent); background: rgba(185,255,77,.1); }
+.pickerGroups { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; max-height: 96px; overflow-y: auto; }
+.pickerGroupButton { padding: 6px 11px; border: 1px solid var(--line); border-radius: 99px; background: rgba(255,255,255,.03); color: var(--muted); font-size: 11px; cursor: pointer; }
+.pickerGroupButton.active { border-color: rgba(185,255,77,.45); color: var(--accent); background: rgba(185,255,77,.1); }
+.pickerGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; max-height: 56vh; overflow-y: auto; }
+.pickerCard { display: grid; gap: 6px; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.02); }
+.pickerThumb { position: relative; aspect-ratio: 3 / 4; overflow: hidden; display: grid; place-items: center; border-radius: 8px; background: #05060a; }
+.pickerThumb img { width: 100%; height: 100%; object-fit: cover; }
+.pickerThumb.placeholder { color: rgba(255,255,255,.25); font-size: 10px; letter-spacing: .1em; }
+.pickerStar { position: absolute; top: 6px; right: 6px; width: 32px; height: 32px; padding: 0; border: 1px solid var(--line); border-radius: 999px; background: rgba(8,9,12,.75); color: var(--accent); font-size: 15px; line-height: 1; cursor: pointer; }
+.pickerStar:hover { border-color: var(--accent); }
+.pickerName { margin: 0; font-size: 12px; font-weight: 700; overflow-wrap: anywhere; }
+.pickerMeta { margin: 0; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.pickerTrigger { margin: 0; color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pickerCard button.smallButton { width: 100%; }
+
+/* ===== 画像のFavorite ===== */
+.favoriteButton { padding: 8px 12px; border: 1px solid var(--line); border-radius: 99px; background: rgba(255,255,255,.04); color: var(--muted); font-size: 12px; cursor: pointer; }
+.favoriteButton:hover { border-color: rgba(255,214,102,.6); color: #ffd666; }
+.favoriteButton.active { border-color: rgba(255,214,102,.6); color: #ffd666; background: rgba(255,214,102,.12); }
+.historyCardPreview { position: relative; }
+.cardFavorite { position: absolute; top: 6px; right: 6px; width: 32px; height: 32px; padding: 0; border: 1px solid var(--line); border-radius: 999px; background: rgba(8,9,12,.72); color: rgba(255,255,255,.7); font-size: 15px; line-height: 1; cursor: pointer; }
+.cardFavorite.active { border-color: rgba(255,214,102,.6); color: #ffd666; }
+.cardFavorite:hover { border-color: rgba(255,214,102,.6); color: #ffd666; }
+
+@media (max-width: 760px) {
+  /* 選択画面はほぼ全画面。検索欄は上部固定のまま */
+  .uiModal-large .uiModalBox { width: 100%; max-height: 92dvh; }
+  .pickerGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: none; gap: 8px; }
+  .pickerGroups { max-height: 76px; }
+  .pickerCard { padding: 8px; }
+  .pickerStar { width: 36px; height: 36px; }
+  .generateActionRow { flex-direction: column; align-items: stretch; }
+  .candidateStepper { justify-content: space-between; }
+  .candidateStepper input { width: 72px; height: 44px; }
+  .stepperButton { width: 44px; height: 44px; }
+}
+
+@media (max-width: 380px) {
+  .pickerGrid { grid-template-columns: 1fr; }
+}
+

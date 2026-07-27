@@ -51,6 +51,19 @@ import {
   toggleFavoriteOption
 } from "./option-picker.js";
 import {
+  MAX_CANDIDATE_COUNT,
+  MIN_CANDIDATE_COUNT,
+  PRESET_CATEGORY_LABELS,
+  buildCharacterPresets,
+  buildGroups,
+  buildLoraCatalog,
+  buildOutfitPresets,
+  clampCandidateCount,
+  filterPresets,
+  isValidCandidateCount,
+  splitTriggerPreview
+} from "./preset-catalog.js";
+import {
   collectCheckpoints,
   collectLoras,
   describeGalleryFilter,
@@ -155,8 +168,9 @@ const elements = Object.fromEntries(
     "showCombinedPromptButton", "sendToCompareButton",
     "generationSettingsDetails", "advancedSettingsDetails", "samplerPresets",
     "samplerPickerButton", "samplerPickerValue", "schedulerPickerButton", "schedulerPickerValue",
-    "loraUseDetails", "loraUseCount", "usedLoraList", "addLoraButton", "addFavoriteLoraButton",
-    "addCivitaiLoraButton", "galleryKindFilter", "galleryCheckpoint", "galleryLora",
+    "loraUseDetails", "loraUseCount", "usedLoraList", "addLoraButton",
+    "addCivitaiLoraButton", "candidateCountDown", "candidateCountUp",
+    "pickCharacterButton", "pickOutfitButton", "regenerateFinalButton", "openInGalleryButton", "galleryKindFilter", "galleryCheckpoint", "galleryLora",
     "galleryPeriod", "gallerySearch", "galleryFilterSummary", "resetGalleryFilterButton",
     "mobileAccessDetails", "mobileAccessStatus",
     "promptTemplateDetails", "grokInstructions", "grokSetupDoc", "grokLoraCsv",
@@ -413,11 +427,18 @@ elements.sendFinalToImg2ImgButton.addEventListener("click", () => {
 elements.sendFinalToInpaintButton.addEventListener("click", () => {
   if (finalImage) useImageForInpaint(finalImage);
 });
+elements.regenerateFinalButton.addEventListener("click", () => {
+  if (finalGeneration && finalImage) regenerateWithSameSeed(finalGeneration, finalImage);
+});
+elements.openInGalleryButton.addEventListener("click", () => {
+  showView("gallery");
+  if (finalGeneration && finalImage) openHistoryDetail(finalGeneration, finalImage);
+});
 elements.unlockCompositionButton.addEventListener("click", unlockComposition);
 elements.cancelJobButton.addEventListener("click", cancelActiveJob);
 elements.queueIndicator.addEventListener("click", openQueuePanel);
 elements.clearPromptsButton.addEventListener("click", clearBothPrompts);
-elements.candidateCount.addEventListener("change", handleCandidateCountChange);
+elements.candidateCount.addEventListener("change", normalizeCandidateCount);
 elements.description.addEventListener("input", handleDescriptionChange);
 elements.prompt.addEventListener("input", handleRawPromptInput);
 elements.negativePrompt.addEventListener("input", () => {
@@ -503,8 +524,13 @@ elements.schedulerPickerButton.addEventListener("click", () => void openSamplerP
 elements.showCombinedPromptButton.addEventListener("click", showCombinedPrompt);
 elements.sendToCompareButton.addEventListener("click", sendToCompare);
 elements.cancelGenerateButton.addEventListener("click", cancelActiveJob);
-elements.addLoraButton.addEventListener("click", () => void openLoraPicker({ favoritesOnly: false }));
-elements.addFavoriteLoraButton.addEventListener("click", () => void openLoraPicker({ favoritesOnly: true }));
+elements.addLoraButton.addEventListener("click", () => void openLoraPicker());
+elements.pickCharacterButton.addEventListener("click", () => void openCharacterPicker());
+elements.pickOutfitButton.addEventListener("click", () => void openOutfitPicker());
+elements.candidateCountDown.addEventListener("click", () => stepCandidateCount(-1));
+elements.candidateCountUp.addEventListener("click", () => stepCandidateCount(1));
+elements.candidateCount.addEventListener("input", handleCandidateCountChange);
+elements.candidateCount.addEventListener("blur", normalizeCandidateCount);
 elements.addCivitaiLoraButton.addEventListener("click", () => {
   showView("settings");
   elements.civitaiDetails.open = true;
@@ -2604,7 +2630,10 @@ function presentHiresResult(data, description, eyebrow, title) {
   elements.resolutionText.textContent = `${finished.width} × ${finished.height}`;
   elements.downloadLink.href = finished.imageUrl;
   elements.downloadLink.download = finished.filename;
-  elements.favoriteFinalButton.classList.toggle("active", finished.favorite);
+  elements.favoriteFinalButton.dataset.favoriteImage = finished.id;
+  elements.favoriteFinalButton.dataset.favoriteStyle = "label";
+  imageFavorites.set(finished.id, Boolean(finished.favorite));
+  renderFavoriteButton(elements.favoriteFinalButton, Boolean(finished.favorite));
   if (finished.discord) discordStates.set(finished.id, finished.discord);
   elements.finalDiscordStatus.dataset.discordImage = finished.id;
   renderDiscordStatusNode(elements.finalDiscordStatus, finished.id);
@@ -3800,15 +3829,8 @@ function renderCandidates(images) {
     download.addEventListener("click", (event) => event.stopPropagation());
     const actions = document.createElement("div");
     actions.className = "candidateCardActions";
-    const favorite = document.createElement("button");
-    favorite.type = "button";
-    favorite.textContent = "👍";
-    favorite.title = "好みとして記録";
-    favorite.classList.toggle("active", candidate.favorite);
-    favorite.addEventListener("click", (event) => {
-      event.stopPropagation();
-      void toggleFavorite(candidate, favorite);
-    });
+    const favorite = createFavoriteButton(candidate, { className: "favoriteButton smallButton" });
+    favorite.title = "Favoriteに登録";
     const toImg2Img = document.createElement("button");
     toImg2Img.type = "button";
     toImg2Img.className = "candidateImg2ImgButton";
@@ -4337,6 +4359,8 @@ async function toggleFavorite(image, button) {
     const data = await patchJson(`/api/history/${image.id}/favorite`, { favorite: next });
     image.favorite = data.image.favorite;
     button.classList.toggle("active", image.favorite);
+    // どこから操作しても、開いている全ての表示へ即時反映する。
+    applyImageFavorite(image.id, image.favorite);
     preferenceData = data.preferences;
     renderPreferenceSummary();
     applyDiscordState(image.id, data.image.discord);
@@ -4346,6 +4370,57 @@ async function toggleFavorite(image, button) {
   } finally {
     button.disabled = false;
   }
+}
+
+// ---- 画像Favoriteの表示同期 ----
+
+// 画像IDごとのFavorite状態。LoRAのFavorite（LoRAマスタ側）とは別データ。
+const imageFavorites = new Map();
+
+function rememberImageFavorites(generations) {
+  for (const generation of generations ?? []) {
+    for (const image of generation.images ?? []) {
+      if (image?.id) imageFavorites.set(image.id, Boolean(image.favorite));
+    }
+  }
+}
+
+function applyImageFavorite(imageId, favorite) {
+  imageFavorites.set(imageId, Boolean(favorite));
+  refreshFavoriteButtons(imageId);
+}
+
+// data-favorite-image を持つボタン（一覧・詳細・最新結果）をまとめて更新する。
+function refreshFavoriteButtons(imageId) {
+  const favorite = imageFavorites.get(imageId) === true;
+  const selector = `[data-favorite-image="${CSS.escape(String(imageId))}"]`;
+  for (const button of document.querySelectorAll(selector)) renderFavoriteButton(button, favorite);
+}
+
+function renderFavoriteButton(button, favorite) {
+  button.classList.toggle("active", favorite);
+  button.setAttribute("aria-pressed", String(favorite));
+  button.textContent = button.dataset.favoriteStyle === "label"
+    ? (favorite ? "★ Favorite" : "☆ Favorite")
+    : (favorite ? "★" : "☆");
+  button.title = favorite ? "Favoriteを外す" : "Favoriteに登録";
+}
+
+// 画像用のFavoriteボタン（星）。表示場所ごとにスタイルだけ変える。
+function createFavoriteButton(image, { style = "star", className = "favoriteButton" } = {}) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.dataset.favoriteImage = image.id;
+  button.dataset.favoriteStyle = style;
+  imageFavorites.set(image.id, Boolean(image.favorite));
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void toggleFavorite(image, button);
+  });
+  // まだDOMへ入っていないので、この場で初期表示を作る。
+  renderFavoriteButton(button, Boolean(image.favorite));
+  return button;
 }
 
 // ---- Discord送信状態の表示 ----
@@ -4526,6 +4601,7 @@ async function loadHistory() {
 
 function renderHistory(generations) {
   lastHistoryGenerations = generations ?? [];
+  rememberImageFavorites(generations);
   // 送信中のバッジが再描画で消えないよう、最新状態を先に取り込む。
   rememberDiscordStates(generations);
   elements.historyGrid.replaceChildren();
@@ -4824,83 +4900,320 @@ function clampLoraWeightValue(value) {
   return Number(Math.min(2, Math.max(0.05, number)).toFixed(2));
 }
 
-// 生成画面からLoRAを追加する簡易ピッカー（一覧の管理は設定画面）。
-async function openLoraPicker({ favoritesOnly = false } = {}) {
-  if (!installedLoras.length) return toast.warning("LoRAが読み込まれていません");
-  const candidates = favoritesOnly
-    ? installedLoras.filter((lora) => lora.registry?.favorite)
-    : installedLoras;
-  if (!candidates.length) {
-    return toast.info("お気に入りのLoRAがありません。設定画面のLoRA管理で★を付けられます");
-  }
-
+// LoRA・キャラクター・衣装で共通のサムネイル付き選択画面。
+// items は preset-catalog.js が既存のLoRAデータから組み立てたもの。
+async function openPresetPicker({
+  title,
+  subtitle = "",
+  items,
+  groupKey = "folder",
+  applyLabel = "追加",
+  isApplied = () => false,
+  onApply,
+  modes = null,
+  emptyMessage = "選択できる項目がありません"
+}) {
+  if (!items.length) return toast.warning(emptyMessage);
   let query = "";
+  let group = "";
+  let favoriteOnly = false;
+  let mode = modes?.[0]?.value ?? null;
+
   await openModal({
-    title: favoritesOnly ? "お気に入りLoRAから追加" : "LoRAを追加",
-    subtitle: `最大${loraConfig.maxSelected}個まで選択できます`,
-    size: "medium",
+    title,
+    subtitle,
+    size: "large",
     build: (body, close) => {
+      const toolbar = document.createElement("div");
+      toolbar.className = "pickerToolbar";
       const search = document.createElement("input");
       search.type = "search";
       search.className = "optionPickerSearch";
-      search.placeholder = "LoRAを検索";
+      search.placeholder = "名前・トリガーワード・フォルダで検索";
       search.setAttribute("data-autofocus", "true");
-      const list = document.createElement("div");
-      list.className = "loraPickerList";
+      const favoriteToggle = document.createElement("div");
+      favoriteToggle.className = "pickerFavoriteFilter";
+      for (const [value, label] of [[false, "すべて"], [true, "★ Favorite"]]) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "pickerFilterButton";
+        button.textContent = label;
+        button.classList.toggle("active", favoriteOnly === value);
+        button.addEventListener("click", () => {
+          favoriteOnly = value;
+          for (const other of favoriteToggle.children) other.classList.remove("active");
+          button.classList.add("active");
+          render();
+        });
+        favoriteToggle.append(button);
+      }
+      toolbar.append(search, favoriteToggle);
+
+      const groupBar = document.createElement("div");
+      groupBar.className = "pickerGroups";
+      const grid = document.createElement("div");
+      grid.className = "pickerGrid";
+
+      const renderGroups = () => {
+        groupBar.replaceChildren();
+        for (const entry of buildGroups(items, groupKey)) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "pickerGroupButton";
+          button.textContent = `${entry.label}（${entry.count}）`;
+          button.classList.toggle("active", entry.value === group);
+          button.addEventListener("click", () => {
+            group = entry.value;
+            renderGroups();
+            render();
+          });
+          groupBar.append(button);
+        }
+      };
 
       const render = () => {
-        list.replaceChildren();
-        const needle = query.trim().toLowerCase();
-        const matches = candidates.filter((lora) =>
-          `${lora.displayName} ${lora.name} ${lora.folder ?? ""}`.toLowerCase().includes(needle));
+        grid.replaceChildren();
+        const matches = filterPresets(items, {
+          query,
+          favoriteOnly,
+          [groupKey]: group
+        });
         if (!matches.length) {
           const empty = document.createElement("p");
           empty.className = "hint";
-          empty.textContent = "一致するLoRAがありません";
-          list.append(empty);
+          empty.textContent = "一致する項目がありません";
+          grid.append(empty);
           return;
         }
-        for (const lora of matches.slice(0, 200)) {
-          const row = document.createElement("button");
-          row.type = "button";
-          row.className = "loraPickerRow";
-          row.classList.toggle("selected", selectedLoras.has(lora.name));
-          const name = document.createElement("span");
-          name.className = "loraPickerName";
-          name.textContent = lora.displayName;
-          const meta = document.createElement("small");
-          meta.textContent = [lora.folder, lora.registry?.baseModel].filter(Boolean).join("・");
-          row.append(name, meta);
-          row.addEventListener("click", () => {
-            if (selectedLoras.has(lora.name)) {
-              setLoraSelected(lora.name, false);
-            } else {
-              if (selectedLoras.size >= loraConfig.maxSelected) {
-                return toast.warning(`LoRAは最大${loraConfig.maxSelected}個までです`);
-              }
-              const weight = loraWeights.get(lora.name)
-                ?? lora.registry?.recommendedWeight
-                ?? loraConfig.defaultWeight;
-              setLoraSelected(lora.name, true, weight);
-            }
-            renderSelectedLoraSummary();
-            renderLoras();
-            render();
+        for (const item of matches.slice(0, 300)) grid.append(createPickerCard(item, render, close));
+      };
+
+      const createPickerCard = (item, refresh, closeModal) => {
+        const card = document.createElement("article");
+        card.className = "pickerCard";
+
+        const thumb = document.createElement("div");
+        thumb.className = "pickerThumb";
+        if (item.thumbnailUrl) {
+          const image = document.createElement("img");
+          image.src = item.thumbnailUrl;
+          image.alt = "";
+          // 件数が多いので遅延読み込みにする。
+          image.loading = "lazy";
+          image.decoding = "async";
+          image.addEventListener("error", () => {
+            image.remove();
+            thumb.classList.add("placeholder");
+            thumb.textContent = "NO IMAGE";
           });
-          list.append(row);
+          thumb.append(image);
+        } else {
+          thumb.classList.add("placeholder");
+          thumb.textContent = "NO IMAGE";
         }
+
+        // Favorite（LoRAマスタ側。画像のFavoriteとは別データ）
+        const star = document.createElement("button");
+        star.type = "button";
+        star.className = "pickerStar";
+        star.textContent = item.favorite ? "★" : "☆";
+        star.title = item.favorite ? "Favoriteを外す" : "Favoriteに登録";
+        star.setAttribute("aria-pressed", String(Boolean(item.favorite)));
+        star.addEventListener("click", async (event) => {
+          event.stopPropagation();
+          star.disabled = true;
+          const next = await toggleLoraFavorite(item.loraName, !item.favorite);
+          star.disabled = false;
+          if (next === null) return;
+          for (const other of items) {
+            if (other.loraName === item.loraName) other.favorite = next;
+          }
+          refresh();
+        });
+        thumb.append(star);
+
+        const name = document.createElement("p");
+        name.className = "pickerName";
+        name.textContent = item.name;
+        name.title = item.loraName;
+
+        const meta = document.createElement("p");
+        meta.className = "pickerMeta";
+        meta.textContent = [item.subtitle || item.folder, PRESET_CATEGORY_LABELS[item.category] ?? item.category]
+          .filter(Boolean).join(" / ");
+
+        const trigger = document.createElement("p");
+        trigger.className = "pickerTrigger";
+        const preview = splitTriggerPreview(item.triggerWords);
+        trigger.textContent = preview.tags.length
+          ? `Trigger: ${preview.tags.join(", ")}${preview.rest ? ` ほか${preview.rest}` : ""}`
+          : "Trigger: 未設定";
+
+        const applied = isApplied(item);
+        const action = document.createElement("button");
+        action.type = "button";
+        action.className = applied ? "secondary smallButton" : "primary smallButton";
+        action.textContent = applied ? "追加済み" : applyLabel;
+        action.addEventListener("click", async () => {
+          await onApply(item, { mode, close: closeModal });
+          refresh();
+        });
+
+        card.append(thumb, name, meta, trigger, action);
+        return card;
       };
 
       search.addEventListener("input", () => {
         query = search.value;
         render();
       });
+
+      body.append(toolbar, groupBar);
+      if (modes) {
+        const modeRow = document.createElement("div");
+        modeRow.className = "importModeRow";
+        for (const option of modes) {
+          const label = document.createElement("label");
+          label.className = "importModeChoice";
+          const radio = document.createElement("input");
+          radio.type = "radio";
+          radio.name = "presetApplyMode";
+          radio.value = option.value;
+          radio.checked = option.value === mode;
+          radio.addEventListener("change", () => { if (radio.checked) mode = option.value; });
+          label.append(radio, option.label);
+          modeRow.append(label);
+        }
+        body.append(modeRow);
+      }
+      body.append(grid);
+      renderGroups();
       render();
-      body.append(search, list);
-      void close;
     },
     actions: [{ label: "閉じる", value: true, primary: true }]
   }).promise;
+}
+
+// LoRAマスタのFavorite。未登録LoRAは登録してから更新する（画像のFavoriteとは別管理）。
+async function toggleLoraFavorite(loraName, favorite) {
+  const lora = findLoraByName(loraName);
+  if (!lora) return null;
+  try {
+    let uid = lora.registry?.uid;
+    if (!uid) {
+      const { entry } = await postJson("/api/loras/registry/ensure", {
+        relativeName: String(loraName).replaceAll("\\", "/"),
+        displayName: lora.displayName ?? ""
+      });
+      uid = entry.uid;
+    }
+    const result = await patchJson(`/api/loras/${uid}`, { favorite });
+    if (Array.isArray(result.loras) && result.loras.length) installedLoras = result.loras;
+    else if (lora.registry) lora.registry.favorite = favorite;
+    renderLoras();
+    return favorite;
+  } catch (error) {
+    toast.error(`Favoriteを保存できませんでした: ${error.message}`);
+    return null;
+  }
+}
+
+function loraThumbnail(lora) {
+  return resolveLoraPreviewUrl(lora);
+}
+
+// LoRA選択（フォルダ・分類・検索・Favorite絞り込み・サムネイル付き）
+async function openLoraPicker() {
+  const items = buildLoraCatalog(installedLoras, { resolveThumbnail: loraThumbnail });
+  await openPresetPicker({
+    title: "LoRAを追加",
+    subtitle: `最大${loraConfig.maxSelected}個まで。★はLoRAのお気に入り（画像のFavoriteとは別です）`,
+    items,
+    groupKey: "folder",
+    isApplied: (item) => selectedLoras.has(item.loraName),
+    onApply: (item) => {
+      if (selectedLoras.has(item.loraName)) {
+        setLoraSelected(item.loraName, false);
+      } else if (!addLoraToForm(item.loraName)) {
+        return;
+      }
+      renderSelectedLoraSummary();
+      renderLoras();
+    }
+  });
+}
+
+// 生成フォームへLoRAを1件足す（LoRAマスタは書き換えない）。
+function addLoraToForm(loraName) {
+  if (selectedLoras.has(loraName)) return true;
+  if (selectedLoras.size >= loraConfig.maxSelected) {
+    toast.warning(`LoRAは最大${loraConfig.maxSelected}個までです`);
+    return false;
+  }
+  const lora = findLoraByName(loraName);
+  const weight = loraWeights.get(loraName)
+    ?? lora?.registry?.recommendedWeight
+    ?? loraConfig.defaultWeight;
+  setLoraSelected(loraName, true, Number(weight));
+  return true;
+}
+
+// キャラクター選択。キャラ欄へタグを反映し、関連LoRAがあれば生成フォームへ追加する。
+async function openCharacterPicker() {
+  const items = buildCharacterPresets(installedLoras, {
+    resolveProfile,
+    resolveThumbnail: loraThumbnail
+  });
+  await openPresetPicker({
+    title: "キャラクターを選択",
+    subtitle: "キャラクター欄へ反映します。衣装や他の項目は変更しません",
+    emptyMessage: "キャラクターの候補がありません。設定画面のLoRA管理で分類を「キャラクター」にすると候補になります",
+    items,
+    groupKey: "folder",
+    applyLabel: "選択",
+    isApplied: () => false,
+    modes: [
+      { value: "replace", label: "現在の内容を置き換える" },
+      { value: "append", label: "現在の内容へ追加する" }
+    ],
+    onApply: (item, { mode }) => applyPresetToField("character", item, mode)
+  });
+}
+
+// 衣装選択。容姿・衣装欄へ反映する（キャラクター欄は触らない）。
+async function openOutfitPicker() {
+  const items = buildOutfitPresets(installedLoras, {
+    resolveProfile,
+    resolveThumbnail: loraThumbnail
+  });
+  await openPresetPicker({
+    title: "衣装を選択",
+    subtitle: "容姿・衣装欄へ反映します。キャラクターや他の項目は変更しません",
+    emptyMessage: "衣装の候補がありません。Civitaiから登録した衣装プリセット、キャラLoRAの追加衣装、分類が衣装のLoRAが候補になります",
+    items,
+    groupKey: "folder",
+    applyLabel: "選択",
+    isApplied: () => false,
+    modes: [
+      { value: "replace", label: "現在の内容を置き換える" },
+      { value: "append", label: "現在の内容へ追加する" }
+    ],
+    onApply: (item, { mode }) => applyPresetToField("appearance", item, mode)
+  });
+}
+
+// プリセットを1つのプロンプト項目へ反映する。他の項目は消さない。
+function applyPresetToField(field, item, mode) {
+  const element = promptFieldElement(field);
+  element.value = mergePromptValue(element.value, item.promptTags, mode === "append" ? "append" : "replace");
+  for (const loraName of item.relatedLoraIds ?? []) {
+    if (findLoraByName(loraName)) addLoraToForm(loraName);
+  }
+  revealFilledPromptFields();
+  handleStructuredPromptInput();
+  renderSelectedLoraSummary();
+  renderLoras();
+  toast.success(`${item.name} を${PROMPT_FIELD_LABELS[field]}へ反映しました`);
 }
 
 // ---- 生成操作バー ----
@@ -4956,7 +5269,8 @@ function sendToCompare() {
 function renderGenerateActions() {
   const busy = Boolean(activeJobId);
   elements.generateProgress.classList.toggle("hidden", !busy);
-  elements.generateButton.disabled = busy;
+  // 生成枚数が不正なままでは開始しない。
+  elements.generateButton.disabled = busy || !isValidCandidateCount(elements.candidateCount.value);
   elements.sendToCompareButton.disabled = busy;
 }
 
@@ -5245,6 +5559,8 @@ function compareCurrentSelection() {
 function createHistoryCard(generation, image) {
   const card = document.createElement("article");
   card.className = "historyCard";
+  const previewWrap = document.createElement("div");
+  previewWrap.className = "historyCardPreview";
 
   const preview = document.createElement("img");
   preview.className = "historyCardImage";
@@ -5277,12 +5593,8 @@ function createHistoryCard(generation, image) {
   const actions = document.createElement("div");
   actions.className = "historyCardActions";
 
-  const favorite = document.createElement("button");
-  favorite.type = "button";
-  favorite.className = `iconButton${image.favorite ? " active" : ""}`;
-  favorite.title = "お気に入り";
-  favorite.textContent = "👍";
-  favorite.addEventListener("click", () => void toggleFavorite(image, favorite));
+  // カード右上の星（画像のFavorite）。一覧・詳細・最新結果で状態を共有する。
+  previewWrap.append(preview, createFavoriteButton(image, { className: "cardFavorite" }));
   const discordBadge = createDiscordStatusNode(image);
 
   const del = document.createElement("button");
@@ -5323,9 +5635,9 @@ function createHistoryCard(generation, image) {
     meta.append(badge);
   }
 
-  actions.append(favorite, discordBadge, del, load, detail, compare);
+  actions.append(discordBadge, del, load, detail, compare);
   body.append(meta, actions);
-  card.append(preview, body);
+  card.append(previewWrap, body);
   return card;
 }
 
@@ -5501,6 +5813,8 @@ function openHistoryDetail(generation, image) {
     footer.append(button);
     return button;
   };
+  const detailFavorite = createFavoriteButton(image, { style: "label", className: "favoriteButton" });
+  footer.append(detailFavorite);
   addAction("img2imgへ", "secondary", () => { closeDetail(); useImageForImg2Img(image); });
   addAction("部分修正", "secondary", () => { closeDetail(); useImageForInpaint(image); });
   addAction("同じSeedで再生成", "secondary", () => {
@@ -6587,13 +6901,33 @@ function updateGenerateButton() {
     : generationMode === "img2img"
       ? "img2img"
       : "画像";
-  elements.generateButton.textContent = `${label}を生成（${count}枚）`;
+  const valid = isValidCandidateCount(count);
+  elements.generateButton.textContent = valid ? `${label}を生成（${count}枚）` : `${label}を生成`;
+  elements.candidateCount.classList.toggle("invalid", !valid);
+  elements.candidateCountDown.disabled = clampCandidateCount(count) <= MIN_CANDIDATE_COUNT;
+  elements.candidateCountUp.disabled = clampCandidateCount(count) >= MAX_CANDIDATE_COUNT;
   renderGenerateActions();
 }
 
+// 生成枚数はバックエンドの制限（1〜4）に合わせ、不正値のままでは生成させない。
 function handleCandidateCountChange() {
-  localStorage.setItem("localImageChat.candidateCount", elements.candidateCount.value);
+  const value = elements.candidateCount.value;
+  if (isValidCandidateCount(value)) {
+    localStorage.setItem("localImageChat.candidateCount", String(Number(value)));
+  }
   updateGenerateButton();
+}
+
+function stepCandidateCount(step) {
+  const next = clampCandidateCount(Number(elements.candidateCount.value) + step);
+  elements.candidateCount.value = String(next);
+  handleCandidateCountChange();
+}
+
+// 入力欄から離れた時点で範囲内へ丸める（入力中は打ち直しを邪魔しない）。
+function normalizeCandidateCount() {
+  elements.candidateCount.value = String(clampCandidateCount(elements.candidateCount.value));
+  handleCandidateCountChange();
 }
 
 function showError(message) {

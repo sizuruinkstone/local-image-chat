@@ -208,7 +208,8 @@
                   <div class="promptModeTabs" role="tablist" aria-label="Positive Promptの入力方式">
                     <button id="structuredPromptTabButton" class="promptModeTab active" type="button" role="tab" aria-selected="true" aria-controls="structuredPromptPanel">分割入力</button>
                     <button id="rawPromptTabButton" class="promptModeTab" type="button" role="tab" aria-selected="false" aria-controls="rawPromptPanel">Raw Prompt</button>
-                    <button id="importAiPromptButton" class="secondary smallButton promptImportButton" type="button" title="GrokやChatGPTの回答を全文貼り付けて、各欄へ振り分けます">AI出力をインポート</button>
+                    <button id="showCombinedPromptButton" class="ghost smallButton promptImportButton" type="button" title="実際に生成へ送るPositive Promptを確認します">結合結果を確認</button>
+                    <button id="importAiPromptButton" class="secondary smallButton" type="button" title="GrokやChatGPTの回答を全文貼り付けて、各欄へ振り分けます">AI出力をインポート</button>
                   </div>
                   <p id="rawPromptNotice" class="promptNotice rawPromptNotice hidden" aria-live="polite">
                     <span id="rawPromptNoticeText">Raw Promptを直接編集中です。生成にはこの内容を使います。</span>
@@ -220,6 +221,16 @@
                   </p>
 
                   <div id="structuredPromptPanel" class="structuredPromptPanel" role="tabpanel" aria-labelledby="structuredPromptTabButton">
+                    <div class="quickPickRow">
+                      <div class="quickPick">
+                        <span class="quickPickLabel">キャラクター</span>
+                        <button id="pickCharacterButton" class="secondary" type="button">キャラを選択</button>
+                      </div>
+                      <div class="quickPick">
+                        <span class="quickPickLabel">衣装</span>
+                        <button id="pickOutfitButton" class="secondary" type="button">衣装を選択</button>
+                      </div>
+                    </div>
                     <p class="hint">用途ごとに入力すると、上から順に1本のPositive Promptへ結合されます。空欄は無視されます。</p>
                     <details class="promptFieldBlock" data-prompt-field="character" open>
                       <summary class="promptFieldSummary">
@@ -307,8 +318,7 @@
                 <details id="loraUseDetails" class="genSection" open>
                   <summary>LoRA <span id="loraUseCount" class="summaryCount">0件</span></summary>
                   <div class="buttonRow compactButtons">
-                    <button id="addLoraButton" class="secondary" type="button">LoRA追加</button>
-                    <button id="addFavoriteLoraButton" class="secondary" type="button">お気に入りから追加</button>
+                    <button id="addLoraButton" class="secondary" type="button">LoRAを追加</button>
                     <button id="addCivitaiLoraButton" class="ghost" type="button">Civitai URLから追加</button>
                   </div>
                   <div id="usedLoraList" class="usedLoraList"></div>
@@ -356,14 +366,6 @@
                     </label>
                     <label>幅<input id="width" type="number" step="64" /></label>
                     <label>高さ<input id="height" type="number" step="64" /></label>
-                    <label>生成枚数
-                      <select id="candidateCount" aria-label="生成する候補枚数">
-                        <option value="1">1枚・最速</option>
-                        <option value="2">2枚</option>
-                        <option value="3">3枚</option>
-                        <option value="4">4枚</option>
-                      </select>
-                    </label>
                   </div>
 
                   <details id="advancedSettingsDetails" class="advancedSettings">
@@ -442,10 +444,17 @@
                     <span id="generateProgressText" aria-live="polite">生成中…</span>
                     <button id="cancelGenerateButton" class="dangerButton smallButton" type="button">中止</button>
                   </div>
-                  <div class="generateActionButtons">
-                    <button id="showCombinedPromptButton" class="ghost" type="button">結合結果を確認</button>
-                    <button id="sendToCompareButton" class="secondary" type="button">比較実験へ送る</button>
-                    <button id="generateButton" class="primary" type="button">画像を生成</button>
+                  <div class="generateActionRow">
+                    <div class="candidateStepper">
+                      <span class="candidateStepperLabel" id="candidateCountLabel">生成枚数</span>
+                      <button id="candidateCountDown" class="stepperButton" type="button" aria-label="生成枚数を減らす">−</button>
+                      <input id="candidateCount" type="number" min="1" max="4" step="1" value="1" inputmode="numeric" aria-labelledby="candidateCountLabel" />
+                      <button id="candidateCountUp" class="stepperButton" type="button" aria-label="生成枚数を増やす">＋</button>
+                    </div>
+                    <div class="generateActionButtons">
+                      <button id="sendToCompareButton" class="secondary" type="button">比較実験へ送る</button>
+                      <button id="generateButton" class="primary" type="button">画像を生成</button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -468,8 +477,10 @@
                         <h2 id="finalTitle">高解像度版</h2>
                       </div>
                       <div class="resultActions">
-                        <button id="favoriteFinalButton" class="iconButton" type="button" aria-label="お気に入り">👍</button>
+                        <button id="favoriteFinalButton" class="favoriteButton" type="button" aria-pressed="false" title="Favoriteに登録">☆ Favorite</button>
                         <span id="finalDiscordStatus" class="discordStatus hidden" aria-live="polite"></span>
+                        <button id="regenerateFinalButton" class="secondary smallButton" type="button">再生成</button>
+                        <button id="openInGalleryButton" class="secondary smallButton" type="button">ギャラリーで開く</button>
                         <button id="sendFinalToImg2ImgButton" class="secondary smallButton" type="button">img2imgへ</button>
                         <button id="sendFinalToInpaintButton" class="secondary smallButton" type="button">部分修正</button>
                         <button id="reuseFinalButton" class="secondary smallButton" type="button">この構図で差し替え</button>
