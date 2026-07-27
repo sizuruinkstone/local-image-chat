@@ -2,8 +2,20 @@
 <html lang="ja">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover: iPhoneのセーフエリアをCSSのenv()で扱う -->
+    <!-- interactive-widget: キーボード表示時に表示領域を詰めて操作ボタンを隠しにくくする -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
+    <meta name="theme-color" content="#08090c" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="ImageChat" />
+    <meta name="format-detection" content="telephone=no" />
     <title>Local Image Chat</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <link rel="icon" href="/icons/icon-192.png" type="image/png" />
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
@@ -187,7 +199,7 @@
             <span>前回の選択を記憶します</span>
           </div>
 
-          <div class="buttonRow">
+          <div class="buttonRow primaryActions">
             <button id="promptButton" class="secondary">プロンプトだけ作る</button>
             <button id="generateButton" class="primary">1枚の候補を生成</button>
           </div>
@@ -215,36 +227,54 @@
 
             <div id="structuredPromptPanel" class="structuredPromptPanel" role="tabpanel" aria-labelledby="structuredPromptTabButton">
               <p class="hint">用途ごとに入力すると、上から順に1本のPositive Promptへ結合されます。空欄は無視されます。</p>
-              <div class="promptFieldBlock">
-                <label for="promptCharacter">キャラクター</label>
-                <textarea id="promptCharacter" rows="2" placeholder="例: 1girl, solo, character_name"></textarea>
+              <details class="promptFieldBlock" data-prompt-field="character" open>
+                <summary class="promptFieldSummary">
+                  <span class="promptFieldName">キャラクター</span>
+                  <span class="promptFieldPreview" data-preview-for="promptCharacter"></span>
+                </summary>
+                <textarea id="promptCharacter" rows="2" aria-label="キャラクター" placeholder="例: 1girl, solo, character_name"></textarea>
                 <div id="triggerListCharacter" class="triggerList hidden"></div>
-              </div>
-              <div class="promptFieldBlock">
-                <label for="promptAppearance">容姿・衣装</label>
-                <textarea id="promptAppearance" rows="2" placeholder="例: long hair, blue eyes, sailor uniform"></textarea>
+              </details>
+              <details class="promptFieldBlock" data-prompt-field="appearance" open>
+                <summary class="promptFieldSummary">
+                  <span class="promptFieldName">容姿・衣装</span>
+                  <span class="promptFieldPreview" data-preview-for="promptAppearance"></span>
+                </summary>
+                <textarea id="promptAppearance" rows="2" aria-label="容姿・衣装" placeholder="例: long hair, blue eyes, sailor uniform"></textarea>
                 <div id="triggerListAppearance" class="triggerList hidden"></div>
-              </div>
-              <div class="promptFieldBlock">
-                <label for="promptComposition">ポーズ・構図</label>
-                <textarea id="promptComposition" rows="2" placeholder="例: upper body, looking at viewer"></textarea>
+              </details>
+              <details class="promptFieldBlock" data-prompt-field="composition" open>
+                <summary class="promptFieldSummary">
+                  <span class="promptFieldName">ポーズ・構図</span>
+                  <span class="promptFieldPreview" data-preview-for="promptComposition"></span>
+                </summary>
+                <textarea id="promptComposition" rows="2" aria-label="ポーズ・構図" placeholder="例: upper body, looking at viewer"></textarea>
                 <div id="triggerListComposition" class="triggerList hidden"></div>
-              </div>
-              <div class="promptFieldBlock">
-                <label for="promptSituation">シチュエーション・背景</label>
-                <textarea id="promptSituation" rows="2" placeholder="例: classroom, afternoon sunlight"></textarea>
+              </details>
+              <details class="promptFieldBlock" data-prompt-field="situation" open>
+                <summary class="promptFieldSummary">
+                  <span class="promptFieldName">シチュエーション・背景</span>
+                  <span class="promptFieldPreview" data-preview-for="promptSituation"></span>
+                </summary>
+                <textarea id="promptSituation" rows="2" aria-label="シチュエーション・背景" placeholder="例: classroom, afternoon sunlight"></textarea>
                 <div id="triggerListSituation" class="triggerList hidden"></div>
-              </div>
-              <div class="promptFieldBlock">
-                <label for="promptStyle">画風・品質</label>
-                <textarea id="promptStyle" rows="2" placeholder="例: masterpiece, best quality, anime coloring"></textarea>
+              </details>
+              <details class="promptFieldBlock" data-prompt-field="style" open>
+                <summary class="promptFieldSummary">
+                  <span class="promptFieldName">画風・品質</span>
+                  <span class="promptFieldPreview" data-preview-for="promptStyle"></span>
+                </summary>
+                <textarea id="promptStyle" rows="2" aria-label="画風・品質" placeholder="例: masterpiece, best quality, anime coloring"></textarea>
                 <div id="triggerListStyle" class="triggerList hidden"></div>
-              </div>
-              <div class="promptFieldBlock">
-                <label for="promptExtra">追加プロンプト</label>
-                <textarea id="promptExtra" rows="2" placeholder="例: (depth of field:1.1)"></textarea>
+              </details>
+              <details class="promptFieldBlock" data-prompt-field="extra" open>
+                <summary class="promptFieldSummary">
+                  <span class="promptFieldName">追加プロンプト</span>
+                  <span class="promptFieldPreview" data-preview-for="promptExtra"></span>
+                </summary>
+                <textarea id="promptExtra" rows="2" aria-label="追加プロンプト" placeholder="例: (depth of field:1.1)"></textarea>
                 <div id="triggerListExtra" class="triggerList hidden"></div>
-              </div>
+              </details>
               <p id="structuredPromptPreview" class="hint structuredPromptPreview">結合結果: （未入力）</p>
             </div>
 

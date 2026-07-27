@@ -265,6 +265,8 @@ loadImg2ImgPreferences();
 loadInpaintPreferences();
 loadPromptPartSelections();
 restoreSessionSecrets();
+registerServiceWorker();
+setupPromptFieldAccordions();
 setPromptMode(promptMode);
 renderTriggerLists();
 renderPromptModeState();
@@ -2850,6 +2852,8 @@ function readStructuredSections() {
 function writeStructuredSections(sections) {
   const normalized = normalizeSections(sections);
   for (const field of PROMPT_FIELDS) promptFieldElement(field).value = normalized[field];
+  // 中身が入った項目は開いて見せる（スマホの折りたたみ対策）。
+  revealFilledPromptFields();
 }
 
 function buildCombinedPrompt() {
@@ -2908,7 +2912,43 @@ function renderRawTriggerNotice() {
 function handleStructuredPromptInput() {
   markPromptAsCurrent();
   syncRawPromptFromSections();
+  renderPromptFieldPreviews();
   scheduleLoraSync();
+}
+
+// 折りたたみ中でも中身が分かるように、見出しへ先頭を出す。
+function renderPromptFieldPreviews() {
+  for (const field of PROMPT_FIELDS) {
+    const element = promptFieldElement(field);
+    const preview = document.querySelector(`[data-preview-for="${element.id}"]`);
+    if (!preview) continue;
+    const value = element.value.trim().replace(/\s+/g, " ");
+    preview.textContent = value ? `：${value.slice(0, 40)}${value.length > 40 ? "…" : ""}` : "";
+  }
+}
+
+// スマホでは縦に長くなるため、中身のある項目とキャラクターだけ開いておく。
+function setupPromptFieldAccordions() {
+  const blocks = [...document.querySelectorAll("[data-prompt-field]")];
+  if (isNarrowScreen()) {
+    for (const block of blocks) {
+      const field = block.dataset.promptField;
+      block.open = field === "character" || Boolean(promptFieldElement(field)?.value.trim());
+    }
+  }
+  renderPromptFieldPreviews();
+}
+
+function isNarrowScreen() {
+  return window.matchMedia("(max-width: 520px)").matches;
+}
+
+// 履歴復元・インポートで中身が入った項目は開いて見せる。
+function revealFilledPromptFields() {
+  for (const block of document.querySelectorAll("[data-prompt-field]")) {
+    if (promptFieldElement(block.dataset.promptField)?.value.trim()) block.open = true;
+  }
+  renderPromptFieldPreviews();
 }
 
 function handleRawPromptInput() {
@@ -3438,8 +3478,11 @@ function renderShareStatus(state) {
     elements.shareBarStatus.textContent = "AI共有CSVは未作成です。「AI共有CSVを更新」で作成できます。";
     return;
   }
-  elements.shareBarStatus.textContent =
+  const text =
     `AI共有CSV: ${state.rowCount}件（Trigger Words ${state.triggerWordCount}件）・${formatDate(state.generatedAt)}・${state.path}`;
+  elements.shareBarStatus.textContent = text;
+  // スマホでは2行に切り詰めて表示するため、全文はtitleでも見られるようにする。
+  elements.shareBarStatus.title = text;
 }
 
 async function loadShareState() {
@@ -6026,6 +6069,16 @@ function status(label, ok, detail = "") {
 function shorten(value, max) {
   if (!value) return "不明";
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+}
+
+// ホーム画面へ追加できるようにするためだけのService Worker。
+// キャッシュは持たないので、更新後に古い画面が残ることはない。
+function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+  // file:// や http:// のLAN内アクセスでも動くよう、失敗しても無視する。
+  navigator.serviceWorker.register("/sw.js").catch((error) => {
+    console.warn(`[PWA] Service Workerを登録できません: ${error.message}`);
+  });
 }
 
 function escapeHtml(value) {

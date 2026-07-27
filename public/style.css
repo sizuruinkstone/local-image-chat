@@ -630,3 +630,107 @@ details label { margin-top: 13px; }
   .shareBar { flex-direction: column; align-items: stretch; }
   .shareBarButtons button { flex: 1 1 auto; }
 }
+
+/* ===== 用途別プロンプトのアコーディオン ===== */
+.promptFieldSummary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; margin-bottom: 4px; color: #d9dce3; font-size: 13px; font-weight: 700; cursor: pointer; list-style: none; }
+.promptFieldSummary::-webkit-details-marker { display: none; }
+.promptFieldSummary::before { content: "▾"; flex: 0 0 auto; color: var(--muted); font-size: 10px; transition: transform .15s ease; }
+.promptFieldBlock:not([open]) .promptFieldSummary::before { transform: rotate(-90deg); }
+.promptFieldPreview { flex: 1 1 120px; min-width: 0; overflow: hidden; color: var(--muted); font-size: 10px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+.promptFieldBlock[open] .promptFieldPreview { display: none; }
+
+/* ===== スマートフォン対応（iPhone想定: 320〜430px） ===== */
+/* セーフエリア。viewport-fit=cover と対で使う */
+.shell { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
+img, canvas, video { max-width: 100%; }
+.uiModal, .detailModal, .imageModal { padding-bottom: max(20px, env(safe-area-inset-bottom)); padding-top: max(20px, env(safe-area-inset-top)); }
+
+@media (max-width: 520px) {
+  .shell { width: 100%; padding: 16px 12px calc(20px + env(safe-area-inset-bottom)); }
+  h1 { font-size: 30px; }
+  .panel { border-radius: 14px; }
+  .controls { padding: 14px; }
+  .result { min-height: 0; padding: 12px; }
+
+  /* iOSは16px未満の入力欄で自動ズームする。横スクロールの原因にもなる */
+  input, select, textarea { font-size: 16px; }
+  /* 指で押しやすい高さ。アイコンボタンは別途最小サイズを確保する */
+  button, select, input[type="number"], input[type="text"], input[type="password"] { min-height: 44px; }
+  button { padding: 11px 14px; }
+  .compactButtons button, .smallButton, .detailActions button, .uiModalActions button { min-height: 40px; }
+  input[type="range"] { height: 40px; }
+  input[type="checkbox"], input[type="radio"] { width: 20px; height: 20px; }
+
+  /* 小さな×・↺などのタップ領域を広げる */
+  .fieldClearButton { width: 34px; height: 34px; font-size: 16px; }
+  .triggerToggle { width: 36px; height: 36px; min-height: 36px; font-size: 14px; }
+  .discordRetryButton { min-height: 32px; padding: 5px 12px; }
+  .imageModalClose { width: 44px; height: 44px; }
+  .toastClose { min-width: 32px; min-height: 32px; }
+
+  /* 主要操作は画面下部へ吸着。入力欄の上へ重ならないよう、流れの中で固定する */
+  .buttonRow.primaryActions {
+    position: sticky;
+    bottom: 0;
+    z-index: 6;
+    flex-direction: row;
+    margin: 14px -14px 0;
+    padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--line);
+    background: var(--panel);
+  }
+  .buttonRow.primaryActions button { flex: 1 1 0; min-width: 0; }
+  #generateButton { flex: 1.6 1 0; }
+
+  /* キーボードが出ても入力欄が隠れにくいように、スクロール位置へ余白を持たせる */
+  textarea, input, select { scroll-margin-bottom: 96px; scroll-margin-top: 12px; }
+
+  /* ギャラリーは2列 */
+  .historyGrid, #galleryTab .historyGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .candidateGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  #galleryTab { max-height: none; }
+  .historyCardActions { gap: 6px; }
+  .historyCardActions button { flex: 1 1 calc(50% - 6px); padding: 9px 8px; font-size: 11px; }
+
+  /* モーダルは画面内へ収める */
+  .uiModal, .detailModal { padding: 12px; padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+  .uiModalBox, .uiModal-large .uiModalBox, .uiModal-small .uiModalBox { width: 100%; max-height: 88dvh; }
+  .detailBox { width: 100%; max-height: 88dvh; padding: 14px; }
+  .uiModalActions { justify-content: stretch; }
+  .uiModalActions button { flex: 1 1 auto; }
+  .imageModal { padding: 10px; }
+  .imageModalImg { max-width: 100%; max-height: 80dvh; }
+  .imageModalClose { top: max(10px, env(safe-area-inset-top)); right: 12px; }
+  .detailFields { grid-template-columns: 1fr; }
+  .detailFields dt { margin-top: 6px; }
+
+  /* 上部の共有バー・ヘッダー */
+  /* flexのままだと -webkit-box が無効化されるため、縦積みにしてから行数を制限する */
+  .shareBar { display: block; padding: 10px; }
+  /* 出力先パスが長いので2行までに抑える（全文はtitleで確認できる） */
+  .shareBarStatus { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; margin-top: 8px; }
+  .shareBarButtons { width: 100%; }
+  .shareBarButtons button { flex: 1 1 calc(50% - 4px); }
+  header { flex-direction: column; align-items: flex-start; gap: 10px; }
+  .headerActions { flex-direction: row; flex-wrap: wrap; width: 100%; }
+  .headerActions button { flex: 1 1 auto; }
+
+  /* 横スクロールを作りやすい箇所 */
+  .promptModeTabs { flex-wrap: wrap; }
+  .promptImportButton { margin-left: 0; }
+  .triggerRow { gap: 6px; }
+  .triggerText { flex: 1 1 100%; }
+  .loraSwapList { max-height: 52dvh; }
+  .compareStage { max-height: 60dvh; }
+  .queueIndicator { max-width: 100%; }
+}
+
+/* さらに狭い端末（320px前後） */
+@media (max-width: 360px) {
+  .shell { padding-left: 8px; padding-right: 8px; }
+  .controls { padding: 12px; }
+  .buttonRow.primaryActions { margin-left: -12px; margin-right: -12px; padding-left: 12px; padding-right: 12px; }
+  .loraCategories { grid-template-columns: 1fr; }
+  .generationMode { grid-template-columns: 1fr; }
+  h1 { font-size: 26px; }
+}

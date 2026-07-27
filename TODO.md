@@ -3,6 +3,29 @@
 v2.12の総合改造で意図的に簡略化した項目と、次に手を入れるとよい箇所。
 機能自体は動作しており、以下は「あると better」の残作業。
 
+## v2.19で対応済み
+
+- スマホ向けレスポンシブ（320〜430px）、用途別プロンプトのアコーディオン化、タップ領域の拡大
+- LAN待ち受け（`src/net-info.js` + `start-lan.bat` + `LOCAL_IMAGE_CHAT_HOST` / `LOCAL_IMAGE_CHAT_PORT`）
+- PWA（`public/manifest.webmanifest` / `public/sw.js` / `public/icons/*`）
+- README: LAN・Tailscale・Windowsファイアウォール・セキュリティ制約
+
+## v2.19で見送った項目
+
+### アクセス制御（ログイン）
+
+- 現状: 認証機構が無い。LAN公開時は同じネットワークの端末から誰でも操作できる。
+- 次にやるなら: `src/server.js`へトークン検証のミドルウェアを1枚入れ、
+  トークンは`config.local.json`か環境変数で受け取る（DiscordのWebhookと同じ扱い）。
+  画面側はsessionStorageへ保持し、`getJson`/`postJson`（`public/app.js`）へヘッダーを足す。
+
+### オフライン表示
+
+- 現状: Service Workerはキャッシュを持たない（古いフロントエンドを残さないため）。
+  オフラインでは画面も開けない。
+- 次にやるなら: `public/sw.js`へ「HTMLとJSだけstale-while-revalidate」を入れる。
+  その場合はバージョン付きキャッシュ名と`activate`での旧キャッシュ削除を必ずセットにする。
+
 ## v2.18で対応済み（Issue #10）
 
 - 画面上部のAI共有バー（`Grok用に全コピー` / `AI共有CSVを更新`）

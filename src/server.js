@@ -36,6 +36,7 @@ import { applyPromptWeights, dedupeLoraTags, sameLoraName } from "../public/lora
 import { buildGrokShareMarkdown, createAiShareService } from "./ai-share.js";
 import { createDiscordService, normalizeDiscordState } from "./discord.js";
 import { createHistoryService } from "./history.js";
+import { describeBinding, resolveServerBinding } from "./net-info.js";
 import { createPromptTemplateService } from "./prompt-template.js";
 import { createJobManager } from "./job-manager.js";
 import { createCivitaiService } from "./civitai.js";
@@ -729,8 +730,12 @@ app.post("/api/generate", async (request, response) => {
   }
 });
 
-app.listen(config.port, "127.0.0.1", () => {
-  console.log(`Local Image Chat v${packageJson.version}: http://127.0.0.1:${config.port}`);
+// 既定はPC内のみ（127.0.0.1）。スマホから使うときだけ 0.0.0.0 などへ広げる。
+// ReForge・Ollamaへの接続は従来どおりサーバー側から127.0.0.1へ行い、端末へは公開しない。
+const binding = resolveServerBinding({ env: process.env, config });
+app.listen(binding.port, binding.host, () => {
+  console.log(`Local Image Chat v${packageJson.version}`);
+  for (const line of describeBinding(binding)) console.log(`  ${line}`);
 });
 
 backfillFavorites();
