@@ -28,6 +28,7 @@ import {
   generateImages,
   listCheckpoints,
   listLoras,
+  listSamplers,
   refreshLoras,
   switchCheckpoint
 } from "./reforge.js";
@@ -166,6 +167,15 @@ app.post("/api/prompt", async (request, response) => {
 app.get("/api/loras", async (_request, response) => {
   try {
     response.json({ loras: await getInstalledLoras() });
+  } catch (error) {
+    response.status(500).json({ error: readableError(error) });
+  }
+});
+
+// Sampler / Schedulerの候補。ReForgeが落ちていても既定値で選択できるようにする。
+app.get("/api/samplers", async (_request, response) => {
+  try {
+    response.json(await listSamplers(config.reforge));
   } catch (error) {
     response.status(500).json({ error: readableError(error) });
   }

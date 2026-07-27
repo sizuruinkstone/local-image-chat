@@ -64,615 +64,711 @@
         <button id="cancelJobButton" class="dangerButton" type="button">中止</button>
       </section>
 
-      <div class="layout">
-        <section class="panel controls">
-          <label for="description">生成したい画像<small class="labelNote">（任意・Promptを直接書く場合は空でOK）</small></label>
-          <textarea id="description" rows="6" placeholder="例：銀髪の女の子が、黒い大きめのパーカーを着て夜の秋葉原に立っている。縦長のアニメイラスト。"></textarea>
-          <p class="hint">空のまま生成した場合、履歴には「無題」として保存されます。</p>
+      <div class="appShell">
+        <nav id="mainNav" class="mainNav" aria-label="画面切替">
+          <button class="navItem active" type="button" data-view="generate" aria-current="page"><span class="navIcon" aria-hidden="true">✦</span><span class="navLabel">生成</span></button>
+          <button class="navItem" type="button" data-view="gallery"><span class="navIcon" aria-hidden="true">▦</span><span class="navLabel">ギャラリー</span></button>
+          <button class="navItem" type="button" data-view="compare"><span class="navIcon" aria-hidden="true">⇄</span><span class="navLabel">比較</span></button>
+          <button class="navItem" type="button" data-view="settings"><span class="navIcon" aria-hidden="true">⚙</span><span class="navLabel">設定</span></button>
+        </nav>
 
-          <div class="generationMode" role="group" aria-label="生成モード">
-            <button id="txt2imgModeButton" class="modeButton active" type="button" aria-pressed="true">
-              新規生成
-              <span>txt2img</span>
-            </button>
-            <button id="img2imgModeButton" class="modeButton" type="button" aria-pressed="false">
-              元画像から生成
-              <span>img2img</span>
-            </button>
-            <button id="inpaintModeButton" class="modeButton" type="button" aria-pressed="false">
-              部分修正
-              <span>inpaint</span>
-            </button>
-          </div>
+        <div class="viewHost">
+          <section id="viewGenerate" class="appView" data-view="generate" aria-label="生成">
+            <div class="generateLayout">
+              <div class="panel controls generateMain">
+                <label for="description">生成したい画像<small class="labelNote">（任意・Promptを直接書く場合は空でOK）</small></label>
+                <textarea id="description" rows="6" placeholder="例：銀髪の女の子が、黒い大きめのパーカーを着て夜の秋葉原に立っている。縦長のアニメイラスト。"></textarea>
+                <p class="hint">空のまま生成した場合、履歴には「無題」として保存されます。</p>
 
-          <section id="img2imgPanel" class="img2imgPanel hidden" aria-label="参照画像">
-            <div id="img2imgDropZone" class="img2imgDropZone">
-              <input id="initImageInput" class="hidden" type="file" accept="image/png,image/jpeg,image/webp" />
-              <div id="initImageEmpty" class="initImageEmpty">
-                <strong>参照画像をドロップ</strong>
-                <span>PNG・JPEG・WebP、20MBまで</span>
-                <button id="chooseInitImageButton" class="secondary" type="button">画像を選択</button>
-              </div>
-              <img id="initImagePreview" class="hidden" alt="img2imgの参照画像" />
-            </div>
-            <div class="img2imgSourceBar">
-              <span id="initImageStatus">参照画像が未選択です</span>
-              <button id="clearInitImageButton" class="ghost smallButton" type="button" disabled>解除</button>
-            </div>
-            <div id="img2imgSettings">
-              <div class="settingsGrid">
-                <label>変化プリセット
-                  <select id="img2imgPreset">
-                    <option value="">カスタム</option>
-                    <option value="0.25">ほぼ維持</option>
-                    <option value="0.35">画風を変更</option>
-                    <option value="0.45" selected>衣装を変更</option>
-                    <option value="0.60">キャラを変更</option>
-                    <option value="0.72">大きく描き直す</option>
-                  </select>
-                </label>
-                <label>Denoising
-                  <div class="rangeField">
-                    <input id="img2imgDenoising" type="range" min="0.05" max="0.95" step="0.01" value="0.45" />
-                    <output id="img2imgDenoisingValue">0.45</output>
-                  </div>
-                </label>
-                <label class="fullWidthField">リサイズ方法
-                  <select id="img2imgResizeMode">
-                    <option value="1" selected>比率を保って中央クロップ</option>
-                    <option value="2">全体を収めて余白を追加</option>
-                    <option value="0">指定サイズへそのまま変形</option>
-                  </select>
-                </label>
-                <label class="fullWidthField autoSizeChoice">
-                  <input id="syncInitImageSize" type="checkbox" checked />
-                  元画像の縦横比に幅・高さを自動で合わせる
-                </label>
-              </div>
-              <p class="hint">生成済み画像や履歴の「img2img」からも、その画像を直接セットできます。</p>
-            </div>
-
-            <section id="inpaintPanel" class="inpaintPanel hidden" aria-label="Inpaintマスク編集">
-              <div class="inpaintHeading">
-                <div>
-                  <strong>修正する範囲を塗る</strong>
-                  <span>白い部分だけReForgeが描き直します</span>
+                <div class="generationMode" role="group" aria-label="生成モード">
+                  <button id="txt2imgModeButton" class="modeButton active" type="button" aria-pressed="true">
+                    新規生成
+                    <span>txt2img</span>
+                  </button>
+                  <button id="img2imgModeButton" class="modeButton" type="button" aria-pressed="false">
+                    元画像から生成
+                    <span>img2img</span>
+                  </button>
+                  <button id="inpaintModeButton" class="modeButton" type="button" aria-pressed="false">
+                    部分修正
+                    <span>inpaint</span>
+                  </button>
                 </div>
-                <span id="maskStatus" class="maskStatus">画像を選択してください</span>
-              </div>
-              <div id="inpaintCanvasStage" class="inpaintCanvasStage">
-                <div id="inpaintMaskEmpty" class="inpaintMaskEmpty">参照画像を選ぶと、ここへマスクを描けます</div>
-                <img id="inpaintBaseImage" class="hidden" alt="Inpaintの元画像" />
-                <canvas id="inpaintMaskCanvas" class="hidden" aria-label="修正範囲を描くキャンバス"></canvas>
-              </div>
-              <div class="maskToolbar" role="toolbar" aria-label="マスク編集">
-                <button id="maskPaintButton" class="secondary maskTool active" type="button" aria-pressed="true">塗る</button>
-                <button id="maskEraseButton" class="secondary maskTool" type="button" aria-pressed="false">消す</button>
-                <button id="maskUndoButton" class="ghost" type="button" disabled>↶ 戻す</button>
-                <button id="maskRedoButton" class="ghost" type="button" disabled>↷ やり直し</button>
-                <button id="maskClearButton" class="dangerButton" type="button" disabled>全消去</button>
-              </div>
-              <label>ブラシサイズ
-                <div class="rangeField">
-                  <input id="maskBrushSize" type="range" min="4" max="160" step="2" value="48" />
-                  <output id="maskBrushSizeValue">48</output>
-                </div>
-              </label>
-              <div class="settingsGrid inpaintSettings">
-                <label>Denoising
-                  <div class="rangeField">
-                    <input id="inpaintDenoising" type="range" min="0.05" max="0.95" step="0.01" value="0.55" />
-                    <output id="inpaintDenoisingValue">0.55</output>
+
+                <section id="img2imgPanel" class="img2imgPanel hidden" aria-label="参照画像">
+                  <div id="img2imgDropZone" class="img2imgDropZone">
+                    <input id="initImageInput" class="hidden" type="file" accept="image/png,image/jpeg,image/webp" />
+                    <div id="initImageEmpty" class="initImageEmpty">
+                      <strong>参照画像をドロップ</strong>
+                      <span>PNG・JPEG・WebP、20MBまで</span>
+                      <button id="chooseInitImageButton" class="secondary" type="button">画像を選択</button>
+                    </div>
+                    <img id="initImagePreview" class="hidden" alt="img2imgの参照画像" />
                   </div>
-                </label>
-                <label>Mask blur
-                  <input id="maskBlur" type="number" min="0" max="64" step="1" value="4" />
-                </label>
-                <label>マスク内部
-                  <select id="inpaintFill">
-                    <option value="1" selected>元画像を使う</option>
-                    <option value="0">周囲で埋める</option>
-                    <option value="2">ノイズから描く</option>
-                    <option value="3">空から描く</option>
-                  </select>
-                </label>
-                <label>周辺余白
-                  <input id="inpaintFullResPadding" type="number" min="0" max="256" step="4" value="32" />
-                </label>
-                <label class="fullWidthField autoSizeChoice">
-                  <input id="inpaintFullRes" type="checkbox" checked />
-                  マスク部分だけを高精細に処理する
-                </label>
+                  <div class="img2imgSourceBar">
+                    <span id="initImageStatus">参照画像が未選択です</span>
+                    <button id="clearInitImageButton" class="ghost smallButton" type="button" disabled>解除</button>
+                  </div>
+                  <div id="img2imgSettings">
+                    <div class="settingsGrid">
+                      <label>変化プリセット
+                        <select id="img2imgPreset">
+                          <option value="">カスタム</option>
+                          <option value="0.25">ほぼ維持</option>
+                          <option value="0.35">画風を変更</option>
+                          <option value="0.45" selected>衣装を変更</option>
+                          <option value="0.60">キャラを変更</option>
+                          <option value="0.72">大きく描き直す</option>
+                        </select>
+                      </label>
+                      <label>Denoising
+                        <div class="rangeField">
+                          <input id="img2imgDenoising" type="range" min="0.05" max="0.95" step="0.01" value="0.45" />
+                          <output id="img2imgDenoisingValue">0.45</output>
+                        </div>
+                      </label>
+                      <label class="fullWidthField">リサイズ方法
+                        <select id="img2imgResizeMode">
+                          <option value="1" selected>比率を保って中央クロップ</option>
+                          <option value="2">全体を収めて余白を追加</option>
+                          <option value="0">指定サイズへそのまま変形</option>
+                        </select>
+                      </label>
+                      <label class="fullWidthField autoSizeChoice">
+                        <input id="syncInitImageSize" type="checkbox" checked />
+                        元画像の縦横比に幅・高さを自動で合わせる
+                      </label>
+                    </div>
+                    <p class="hint">生成済み画像や履歴の「img2img」からも、その画像を直接セットできます。</p>
+                  </div>
+
+                  <section id="inpaintPanel" class="inpaintPanel hidden" aria-label="Inpaintマスク編集">
+                    <div class="inpaintHeading">
+                      <div>
+                        <strong>修正する範囲を塗る</strong>
+                        <span>白い部分だけReForgeが描き直します</span>
+                      </div>
+                      <span id="maskStatus" class="maskStatus">画像を選択してください</span>
+                    </div>
+                    <div id="inpaintCanvasStage" class="inpaintCanvasStage">
+                      <div id="inpaintMaskEmpty" class="inpaintMaskEmpty">参照画像を選ぶと、ここへマスクを描けます</div>
+                      <img id="inpaintBaseImage" class="hidden" alt="Inpaintの元画像" />
+                      <canvas id="inpaintMaskCanvas" class="hidden" aria-label="修正範囲を描くキャンバス"></canvas>
+                    </div>
+                    <div class="maskToolbar" role="toolbar" aria-label="マスク編集">
+                      <button id="maskPaintButton" class="secondary maskTool active" type="button" aria-pressed="true">塗る</button>
+                      <button id="maskEraseButton" class="secondary maskTool" type="button" aria-pressed="false">消す</button>
+                      <button id="maskUndoButton" class="ghost" type="button" disabled>↶ 戻す</button>
+                      <button id="maskRedoButton" class="ghost" type="button" disabled>↷ やり直し</button>
+                      <button id="maskClearButton" class="dangerButton" type="button" disabled>全消去</button>
+                    </div>
+                    <label>ブラシサイズ
+                      <div class="rangeField">
+                        <input id="maskBrushSize" type="range" min="4" max="160" step="2" value="48" />
+                        <output id="maskBrushSizeValue">48</output>
+                      </div>
+                    </label>
+                    <div class="settingsGrid inpaintSettings">
+                      <label>Denoising
+                        <div class="rangeField">
+                          <input id="inpaintDenoising" type="range" min="0.05" max="0.95" step="0.01" value="0.55" />
+                          <output id="inpaintDenoisingValue">0.55</output>
+                        </div>
+                      </label>
+                      <label>Mask blur
+                        <input id="maskBlur" type="number" min="0" max="64" step="1" value="4" />
+                      </label>
+                      <label>マスク内部
+                        <select id="inpaintFill">
+                          <option value="1" selected>元画像を使う</option>
+                          <option value="0">周囲で埋める</option>
+                          <option value="2">ノイズから描く</option>
+                          <option value="3">空から描く</option>
+                        </select>
+                      </label>
+                      <label>周辺余白
+                        <input id="inpaintFullResPadding" type="number" min="0" max="256" step="4" value="32" />
+                      </label>
+                      <label class="fullWidthField autoSizeChoice">
+                        <input id="inpaintFullRes" type="checkbox" checked />
+                        マスク部分だけを高精細に処理する
+                      </label>
+                    </div>
+                    <p class="hint">衣装なら服の少し外側まで、顔なら髪や輪郭を避けて塗ると崩れにくいです。</p>
+                  </section>
+                </section>
+
+                <div id="compositionLockStatus" class="compositionLockStatus hidden">
+                  <span>構図・Seed固定中</span>
+                  <button id="unlockCompositionButton" type="button">解除</button>
+                </div>
+
+                <details id="promptDetails" open>
+                  <summary>プロンプトを確認・編集</summary>
+                  <div class="promptModeTabs" role="tablist" aria-label="Positive Promptの入力方式">
+                    <button id="structuredPromptTabButton" class="promptModeTab active" type="button" role="tab" aria-selected="true" aria-controls="structuredPromptPanel">分割入力</button>
+                    <button id="rawPromptTabButton" class="promptModeTab" type="button" role="tab" aria-selected="false" aria-controls="rawPromptPanel">Raw Prompt</button>
+                    <button id="importAiPromptButton" class="secondary smallButton promptImportButton" type="button" title="GrokやChatGPTの回答を全文貼り付けて、各欄へ振り分けます">AI出力をインポート</button>
+                  </div>
+                  <p id="rawPromptNotice" class="promptNotice rawPromptNotice hidden" aria-live="polite">
+                    <span id="rawPromptNoticeText">Raw Promptを直接編集中です。生成にはこの内容を使います。</span>
+                    <button id="useStructuredPromptButton" class="ghost smallButton" type="button" title="Raw Promptの上書きをやめて、分割入力の結合結果へ戻します">分割入力へ戻す</button>
+                  </p>
+                  <p id="rawTriggerNotice" class="promptNotice rawTriggerNotice hidden" aria-live="polite">
+                    <span id="rawTriggerNoticeText">このLoRAにはトリガーワードがあります</span>
+                    <button id="appendTriggersToRawButton" class="secondary smallButton" type="button">Raw Promptへ追加</button>
+                  </p>
+
+                  <div id="structuredPromptPanel" class="structuredPromptPanel" role="tabpanel" aria-labelledby="structuredPromptTabButton">
+                    <p class="hint">用途ごとに入力すると、上から順に1本のPositive Promptへ結合されます。空欄は無視されます。</p>
+                    <details class="promptFieldBlock" data-prompt-field="character" open>
+                      <summary class="promptFieldSummary">
+                        <span class="promptFieldName">キャラクター</span>
+                        <span class="promptFieldState" data-state-for="promptCharacter">空</span>
+                        <span class="promptFieldPreview" data-preview-for="promptCharacter"></span>
+                      </summary>
+                      <textarea id="promptCharacter" rows="2" aria-label="キャラクター" placeholder="例: 1girl, solo, character_name"></textarea>
+                      <div id="triggerListCharacter" class="triggerList hidden"></div>
+                    </details>
+                    <details class="promptFieldBlock" data-prompt-field="appearance" open>
+                      <summary class="promptFieldSummary">
+                        <span class="promptFieldName">容姿・衣装</span>
+                        <span class="promptFieldState" data-state-for="promptAppearance">空</span>
+                        <span class="promptFieldPreview" data-preview-for="promptAppearance"></span>
+                      </summary>
+                      <textarea id="promptAppearance" rows="2" aria-label="容姿・衣装" placeholder="例: long hair, blue eyes, sailor uniform"></textarea>
+                      <div id="triggerListAppearance" class="triggerList hidden"></div>
+                    </details>
+                    <details class="promptFieldBlock" data-prompt-field="composition" open>
+                      <summary class="promptFieldSummary">
+                        <span class="promptFieldName">ポーズ・構図</span>
+                        <span class="promptFieldState" data-state-for="promptComposition">空</span>
+                        <span class="promptFieldPreview" data-preview-for="promptComposition"></span>
+                      </summary>
+                      <textarea id="promptComposition" rows="2" aria-label="ポーズ・構図" placeholder="例: upper body, looking at viewer"></textarea>
+                      <div id="triggerListComposition" class="triggerList hidden"></div>
+                    </details>
+                    <details class="promptFieldBlock" data-prompt-field="situation" open>
+                      <summary class="promptFieldSummary">
+                        <span class="promptFieldName">シチュエーション・背景</span>
+                        <span class="promptFieldState" data-state-for="promptSituation">空</span>
+                        <span class="promptFieldPreview" data-preview-for="promptSituation"></span>
+                      </summary>
+                      <textarea id="promptSituation" rows="2" aria-label="シチュエーション・背景" placeholder="例: classroom, afternoon sunlight"></textarea>
+                      <div id="triggerListSituation" class="triggerList hidden"></div>
+                    </details>
+                    <details class="promptFieldBlock" data-prompt-field="style" open>
+                      <summary class="promptFieldSummary">
+                        <span class="promptFieldName">画風・品質</span>
+                        <span class="promptFieldState" data-state-for="promptStyle">空</span>
+                        <span class="promptFieldPreview" data-preview-for="promptStyle"></span>
+                      </summary>
+                      <textarea id="promptStyle" rows="2" aria-label="画風・品質" placeholder="例: masterpiece, best quality, anime coloring"></textarea>
+                      <div id="triggerListStyle" class="triggerList hidden"></div>
+                    </details>
+                    <details class="promptFieldBlock" data-prompt-field="extra" open>
+                      <summary class="promptFieldSummary">
+                        <span class="promptFieldName">追加プロンプト</span>
+                        <span class="promptFieldState" data-state-for="promptExtra">空</span>
+                        <span class="promptFieldPreview" data-preview-for="promptExtra"></span>
+                      </summary>
+                      <textarea id="promptExtra" rows="2" aria-label="追加プロンプト" placeholder="例: (depth of field:1.1)"></textarea>
+                      <div id="triggerListExtra" class="triggerList hidden"></div>
+                    </details>
+                    <p id="structuredPromptPreview" class="hint structuredPromptPreview">結合結果: （未入力）</p>
+                  </div>
+
+                  <div id="rawPromptPanel" class="rawPromptPanel hidden" role="tabpanel" aria-labelledby="rawPromptTabButton">
+                    <label for="prompt">Prompt</label>
+                    <div class="clearableField">
+                      <textarea id="prompt" rows="6" placeholder="空なら日本語から自動作成"></textarea>
+                      <button id="clearPromptButton" class="fieldClearButton" type="button" aria-label="Promptを消す" title="Promptだけを消す">×</button>
+                    </div>
+                    <p class="hint">ここを直接編集すると、その内容が生成に使われます（分割入力より優先）。</p>
+                  </div>
+
+                  <details class="promptFieldBlock" data-prompt-field="negative" open>
+                    <summary class="promptFieldSummary">
+                      <span class="promptFieldName">Negative Prompt</span>
+                      <span class="promptFieldState" data-state-for="negativePrompt">空</span>
+                      <span class="promptFieldPreview" data-preview-for="negativePrompt"></span>
+                    </summary>
+                    <div class="clearableField">
+                      <textarea id="negativePrompt" rows="4" aria-label="Negative Prompt"></textarea>
+                      <button id="clearNegativePromptButton" class="fieldClearButton" type="button" aria-label="Negative promptを消す" title="Negative promptだけを消す">×</button>
+                    </div>
+                  </details>
+                  <div class="buttonRow compactButtons">
+                    <button id="promptButton" class="secondary" type="button" title="日本語の説明からPromptを自動作成します">プロンプトだけ作る</button>
+                    <button id="clearPromptsButton" class="ghost" type="button" title="PromptとNegative promptをまとめて消す">Clear Prompts</button>
+                  </div>
+                </details>
+
+                <details id="loraUseDetails" class="genSection" open>
+                  <summary>LoRA <span id="loraUseCount" class="summaryCount">0件</span></summary>
+                  <div class="buttonRow compactButtons">
+                    <button id="addLoraButton" class="secondary" type="button">LoRA追加</button>
+                    <button id="addFavoriteLoraButton" class="secondary" type="button">お気に入りから追加</button>
+                    <button id="addCivitaiLoraButton" class="ghost" type="button">Civitai URLから追加</button>
+                  </div>
+                  <div id="usedLoraList" class="usedLoraList"></div>
+                  <div id="loraSyncNotice" class="loraSyncNotice hidden" aria-live="polite"></div>
+                  <p class="hint">トリガーワードのWeightは、対応する構造化プロンプト項目の直下で調整します。所有LoRAの分類・初期値は「設定」画面で管理します。</p>
+                </details>
+
+                <details id="generationSettingsDetails" class="genSection" open>
+                  <summary>生成設定 <span id="checkpointFamilyBadge" class="summaryCount">確認中</span></summary>
+                  <div class="settingsRow">
+                    <label for="checkpointSelect">Checkpoint</label>
+                    <div class="checkpointToolbar">
+                      <select id="checkpointSelect" disabled>
+                        <option value="">取得中…</option>
+                      </select>
+                      <button id="refreshCheckpointsButton" class="secondary" type="button" title="Checkpoint一覧を再読み込み">再読込</button>
+                    </div>
+                  </div>
+                  <p id="checkpointStatus" class="hint" aria-live="polite">Checkpointを取得中…</p>
+
+                  <div class="settingsRow">
+                    <label>Sampler / Scheduler プリセット</label>
+                    <div id="samplerPresets" class="samplerPresets"></div>
+                  </div>
+                  <div class="settingsGrid">
+                    <label>Sampler
+                      <button id="samplerPickerButton" class="optionPickerButton" type="button" aria-haspopup="dialog">
+                        <span id="samplerPickerValue">Euler a</span><span aria-hidden="true">▼</span>
+                      </button>
+                      <input id="samplerName" type="hidden" />
+                    </label>
+                    <label>Scheduler
+                      <button id="schedulerPickerButton" class="optionPickerButton" type="button" aria-haspopup="dialog">
+                        <span id="schedulerPickerValue">Automatic</span><span aria-hidden="true">▼</span>
+                      </button>
+                      <input id="scheduler" type="hidden" />
+                    </label>
+                    <label>Steps<input id="steps" type="number" /></label>
+                    <label>CFG<input id="cfgScale" type="number" step="0.5" /></label>
+                    <label>Seed
+                      <div class="clearableField clearableInput">
+                        <input id="seed" type="number" value="-1" />
+                        <button id="clearSeedButton" class="fieldClearButton" type="button" aria-label="Seedをランダムへ戻す" title="Seedだけをランダム（-1）へ戻す">×</button>
+                      </div>
+                    </label>
+                    <label>幅<input id="width" type="number" step="64" /></label>
+                    <label>高さ<input id="height" type="number" step="64" /></label>
+                    <label>生成枚数
+                      <select id="candidateCount" aria-label="生成する候補枚数">
+                        <option value="1">1枚・最速</option>
+                        <option value="2">2枚</option>
+                        <option value="3">3枚</option>
+                        <option value="4">4枚</option>
+                      </select>
+                    </label>
+                  </div>
+
+                  <details id="advancedSettingsDetails" class="advancedSettings">
+                    <summary>詳細設定</summary>
+                    <div class="settingsGrid">
+                      <label>Noise schedule for sampling
+                        <select id="noiseSchedule">
+                          <option value="Automatic">Automatic</option>
+                          <option value="Zero Terminal SNR">Zero Terminal SNR</option>
+                        </select>
+                      </label>
+                      <label>Hires 倍率<input id="hiresScale" type="number" min="1" max="2" step="0.1" /></label>
+                      <label>Hires Steps<input id="hiresSteps" type="number" min="1" max="50" /></label>
+                      <label>Hires Denoising<input id="hiresDenoising" type="number" min="0.1" max="0.8" step="0.05" /></label>
+                      <label class="fullWidthField">Hires Upscaler<input id="hiresUpscaler" type="text" /></label>
+                    </div>
+                    <label class="fullWidthField autoSizeChoice">
+                      <input id="autoRetryOnFailure" type="checkbox" />
+                      VRAM不足・タイムアウト時に、安全設定で1回だけ自動再試行する
+                    </label>
+                    <p class="hint">V-Pred系Checkpoint（NoobAI V-Pred、Obsession vPredなど）は「Zero Terminal SNR」を選びます。Checkpoint切替時の推奨設定自動反映でも切り替わります。VAE・Clip skip・ADetailer・ControlNetはReForge側の設定を使用します。</p>
+                  </details>
+                </details>
+
+                <details>
+                  <summary>プロンプト部品・好み補助</summary>
+                  <p class="hint">画風・構図・光・雰囲気を部品として追加します。キャラや衣装とは独立して再利用できます。</p>
+                  <div class="settingsGrid promptPartGrid">
+                    <label>画風
+                      <select id="stylePreset">
+                        <option value="">指定なし</option>
+                        <option value="clean lineart, soft cel shading, polished anime illustration">透明感アニメ</option>
+                        <option value="painterly anime style, soft brushwork, delicate colors">淡い厚塗り</option>
+                        <option value="crisp lineart, vivid colors, game key visual">ゲーム公式絵風</option>
+                      </select>
+                    </label>
+                    <label>構図
+                      <select id="compositionPreset">
+                        <option value="">指定なし</option>
+                        <option value="dynamic angle, dutch angle, foreshortening">動きのある構図</option>
+                        <option value="cowboy shot, centered composition, eye level">安定した腰上</option>
+                        <option value="close-up, upper body, intimate framing">近距離アップ</option>
+                        <option value="full body, low angle, strong perspective">全身ローアングル</option>
+                      </select>
+                    </label>
+                    <label>光
+                      <select id="lightingPreset">
+                        <option value="">指定なし</option>
+                        <option value="soft diffused lighting, gentle rim light">柔らかい光</option>
+                        <option value="cinematic lighting, strong rim light, deep shadows">映画的な光</option>
+                        <option value="bright daylight, airy atmosphere">明るい昼光</option>
+                        <option value="neon lighting, colorful reflections, night">夜のネオン</option>
+                      </select>
+                    </label>
+                    <label>雰囲気
+                      <select id="moodPreset">
+                        <option value="">指定なし</option>
+                        <option value="cute, cheerful, playful expression">明るく可愛い</option>
+                        <option value="calm, elegant, subtle expression">静かで上品</option>
+                        <option value="mysterious, alluring, atmospheric">妖しく幻想的</option>
+                      </select>
+                    </label>
+                    <label class="fullWidthField">衣装上書きタグ
+                      <input id="outfitOverride" type="text" placeholder="例: black business suit, pencil skirt, pantyhose" />
+                    </label>
+                  </div>
+                  <div class="buttonRow compactButtons">
+                    <button id="applyPreferenceButton" class="secondary" type="button">👍の傾向を追加</button>
+                    <button id="clearPromptPartsButton" class="ghost" type="button">部品をクリア</button>
+                  </div>
+                  <p id="promptPartsSummary" class="hint">追加部品なし</p>
+                </details>
+
+                <div id="generateActions" class="generateActions">
+                  <div id="generateProgress" class="generateProgress hidden">
+                    <span id="generateProgressText" aria-live="polite">生成中…</span>
+                    <button id="cancelGenerateButton" class="dangerButton smallButton" type="button">中止</button>
+                  </div>
+                  <div class="generateActionButtons">
+                    <button id="showCombinedPromptButton" class="ghost" type="button">結合結果を確認</button>
+                    <button id="sendToCompareButton" class="secondary" type="button">比較実験へ送る</button>
+                    <button id="generateButton" class="primary" type="button">画像を生成</button>
+                  </div>
+                </div>
               </div>
-              <p class="hint">衣装なら服の少し外側まで、顔なら髪や輪郭を避けて塗ると崩れにくいです。</p>
-            </section>
+
+              <aside class="panel result generateResult" aria-label="最新の生成結果">
+                <div id="resultTab" class="tabPanel" role="tabpanel" aria-label="生成結果">
+                <div id="emptyState" class="emptyState">
+                  <div class="spark">✦</div>
+                  <p>生成した画像がここに表示されます</p>
+                </div>
+                <div id="loading" class="loading hidden">
+                  <div class="spinner"></div>
+                  <p id="loadingText">準備中…</p>
+                </div>
+                <div id="resultContent" class="hidden">
+                  <section id="finalResult" class="finalResult hidden">
+                    <div class="sectionHeading">
+                      <div>
+                        <p id="finalEyebrow" class="eyebrow">HIRES.FIX COMPLETE</p>
+                        <h2 id="finalTitle">高解像度版</h2>
+                      </div>
+                      <div class="resultActions">
+                        <button id="favoriteFinalButton" class="iconButton" type="button" aria-label="お気に入り">👍</button>
+                        <span id="finalDiscordStatus" class="discordStatus hidden" aria-live="polite"></span>
+                        <button id="sendFinalToImg2ImgButton" class="secondary smallButton" type="button">img2imgへ</button>
+                        <button id="sendFinalToInpaintButton" class="secondary smallButton" type="button">部分修正</button>
+                        <button id="reuseFinalButton" class="secondary smallButton" type="button">この構図で差し替え</button>
+                        <a id="downloadLink" class="downloadButton" download>画像を保存</a>
+                      </div>
+                    </div>
+                    <img id="resultImage" alt="高解像度化した生成画像" />
+                    <div class="resultMeta">
+                      <span id="seedText"></span>
+                      <span id="resolutionText"></span>
+                    </div>
+                  </section>
+
+                  <section id="candidateSection" class="candidateSection">
+                    <div class="sectionHeading">
+                      <div>
+                        <p class="eyebrow">CANDIDATES</p>
+                        <h2>仕上げる1枚を選択</h2>
+                      </div>
+                      <span id="candidateSummary" class="muted"></span>
+                    </div>
+                    <div id="candidateGrid" class="candidateGrid"></div>
+                    <div class="finishBar">
+                      <span id="selectedSeedText">画像を選択してください</span>
+                      <div>
+                        <button id="lockCompositionButton" class="secondary" disabled>この構図で差し替え</button>
+                        <button id="finishButton" class="primary" disabled>選択画像をHires.fix</button>
+                      </div>
+                    </div>
+                  </section>
+                  <p id="explanation"></p>
+                </div>
+                <p id="error" class="error hidden"></p>
+                </div>
+              </aside>
+            </div>
           </section>
 
-          <div class="quickCount">
-            <label for="candidateCount">候補枚数</label>
-            <select id="candidateCount" aria-label="生成する候補枚数">
-              <option value="1">1枚・最速</option>
-              <option value="2">2枚</option>
-              <option value="3">3枚</option>
-              <option value="4">4枚</option>
-            </select>
-            <span>前回の選択を記憶します</span>
-          </div>
-
-          <div class="buttonRow primaryActions">
-            <button id="promptButton" class="secondary">プロンプトだけ作る</button>
-            <button id="generateButton" class="primary">1枚の候補を生成</button>
-          </div>
-
-          <div id="compositionLockStatus" class="compositionLockStatus hidden">
-            <span>構図・Seed固定中</span>
-            <button id="unlockCompositionButton" type="button">解除</button>
-          </div>
-
-          <details id="promptDetails" open>
-            <summary>プロンプトを確認・編集</summary>
-            <div class="promptModeTabs" role="tablist" aria-label="Positive Promptの入力方式">
-              <button id="structuredPromptTabButton" class="promptModeTab active" type="button" role="tab" aria-selected="true" aria-controls="structuredPromptPanel">分割入力</button>
-              <button id="rawPromptTabButton" class="promptModeTab" type="button" role="tab" aria-selected="false" aria-controls="rawPromptPanel">Raw Prompt</button>
-              <button id="importAiPromptButton" class="secondary smallButton promptImportButton" type="button" title="GrokやChatGPTの回答を全文貼り付けて、各欄へ振り分けます">AI出力をインポート</button>
-            </div>
-            <p id="rawPromptNotice" class="promptNotice rawPromptNotice hidden" aria-live="polite">
-              <span id="rawPromptNoticeText">Raw Promptを直接編集中です。生成にはこの内容を使います。</span>
-              <button id="useStructuredPromptButton" class="ghost smallButton" type="button" title="Raw Promptの上書きをやめて、分割入力の結合結果へ戻します">分割入力へ戻す</button>
-            </p>
-            <p id="rawTriggerNotice" class="promptNotice rawTriggerNotice hidden" aria-live="polite">
-              <span id="rawTriggerNoticeText">このLoRAにはトリガーワードがあります</span>
-              <button id="appendTriggersToRawButton" class="secondary smallButton" type="button">Raw Promptへ追加</button>
-            </p>
-
-            <div id="structuredPromptPanel" class="structuredPromptPanel" role="tabpanel" aria-labelledby="structuredPromptTabButton">
-              <p class="hint">用途ごとに入力すると、上から順に1本のPositive Promptへ結合されます。空欄は無視されます。</p>
-              <details class="promptFieldBlock" data-prompt-field="character" open>
-                <summary class="promptFieldSummary">
-                  <span class="promptFieldName">キャラクター</span>
-                  <span class="promptFieldPreview" data-preview-for="promptCharacter"></span>
-                </summary>
-                <textarea id="promptCharacter" rows="2" aria-label="キャラクター" placeholder="例: 1girl, solo, character_name"></textarea>
-                <div id="triggerListCharacter" class="triggerList hidden"></div>
-              </details>
-              <details class="promptFieldBlock" data-prompt-field="appearance" open>
-                <summary class="promptFieldSummary">
-                  <span class="promptFieldName">容姿・衣装</span>
-                  <span class="promptFieldPreview" data-preview-for="promptAppearance"></span>
-                </summary>
-                <textarea id="promptAppearance" rows="2" aria-label="容姿・衣装" placeholder="例: long hair, blue eyes, sailor uniform"></textarea>
-                <div id="triggerListAppearance" class="triggerList hidden"></div>
-              </details>
-              <details class="promptFieldBlock" data-prompt-field="composition" open>
-                <summary class="promptFieldSummary">
-                  <span class="promptFieldName">ポーズ・構図</span>
-                  <span class="promptFieldPreview" data-preview-for="promptComposition"></span>
-                </summary>
-                <textarea id="promptComposition" rows="2" aria-label="ポーズ・構図" placeholder="例: upper body, looking at viewer"></textarea>
-                <div id="triggerListComposition" class="triggerList hidden"></div>
-              </details>
-              <details class="promptFieldBlock" data-prompt-field="situation" open>
-                <summary class="promptFieldSummary">
-                  <span class="promptFieldName">シチュエーション・背景</span>
-                  <span class="promptFieldPreview" data-preview-for="promptSituation"></span>
-                </summary>
-                <textarea id="promptSituation" rows="2" aria-label="シチュエーション・背景" placeholder="例: classroom, afternoon sunlight"></textarea>
-                <div id="triggerListSituation" class="triggerList hidden"></div>
-              </details>
-              <details class="promptFieldBlock" data-prompt-field="style" open>
-                <summary class="promptFieldSummary">
-                  <span class="promptFieldName">画風・品質</span>
-                  <span class="promptFieldPreview" data-preview-for="promptStyle"></span>
-                </summary>
-                <textarea id="promptStyle" rows="2" aria-label="画風・品質" placeholder="例: masterpiece, best quality, anime coloring"></textarea>
-                <div id="triggerListStyle" class="triggerList hidden"></div>
-              </details>
-              <details class="promptFieldBlock" data-prompt-field="extra" open>
-                <summary class="promptFieldSummary">
-                  <span class="promptFieldName">追加プロンプト</span>
-                  <span class="promptFieldPreview" data-preview-for="promptExtra"></span>
-                </summary>
-                <textarea id="promptExtra" rows="2" aria-label="追加プロンプト" placeholder="例: (depth of field:1.1)"></textarea>
-                <div id="triggerListExtra" class="triggerList hidden"></div>
-              </details>
-              <p id="structuredPromptPreview" class="hint structuredPromptPreview">結合結果: （未入力）</p>
-            </div>
-
-            <div id="rawPromptPanel" class="rawPromptPanel hidden" role="tabpanel" aria-labelledby="rawPromptTabButton">
-              <label for="prompt">Prompt</label>
-              <div class="clearableField">
-                <textarea id="prompt" rows="6" placeholder="空なら日本語から自動作成"></textarea>
-                <button id="clearPromptButton" class="fieldClearButton" type="button" aria-label="Promptを消す" title="Promptだけを消す">×</button>
-              </div>
-              <p class="hint">ここを直接編集すると、その内容が生成に使われます（分割入力より優先）。</p>
-            </div>
-
-            <label for="negativePrompt">Negative prompt</label>
-            <div class="clearableField">
-              <textarea id="negativePrompt" rows="4"></textarea>
-              <button id="clearNegativePromptButton" class="fieldClearButton" type="button" aria-label="Negative promptを消す" title="Negative promptだけを消す">×</button>
-            </div>
-            <div class="buttonRow compactButtons">
-              <button id="clearPromptsButton" class="ghost" type="button" title="PromptとNegative promptをまとめて消す">Clear Prompts</button>
-            </div>
-          </details>
-
-          <details>
-            <summary>プロンプト部品・好み補助</summary>
-            <p class="hint">画風・構図・光・雰囲気を部品として追加します。キャラや衣装とは独立して再利用できます。</p>
-            <div class="settingsGrid promptPartGrid">
-              <label>画風
-                <select id="stylePreset">
-                  <option value="">指定なし</option>
-                  <option value="clean lineart, soft cel shading, polished anime illustration">透明感アニメ</option>
-                  <option value="painterly anime style, soft brushwork, delicate colors">淡い厚塗り</option>
-                  <option value="crisp lineart, vivid colors, game key visual">ゲーム公式絵風</option>
-                </select>
-              </label>
-              <label>構図
-                <select id="compositionPreset">
-                  <option value="">指定なし</option>
-                  <option value="dynamic angle, dutch angle, foreshortening">動きのある構図</option>
-                  <option value="cowboy shot, centered composition, eye level">安定した腰上</option>
-                  <option value="close-up, upper body, intimate framing">近距離アップ</option>
-                  <option value="full body, low angle, strong perspective">全身ローアングル</option>
-                </select>
-              </label>
-              <label>光
-                <select id="lightingPreset">
-                  <option value="">指定なし</option>
-                  <option value="soft diffused lighting, gentle rim light">柔らかい光</option>
-                  <option value="cinematic lighting, strong rim light, deep shadows">映画的な光</option>
-                  <option value="bright daylight, airy atmosphere">明るい昼光</option>
-                  <option value="neon lighting, colorful reflections, night">夜のネオン</option>
-                </select>
-              </label>
-              <label>雰囲気
-                <select id="moodPreset">
-                  <option value="">指定なし</option>
-                  <option value="cute, cheerful, playful expression">明るく可愛い</option>
-                  <option value="calm, elegant, subtle expression">静かで上品</option>
-                  <option value="mysterious, alluring, atmospheric">妖しく幻想的</option>
-                </select>
-              </label>
-              <label class="fullWidthField">衣装上書きタグ
-                <input id="outfitOverride" type="text" placeholder="例: black business suit, pencil skirt, pantyhose" />
-              </label>
-            </div>
-            <div class="buttonRow compactButtons">
-              <button id="applyPreferenceButton" class="secondary" type="button">👍の傾向を追加</button>
-              <button id="clearPromptPartsButton" class="ghost" type="button">部品をクリア</button>
-            </div>
-            <p id="promptPartsSummary" class="hint">追加部品なし</p>
-          </details>
-
-          <details id="checkpointDetails" open>
-            <summary>Checkpoint <span id="checkpointFamilyBadge" class="summaryCount">確認中</span></summary>
-            <p class="hint">ReForgeのCheckpointを切り替えます。推奨設定の自動適用は幅・高さ・Steps・CFG・Sampler・Schedulerだけを変更します。</p>
-            <div class="checkpointToolbar">
-              <label>使用するCheckpoint
-                <select id="checkpointSelect" disabled>
-                  <option value="">取得中…</option>
-                </select>
-              </label>
-              <button id="refreshCheckpointsButton" class="secondary" type="button">再読込</button>
-            </div>
-            <div class="settingsGrid checkpointSettings">
-              <label>設定プロフィール
-                <select id="checkpointProfileSelect"></select>
-              </label>
-              <label class="checkpointAutoApply">
-                <input id="checkpointAutoApply" type="checkbox" checked />
-                切替時に推奨設定を適用
-              </label>
-            </div>
-            <div id="checkpointProfileSummary" class="checkpointProfileSummary"></div>
-            <div class="settingsGrid checkpointSettings">
-              <label>LoRAセット
-                <select id="checkpointSetSelect"></select>
-              </label>
-              <label class="checkpointAutoApply">
-                <input id="checkpointSetAutoApply" type="checkbox" />
-                Checkpoint切替時にこのセットを自動適用
-              </label>
-            </div>
-            <div class="buttonRow compactButtons">
-              <button id="saveCheckpointSetButton" class="secondary" type="button">現在の設定を保存</button>
-              <button id="applyCheckpointSetButton" class="secondary" type="button">読込</button>
-              <button id="renameCheckpointSetButton" class="ghost" type="button">名前変更</button>
-              <button id="duplicateCheckpointSetButton" class="ghost" type="button">複製</button>
-              <button id="deleteCheckpointSetButton" class="historyDelete" type="button">削除</button>
-            </div>
-            <p id="checkpointSetStatus" class="hint" aria-live="polite"></p>
-            <p id="checkpointStatus" class="hint" aria-live="polite">Checkpointを取得中…</p>
-          </details>
-
-          <details>
-            <summary>LoRA <span id="loraSelectedCount" class="summaryCount">0個選択</span></summary>
-            <p class="hint">ReForgeのLoRAフォルダを読み取り、キャラクターと画風・体型・構図へ自動分類します。キャラLoRAは「衣装自由」が初期値です。</p>
-            <div id="loraCategories" class="loraCategories" role="group" aria-label="LoRAの分類">
-              <button class="loraCategory active" type="button" data-lora-category="character" aria-pressed="true">キャラクター <span>0</span></button>
-              <button class="loraCategory" type="button" data-lora-category="direction" aria-pressed="false">画風・体型・構図 <span>0</span></button>
-              <button class="loraCategory" type="button" data-lora-category="selected" aria-pressed="false">選択中 <span>0</span></button>
-              <button class="loraCategory" type="button" data-lora-category="all" aria-pressed="false">すべて <span>0</span></button>
-            </div>
-            <div class="loraToolbar">
-              <input id="loraSearch" type="search" placeholder="LoRAを検索" aria-label="LoRAを検索" />
-              <select id="loraCompatibilityFilter" aria-label="現在のCheckpointとの互換性で絞り込み">
-                <option value="all">すべて</option>
-                <option value="compatible">対応のみ</option>
-                <option value="compatible-caution">対応・近縁</option>
-                <option value="hide-incompatible">非対応を隠す</option>
-                <option value="has-preview">プレビューありのみ</option>
-              </select>
-              <button id="refreshLorasButton" class="secondary" type="button">再読込</button>
-            </div>
-            <p id="loraStatus" class="hint" aria-live="polite">LoRAを取得中…</p>
-            <div class="loraWorkspace">
-              <div id="loraList" class="loraList"></div>
-              <aside id="loraPreview" class="loraPreview" aria-live="polite" aria-label="LoRAプレビュー"></aside>
-            </div>
-            <div id="selectedLoraSummary" class="selectedLoraSummary">LoRAなし</div>
-            <div id="loraSyncNotice" class="loraSyncNotice hidden" aria-live="polite"></div>
-          </details>
-
-          <details id="civitaiDetails">
-            <summary>Civitai URLからLoRAを追加</summary>
-            <p class="hint">モデルページURLを貼ると、対応バージョン・Trigger Words・保存先を確認してReForgeへ配置します。</p>
-            <div class="loraRootBar">
-              <span class="loraRootLabel">LoRAルート:</span>
-              <span id="loraRootPath" class="loraRootPath">確認中…</span>
-              <span id="loraRootBadge" class="loraRootBadge">確認中</span>
-              <button id="openLoraRootButton" class="ghost smallButton" type="button">LoRAフォルダを開く</button>
-            </div>
-            <label>Civitaiモデルページ
-              <div class="clearableField clearableInput">
-                <input id="civitaiUrl" type="url" placeholder="https://civitai.com/models/..." />
-                <button id="clearCivitaiUrlButton" class="fieldClearButton" type="button" aria-label="Civitai URLを消す" title="入力中のURLだけを消す">×</button>
-              </div>
-            </label>
-            <div class="settingsGrid">
-              <label>分類
-                <select id="civitaiCategory">
-                  <option value="character" selected>キャラクター</option>
-                  <option value="style">画風</option>
-                  <option value="body">体型</option>
-                  <option value="pose">構図・ポーズ</option>
-                </select>
-              </label>
-              <label>保存先フォルダ
-                <div class="folderPicker">
-                  <select id="civitaiFolder" aria-label="保存先フォルダ"></select>
-                  <button id="civitaiFolderFavorite" class="ghost smallButton" type="button" aria-label="この保存先をお気に入りに登録">☆</button>
-                </div>
-              </label>
-              <label>APIキー（必要な場合だけ）
-                <input id="civitaiToken" type="password" autocomplete="off" placeholder="非公開・制限付きモデル用" />
-              </label>
-            </div>
-            <label id="civitaiNewFolderRow" class="hidden">新規フォルダ名
-              <input id="civitaiNewFolder" type="text" placeholder="Anime/Character" />
-            </label>
-            <p id="civitaiFolderPath" class="hint"></p>
-            <div class="buttonRow">
-              <button id="inspectCivitaiButton" class="secondary" type="button">内容を確認</button>
-              <button id="installCivitaiButton" class="primary" type="button" disabled>ダウンロードして登録</button>
-              <button id="refreshCivitaiRegistrationsButton" class="ghost" type="button">登録済みを一括再解析</button>
-            </div>
-            <div id="civitaiPreview" class="integrationPreview hidden"></div>
-            <p id="civitaiStatus" class="hint" aria-live="polite"></p>
-          </details>
-
-          <details>
-            <summary>生成設定</summary>
-            <div class="settingsGrid">
-              <label>幅<input id="width" type="number" step="64" /></label>
-              <label>高さ<input id="height" type="number" step="64" /></label>
-              <label>Steps<input id="steps" type="number" /></label>
-              <label>CFG<input id="cfgScale" type="number" step="0.5" /></label>
-              <label>Seed
-                <div class="clearableField clearableInput">
-                  <input id="seed" type="number" value="-1" />
-                  <button id="clearSeedButton" class="fieldClearButton" type="button" aria-label="Seedをランダムへ戻す" title="Seedだけをランダム（-1）へ戻す">×</button>
-                </div>
-              </label>
-              <label>Sampler<input id="samplerName" type="text" /></label>
-              <label>Scheduler<input id="scheduler" type="text" /></label>
-              <label>Noise schedule for sampling
-                <select id="noiseSchedule">
-                  <option value="Automatic">Automatic</option>
-                  <option value="Zero Terminal SNR">Zero Terminal SNR</option>
-                </select>
-              </label>
-            </div>
-            <label class="fullWidthField autoSizeChoice">
-              <input id="autoRetryOnFailure" type="checkbox" />
-              VRAM不足・タイムアウト時に、安全設定で1回だけ自動再試行する
-            </label>
-            <p class="hint">V-Pred系Checkpoint（NoobAI V-Pred、Obsession vPredなど）は「Zero Terminal SNR」を選びます。Checkpoint切替時の推奨設定自動反映でも切り替わります。オフの場合は、失敗時に下げる設定を確認してから再試行します。</p>
-          </details>
-
-          <details id="experimentDetails">
-            <summary>パラメータ比較 <span id="experimentBadge" class="summaryCount">未実行</span></summary>
-            <p class="hint">Prompt・Checkpoint・LoRAはそのままに、1項目だけ値を変えて1枚ずつ順番に生成し、ひとつの実験としてまとめます。</p>
-            <div class="settingsGrid">
-              <label>比較対象
-                <select id="experimentParameter"></select>
-              </label>
-              <label id="experimentTargetRow">対象LoRA
-                <select id="experimentTarget"></select>
-              </label>
-              <label class="fullWidthField">試す値（カンマ区切り）
-                <input id="experimentValues" type="text" placeholder="0.5, 0.6, 0.7, 0.8" />
-              </label>
-              <label class="fullWidthField autoSizeChoice">
-                <input id="experimentFixSeed" type="checkbox" checked />
-                Seedを固定する（-1のときは実行直前にランダム値へ確定します）
-              </label>
-            </div>
-            <div class="buttonRow compactButtons">
-              <button id="runExperimentButton" class="primary" type="button">比較生成</button>
-              <button id="cancelExperimentButton" class="dangerButton" type="button" disabled>中断</button>
-              <button id="openExperimentsButton" class="ghost" type="button">実験一覧</button>
-            </div>
-            <p id="experimentStatus" class="hint" aria-live="polite"></p>
-            <div id="experimentProgress" class="experimentProgress hidden"></div>
-          </details>
-
-          <details>
-            <summary>Hires.fix設定</summary>
-            <p class="hint">新規生成はHires.fix、img2img・部分修正は選択候補を参照画像にして高解像度化します。Upscalerは新規生成だけで使用します。</p>
-            <div class="settingsGrid">
-              <label>倍率<input id="hiresScale" type="number" min="1" max="2" step="0.1" /></label>
-              <label>Hires Steps<input id="hiresSteps" type="number" min="1" max="50" /></label>
-              <label>Denoising<input id="hiresDenoising" type="number" min="0.1" max="0.8" step="0.05" /></label>
-              <label>Upscaler<input id="hiresUpscaler" type="text" /></label>
-            </div>
-          </details>
-
-          <details id="promptTemplateDetails">
-            <summary>Grok向け指示テンプレート</summary>
-            <p class="hint">毎回Grokへ渡す指示文と環境情報をまとめて保存し、ワンクリックで全文コピーします。回答は「AI出力をインポート」でそのまま取り込めます。</p>
-            <label>指示テンプレート
-              <textarea id="grokInstructions" rows="8" placeholder="Grokへ渡す固定の指示文"></textarea>
-            </label>
-            <label>MY_SD_SETUP.md
-              <textarea id="grokSetupDoc" rows="6" placeholder="GPU・Checkpoint・既定設定など、環境の説明"></textarea>
-            </label>
-            <label>lora_list.csv
-              <textarea id="grokLoraCsv" rows="6" placeholder="name,displayName,category,baseModel,recommendedWeight,triggerWords"></textarea>
-            </label>
-            <div class="buttonRow compactButtons">
-              <button id="copyGrokTemplateButton" class="primary" type="button" title="指示文・MY_SD_SETUP.md・lora_list.csvをまとめてコピー">全文コピー</button>
-              <button id="saveGrokTemplateButton" class="secondary" type="button">保存</button>
-              <button id="generateLoraCsvButton" class="secondary" type="button" title="導入済みLoRAからlora_list.csvを作り直します">LoRA一覧から更新</button>
-              <button id="resetGrokInstructionsButton" class="ghost" type="button">既定の指示文に戻す</button>
-            </div>
-            <p id="grokTemplateStatus" class="hint" aria-live="polite">確認中…</p>
-          </details>
-
-          <details id="discordDetails">
-            <summary>Discord連携（Favorite自動送信）</summary>
-            <p class="hint">👍を付けた画像を、そのままDiscordへ送信します。Webhook URLはサーバー側にだけ保存され、画面へは戻しません（環境変数<code>LOCAL_IMAGE_CHAT_DISCORD_WEBHOOK</code>や<code>config.local.json</code>でも設定できます）。</p>
-            <label class="checkboxRow">
-              <input id="discordAutoSend" type="checkbox" />
-              Favorite時にDiscordへ自動送信する
-            </label>
-            <label>Webhook URL
-              <input id="discordWebhook" type="password" autocomplete="off" placeholder="https://discord.com/api/webhooks/…" />
-            </label>
-            <label class="checkboxRow">
-              <input id="discordIncludePrompt" type="checkbox" />
-              Positive Promptを投稿へ含める
-            </label>
-            <label class="checkboxRow">
-              <input id="discordIncludeMetadata" type="checkbox" />
-              Model・Seed・LoRAを投稿へ含める
-            </label>
-            <div class="buttonRow compactButtons">
-              <button id="saveDiscordSettingsButton" class="secondary" type="button">設定を保存</button>
-              <button id="clearDiscordWebhookButton" class="ghost" type="button">送信先を削除</button>
-            </div>
-            <p id="discordSettingsStatus" class="hint" aria-live="polite">確認中…</p>
-          </details>
-
-          <details id="updateDetails">
-            <summary>アプリのアップデート</summary>
-            <p class="hint">GitHubの最新版を確認し、履歴・画像・config.jsonを残したまま更新します。非公開リポジトリではContents読み取り権限のPATが必要です。</p>
-            <label>GitHub Token（必要な場合だけ）
-              <input id="githubToken" type="password" autocomplete="off" placeholder="github_pat_..." />
-            </label>
-            <div class="buttonRow">
-              <button id="checkUpdateButton" class="secondary" type="button">最新版を確認</button>
-              <button id="applyUpdateButton" class="primary" type="button" disabled>更新を適用</button>
-            </div>
-            <p id="updateStatus" class="hint" aria-live="polite"></p>
-          </details>
-        </section>
-
-        <section class="panel result">
-          <div class="resultTabs" role="tablist" aria-label="右パネル切替">
-            <button id="resultTabButton" class="resultTab active" type="button" role="tab" aria-selected="true">生成結果</button>
-            <button id="galleryTabButton" class="resultTab" type="button" role="tab" aria-selected="false">ギャラリー</button>
-          </div>
-
-          <div id="resultTab" class="tabPanel" role="tabpanel" aria-label="生成結果">
-          <div id="emptyState" class="emptyState">
-            <div class="spark">✦</div>
-            <p>生成した画像がここに表示されます</p>
-          </div>
-          <div id="loading" class="loading hidden">
-            <div class="spinner"></div>
-            <p id="loadingText">準備中…</p>
-          </div>
-          <div id="resultContent" class="hidden">
-            <section id="finalResult" class="finalResult hidden">
+          <section id="viewGallery" class="appView hidden" data-view="gallery" aria-label="ギャラリー">
+            <div class="panel viewPanel">
               <div class="sectionHeading">
                 <div>
-                  <p id="finalEyebrow" class="eyebrow">HIRES.FIX COMPLETE</p>
-                  <h2 id="finalTitle">高解像度版</h2>
+                  <p class="eyebrow">RECIPE LIBRARY</p>
+                  <h2>ギャラリー</h2>
                 </div>
-                <div class="resultActions">
-                  <button id="favoriteFinalButton" class="iconButton" type="button" aria-label="お気に入り">👍</button>
-                  <span id="finalDiscordStatus" class="discordStatus hidden" aria-live="polite"></span>
-                  <button id="sendFinalToImg2ImgButton" class="secondary smallButton" type="button">img2imgへ</button>
-                  <button id="sendFinalToInpaintButton" class="secondary smallButton" type="button">部分修正</button>
-                  <button id="reuseFinalButton" class="secondary smallButton" type="button">この構図で差し替え</button>
-                  <a id="downloadLink" class="downloadButton" download>画像を保存</a>
+                <div class="historyActions">
+                  <button id="compareSelectionButton" class="secondary smallButton" type="button" disabled>比較する</button>
+                  <button id="refreshHistoryButton" class="secondary" type="button">再読込</button>
                 </div>
               </div>
-              <img id="resultImage" alt="高解像度化した生成画像" />
-              <div class="resultMeta">
-                <span id="seedText"></span>
-                <span id="resolutionText"></span>
+              <div class="galleryFilters">
+                <div id="galleryKindFilter" class="galleryKindFilter" role="group" aria-label="種類で絞り込み">
+                  <button class="galleryKind active" type="button" data-gallery-kind="all" aria-pressed="true">すべて</button>
+                  <button class="galleryKind" type="button" data-gallery-kind="favorite" aria-pressed="false">Favorite</button>
+                  <button class="galleryKind" type="button" data-gallery-kind="normal" aria-pressed="false">通常生成</button>
+                  <button class="galleryKind" type="button" data-gallery-kind="experiment" aria-pressed="false">比較実験</button>
+                </div>
+                <div class="galleryFilterGrid">
+                  <label>Checkpoint<select id="galleryCheckpoint"><option value="">すべて</option></select></label>
+                  <label>LoRA<select id="galleryLora"><option value="">すべて</option></select></label>
+                  <label>生成日時
+                    <select id="galleryPeriod">
+                      <option value="">すべて</option>
+                      <option value="today">今日</option>
+                      <option value="week">7日以内</option>
+                      <option value="month">30日以内</option>
+                    </select>
+                  </label>
+                  <label>検索<input id="gallerySearch" type="search" placeholder="Prompt・Seed・説明" /></label>
+                </div>
+                <div class="galleryFilterFooter">
+                  <p id="galleryFilterSummary" class="hint" aria-live="polite">0枚</p>
+                  <button id="resetGalleryFilterButton" class="ghost smallButton" type="button">条件をクリア</button>
+                </div>
               </div>
-            </section>
+              <div id="preferenceSummary" class="preferenceSummary">
+                画像に👍を付けると、好きなタグ・LoRA・設定をここへ集計します。
+              </div>
+              <div id="historyGrid" class="historyGrid"></div>
+            </div>
+          </section>
 
-            <section id="candidateSection" class="candidateSection">
+          <section id="viewCompare" class="appView hidden" data-view="compare" aria-label="比較">
+            <div class="panel viewPanel">
               <div class="sectionHeading">
                 <div>
-                  <p class="eyebrow">CANDIDATES</p>
-                  <h2>仕上げる1枚を選択</h2>
+                  <p class="eyebrow">EXPERIMENTS</p>
+                  <h2>比較実験</h2>
                 </div>
-                <span id="candidateSummary" class="muted"></span>
+                <button id="refreshExperimentsButton" class="secondary smallButton" type="button">再読込</button>
               </div>
-              <div id="candidateGrid" class="candidateGrid"></div>
-              <div class="finishBar">
-                <span id="selectedSeedText">画像を選択してください</span>
-                <div>
-                  <button id="lockCompositionButton" class="secondary" disabled>この構図で差し替え</button>
-                  <button id="finishButton" class="primary" disabled>選択画像をHires.fix</button>
+              <details id="experimentDetails">
+                <summary>パラメータ比較 <span id="experimentBadge" class="summaryCount">未実行</span></summary>
+                <p class="hint">Prompt・Checkpoint・LoRAはそのままに、1項目だけ値を変えて1枚ずつ順番に生成し、ひとつの実験としてまとめます。</p>
+                <div class="settingsGrid">
+                  <label>比較対象
+                    <select id="experimentParameter"></select>
+                  </label>
+                  <label id="experimentTargetRow">対象LoRA
+                    <select id="experimentTarget"></select>
+                  </label>
+                  <label class="fullWidthField">試す値（カンマ区切り）
+                    <input id="experimentValues" type="text" placeholder="0.5, 0.6, 0.7, 0.8" />
+                  </label>
+                  <label class="fullWidthField autoSizeChoice">
+                    <input id="experimentFixSeed" type="checkbox" checked />
+                    Seedを固定する（-1のときは実行直前にランダム値へ確定します）
+                  </label>
                 </div>
-              </div>
-            </section>
-            <p id="explanation"></p>
-          </div>
-          <p id="error" class="error hidden"></p>
-          </div>
+                <div class="buttonRow compactButtons">
+                  <button id="runExperimentButton" class="primary" type="button">比較生成</button>
+                  <button id="cancelExperimentButton" class="dangerButton" type="button" disabled>中断</button>
+                  <button id="openExperimentsButton" class="ghost" type="button">実験一覧</button>
+                </div>
+                <p id="experimentStatus" class="hint" aria-live="polite"></p>
+                <div id="experimentProgress" class="experimentProgress hidden"></div>
+              </details>
+              <div id="experimentGrid" class="experimentGrid"></div>
+            </div>
+          </section>
 
-          <div id="galleryTab" class="tabPanel hidden" role="tabpanel" aria-label="ギャラリー">
-            <div class="sectionHeading">
-              <div>
-                <p class="eyebrow">RECIPE LIBRARY</p>
-                <h2>生成履歴と好み</h2>
-              </div>
-              <div class="historyActions">
-                <label class="favoriteFilter"><input id="favoritesOnly" type="checkbox" /> 👍だけ</label>
-                <button id="refreshHistoryButton" class="secondary" type="button">再読込</button>
-              </div>
+          <section id="viewSettings" class="appView hidden" data-view="settings" aria-label="設定">
+            <div class="panel viewPanel">
+              <details id="checkpointDetails" open>
+                <summary>Checkpoint管理</summary>
+                <p class="hint">既定値・自動適用・LoRAセットの管理です。生成に使うCheckpointの切り替えは「生成」画面の生成設定から行います。</p>
+                            <div class="settingsGrid checkpointSettings">
+                  <label>設定プロフィール
+                    <select id="checkpointProfileSelect"></select>
+                  </label>
+                  <label class="checkpointAutoApply">
+                    <input id="checkpointAutoApply" type="checkbox" checked />
+                    切替時に推奨設定を適用
+                  </label>
+                </div>
+                <div id="checkpointProfileSummary" class="checkpointProfileSummary"></div>
+                <div class="settingsGrid checkpointSettings">
+                  <label>LoRAセット
+                    <select id="checkpointSetSelect"></select>
+                  </label>
+                  <label class="checkpointAutoApply">
+                    <input id="checkpointSetAutoApply" type="checkbox" />
+                    Checkpoint切替時にこのセットを自動適用
+                  </label>
+                </div>
+                <div class="buttonRow compactButtons">
+                  <button id="saveCheckpointSetButton" class="secondary" type="button">現在の設定を保存</button>
+                  <button id="applyCheckpointSetButton" class="secondary" type="button">読込</button>
+                  <button id="renameCheckpointSetButton" class="ghost" type="button">名前変更</button>
+                  <button id="duplicateCheckpointSetButton" class="ghost" type="button">複製</button>
+                  <button id="deleteCheckpointSetButton" class="historyDelete" type="button">削除</button>
+                </div>
+                <p id="checkpointSetStatus" class="hint" aria-live="polite"></p>
+              </details>
+
+              <details>
+                <summary>LoRA <span id="loraSelectedCount" class="summaryCount">0個選択</span></summary>
+                <p class="hint">ReForgeのLoRAフォルダを読み取り、キャラクターと画風・体型・構図へ自動分類します。キャラLoRAは「衣装自由」が初期値です。</p>
+                <div id="loraCategories" class="loraCategories" role="group" aria-label="LoRAの分類">
+                  <button class="loraCategory active" type="button" data-lora-category="character" aria-pressed="true">キャラクター <span>0</span></button>
+                  <button class="loraCategory" type="button" data-lora-category="direction" aria-pressed="false">画風・体型・構図 <span>0</span></button>
+                  <button class="loraCategory" type="button" data-lora-category="selected" aria-pressed="false">選択中 <span>0</span></button>
+                  <button class="loraCategory" type="button" data-lora-category="all" aria-pressed="false">すべて <span>0</span></button>
+                </div>
+                <div class="loraToolbar">
+                  <input id="loraSearch" type="search" placeholder="LoRAを検索" aria-label="LoRAを検索" />
+                  <select id="loraCompatibilityFilter" aria-label="現在のCheckpointとの互換性で絞り込み">
+                    <option value="all">すべて</option>
+                    <option value="compatible">対応のみ</option>
+                    <option value="compatible-caution">対応・近縁</option>
+                    <option value="hide-incompatible">非対応を隠す</option>
+                    <option value="has-preview">プレビューありのみ</option>
+                  </select>
+                  <button id="refreshLorasButton" class="secondary" type="button">再読込</button>
+                </div>
+                <p id="loraStatus" class="hint" aria-live="polite">LoRAを取得中…</p>
+                <div class="loraWorkspace">
+                  <div id="loraList" class="loraList"></div>
+                  <aside id="loraPreview" class="loraPreview" aria-live="polite" aria-label="LoRAプレビュー"></aside>
+                </div>
+                <div id="selectedLoraSummary" class="selectedLoraSummary">LoRAなし</div>
+                <div id="loraSyncNotice" class="loraSyncNotice hidden" aria-live="polite"></div>
+              </details>
+
+              <details id="civitaiDetails">
+                <summary>Civitai URLからLoRAを追加</summary>
+                <p class="hint">モデルページURLを貼ると、対応バージョン・Trigger Words・保存先を確認してReForgeへ配置します。</p>
+                <div class="loraRootBar">
+                  <span class="loraRootLabel">LoRAルート:</span>
+                  <span id="loraRootPath" class="loraRootPath">確認中…</span>
+                  <span id="loraRootBadge" class="loraRootBadge">確認中</span>
+                  <button id="openLoraRootButton" class="ghost smallButton" type="button">LoRAフォルダを開く</button>
+                </div>
+                <label>Civitaiモデルページ
+                  <div class="clearableField clearableInput">
+                    <input id="civitaiUrl" type="url" placeholder="https://civitai.com/models/..." />
+                    <button id="clearCivitaiUrlButton" class="fieldClearButton" type="button" aria-label="Civitai URLを消す" title="入力中のURLだけを消す">×</button>
+                  </div>
+                </label>
+                <div class="settingsGrid">
+                  <label>分類
+                    <select id="civitaiCategory">
+                      <option value="character" selected>キャラクター</option>
+                      <option value="style">画風</option>
+                      <option value="body">体型</option>
+                      <option value="pose">構図・ポーズ</option>
+                    </select>
+                  </label>
+                  <label>保存先フォルダ
+                    <div class="folderPicker">
+                      <select id="civitaiFolder" aria-label="保存先フォルダ"></select>
+                      <button id="civitaiFolderFavorite" class="ghost smallButton" type="button" aria-label="この保存先をお気に入りに登録">☆</button>
+                    </div>
+                  </label>
+                  <label>APIキー（必要な場合だけ）
+                    <input id="civitaiToken" type="password" autocomplete="off" placeholder="非公開・制限付きモデル用" />
+                  </label>
+                </div>
+                <label id="civitaiNewFolderRow" class="hidden">新規フォルダ名
+                  <input id="civitaiNewFolder" type="text" placeholder="Anime/Character" />
+                </label>
+                <p id="civitaiFolderPath" class="hint"></p>
+                <div class="buttonRow">
+                  <button id="inspectCivitaiButton" class="secondary" type="button">内容を確認</button>
+                  <button id="installCivitaiButton" class="primary" type="button" disabled>ダウンロードして登録</button>
+                  <button id="refreshCivitaiRegistrationsButton" class="ghost" type="button">登録済みを一括再解析</button>
+                </div>
+                <div id="civitaiPreview" class="integrationPreview hidden"></div>
+                <p id="civitaiStatus" class="hint" aria-live="polite"></p>
+              </details>
+
+              <details id="promptTemplateDetails">
+                <summary>Grok向け指示テンプレート</summary>
+                <p class="hint">毎回Grokへ渡す指示文と環境情報をまとめて保存し、ワンクリックで全文コピーします。回答は「AI出力をインポート」でそのまま取り込めます。</p>
+                <label>指示テンプレート
+                  <textarea id="grokInstructions" rows="8" placeholder="Grokへ渡す固定の指示文"></textarea>
+                </label>
+                <label>MY_SD_SETUP.md
+                  <textarea id="grokSetupDoc" rows="6" placeholder="GPU・Checkpoint・既定設定など、環境の説明"></textarea>
+                </label>
+                <label>lora_list.csv
+                  <textarea id="grokLoraCsv" rows="6" placeholder="name,displayName,category,baseModel,recommendedWeight,triggerWords"></textarea>
+                </label>
+                <div class="buttonRow compactButtons">
+                  <button id="copyGrokTemplateButton" class="primary" type="button" title="指示文・MY_SD_SETUP.md・lora_list.csvをまとめてコピー">全文コピー</button>
+                  <button id="saveGrokTemplateButton" class="secondary" type="button">保存</button>
+                  <button id="generateLoraCsvButton" class="secondary" type="button" title="導入済みLoRAからlora_list.csvを作り直します">LoRA一覧から更新</button>
+                  <button id="resetGrokInstructionsButton" class="ghost" type="button">既定の指示文に戻す</button>
+                </div>
+                <p id="grokTemplateStatus" class="hint" aria-live="polite">確認中…</p>
+              </details>
+
+              <details id="discordDetails">
+                <summary>Discord連携（Favorite自動送信）</summary>
+                <p class="hint">👍を付けた画像を、そのままDiscordへ送信します。Webhook URLはサーバー側にだけ保存され、画面へは戻しません（環境変数<code>LOCAL_IMAGE_CHAT_DISCORD_WEBHOOK</code>や<code>config.local.json</code>でも設定できます）。</p>
+                <label class="checkboxRow">
+                  <input id="discordAutoSend" type="checkbox" />
+                  Favorite時にDiscordへ自動送信する
+                </label>
+                <label>Webhook URL
+                  <input id="discordWebhook" type="password" autocomplete="off" placeholder="https://discord.com/api/webhooks/…" />
+                </label>
+                <label class="checkboxRow">
+                  <input id="discordIncludePrompt" type="checkbox" />
+                  Positive Promptを投稿へ含める
+                </label>
+                <label class="checkboxRow">
+                  <input id="discordIncludeMetadata" type="checkbox" />
+                  Model・Seed・LoRAを投稿へ含める
+                </label>
+                <div class="buttonRow compactButtons">
+                  <button id="saveDiscordSettingsButton" class="secondary" type="button">設定を保存</button>
+                  <button id="clearDiscordWebhookButton" class="ghost" type="button">送信先を削除</button>
+                </div>
+                <p id="discordSettingsStatus" class="hint" aria-live="polite">確認中…</p>
+              </details>
+
+              <details id="mobileAccessDetails">
+                <summary>スマホから接続</summary>
+                <p class="hint">同じネットワークのスマホから使う場合は、PCで<code>start-lan.bat</code>を起動し、起動ログに出るURL（例: <code>http://192.168.x.x:3030</code>）を開きます。外出先からはTailscaleなどのプライベートネットワーク経由で接続してください。ReForgeのポートは公開しません。</p>
+                <p class="hint">ホーム画面へ追加すると、アプリのように起動できます（iPhone: 共有 →「ホーム画面に追加」）。</p>
+                <p id="mobileAccessStatus" class="hint" aria-live="polite">接続情報を確認中…</p>
+              </details>
+
+              <details id="updateDetails">
+                <summary>アプリのアップデート</summary>
+                <p class="hint">GitHubの最新版を確認し、履歴・画像・config.jsonを残したまま更新します。非公開リポジトリではContents読み取り権限のPATが必要です。</p>
+                <label>GitHub Token（必要な場合だけ）
+                  <input id="githubToken" type="password" autocomplete="off" placeholder="github_pat_..." />
+                </label>
+                <div class="buttonRow">
+                  <button id="checkUpdateButton" class="secondary" type="button">最新版を確認</button>
+                  <button id="applyUpdateButton" class="primary" type="button" disabled>更新を適用</button>
+                </div>
+                <p id="updateStatus" class="hint" aria-live="polite"></p>
+              </details>
             </div>
-            <div class="galleryViewTabs" role="group" aria-label="ギャラリー表示切替">
-              <button id="galleryViewImagesButton" class="galleryViewTab active" type="button" aria-pressed="true">画像一覧</button>
-              <button id="galleryViewExperimentsButton" class="galleryViewTab" type="button" aria-pressed="false">実験ごと</button>
-              <button id="compareSelectionButton" class="secondary smallButton" type="button" disabled>比較する</button>
-            </div>
-            <div id="preferenceSummary" class="preferenceSummary">
-              画像に👍を付けると、好きなタグ・LoRA・設定をここへ集計します。
-            </div>
-            <div id="historyGrid" class="historyGrid"></div>
-            <div id="experimentGrid" class="experimentGrid hidden"></div>
-          </div>
-        </section>
+          </section>
+        </div>
       </div>
     </main>
     <script type="module" src="/app.js"></script>

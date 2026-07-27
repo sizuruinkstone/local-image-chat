@@ -7,6 +7,43 @@ export async function checkReforge(config) {
   return { ok: true, checkpoint: body.sd_model_checkpoint ?? "不明" };
 }
 
+// ReForgeが応答しない場合でも選択UIが空にならないよう、代表的な候補を持っておく。
+export const FALLBACK_SAMPLERS = [
+  "DPM++ 2M SDE", "DPM++ 2M", "DPM++ 3M SDE", "DPM++ SDE", "Euler a", "Euler", "Heun", "LMS", "DDIM", "UniPC"
+];
+export const FALLBACK_SCHEDULERS = [
+  "Automatic", "Karras", "Exponential", "SGM Uniform", "Simple", "Normal", "DDIM", "Beta"
+];
+
+// Sampler / Schedulerの候補一覧。片方でも取れれば返し、取れなければ既定値を使う。
+export async function listSamplers(config) {
+  const [samplers, schedulers] = await Promise.all([
+    fetchNames(`${config.url}/sdapi/v1/samplers`),
+    fetchNames(`${config.url}/sdapi/v1/schedulers`)
+  ]);
+  return {
+    samplers: samplers.length ? samplers : FALLBACK_SAMPLERS,
+    schedulers: schedulers.length ? schedulers : FALLBACK_SCHEDULERS,
+    // 既定値へフォールバックしたかどうかは画面のヒント表示に使う。
+    fromReforge: Boolean(samplers.length || schedulers.length)
+  };
+}
+
+async function fetchNames(url) {
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    if (!response.ok) return [];
+    const body = await response.json();
+    if (!Array.isArray(body)) return [];
+    return [...new Set(body
+      .map((item) => (typeof item === "string" ? item : item?.name ?? item?.label))
+      .filter((name) => typeof name === "string" && name.trim())
+      .map((name) => name.trim()))];
+  } catch {
+    return [];
+  }
+}
+
 export async function listCheckpoints(config) {
   const [modelsResponse, optionsResponse] = await Promise.all([
     fetch(`${config.url}/sdapi/v1/sd-models`, {

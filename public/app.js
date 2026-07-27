@@ -36,6 +36,28 @@ import {
   shouldApplyRecommendedWeight
 } from "./lora-preview.js";
 import {
+  APP_VIEWS,
+  hashForView,
+  normalizeAppView,
+  viewFromHash
+} from "./view-router.js";
+import {
+  SAMPLER_PRESETS,
+  buildOptionSections,
+  describeSamplerPreset,
+  isActivePreset,
+  isFavoriteOption,
+  rememberRecentOption,
+  toggleFavoriteOption
+} from "./option-picker.js";
+import {
+  collectCheckpoints,
+  collectLoras,
+  describeGalleryFilter,
+  filterGalleryEntries,
+  toGalleryEntries
+} from "./gallery-filter.js";
+import {
   buildLoraNotices,
   describeLoraNotices,
   hasLoraTag,
@@ -75,7 +97,7 @@ const elements = Object.fromEntries(
     "prompt", "negativePrompt", "width", "height", "steps", "cfgScale", "seed",
     "samplerName", "scheduler", "noiseSchedule", "candidateCount", "hiresScale", "hiresSteps",
     "hiresDenoising", "hiresUpscaler", "emptyState", "loading", "loadingText",
-    "resultTabButton", "galleryTabButton", "resultTab", "galleryTab",
+    "resultTab",
     "resultContent", "candidateSection", "candidateGrid", "candidateSummary",
     "selectedSeedText", "finishButton", "finalResult", "resultImage", "seedText",
     "resolutionText", "downloadLink", "explanation", "error", "loraSearch",
@@ -102,8 +124,8 @@ const elements = Object.fromEntries(
     "refreshCivitaiRegistrationsButton",
     "civitaiPreview", "civitaiStatus", "updateStatusButton", "updateDetails",
     "githubToken", "checkUpdateButton", "applyUpdateButton", "updateStatus",
-    "favoritesOnly", "refreshHistoryButton", "preferenceSummary", "historyGrid",
-    "galleryViewImagesButton", "galleryViewExperimentsButton", "compareSelectionButton", "experimentGrid",
+    "refreshHistoryButton", "preferenceSummary", "historyGrid",
+    "compareSelectionButton", "experimentGrid", "refreshExperimentsButton",
     "txt2imgModeButton", "img2imgModeButton", "inpaintModeButton", "img2imgPanel", "img2imgDropZone",
     "initImageInput", "initImageEmpty", "initImagePreview", "chooseInitImageButton",
     "clearInitImageButton", "initImageStatus", "img2imgPreset", "img2imgDenoising",
@@ -128,6 +150,15 @@ const elements = Object.fromEntries(
     "discordIncludeMetadata", "saveDiscordSettingsButton", "clearDiscordWebhookButton",
     "discordSettingsStatus", "finalDiscordStatus", "importAiPromptButton", "loraSyncNotice",
     "copyGrokShareButton", "updateShareCsvButton", "shareBarStatus",
+    "mainNav", "viewGenerate", "viewGallery", "viewCompare", "viewSettings",
+    "generateActions", "generateProgress", "generateProgressText", "cancelGenerateButton",
+    "showCombinedPromptButton", "sendToCompareButton",
+    "generationSettingsDetails", "advancedSettingsDetails", "samplerPresets",
+    "samplerPickerButton", "samplerPickerValue", "schedulerPickerButton", "schedulerPickerValue",
+    "loraUseDetails", "loraUseCount", "usedLoraList", "addLoraButton", "addFavoriteLoraButton",
+    "addCivitaiLoraButton", "galleryKindFilter", "galleryCheckpoint", "galleryLora",
+    "galleryPeriod", "gallerySearch", "galleryFilterSummary", "resetGalleryFilterButton",
+    "mobileAccessDetails", "mobileAccessStatus",
     "promptTemplateDetails", "grokInstructions", "grokSetupDoc", "grokLoraCsv",
     "copyGrokTemplateButton", "saveGrokTemplateButton", "generateLoraCsvButton",
     "resetGrokInstructionsButton", "grokTemplateStatus"
@@ -157,6 +188,15 @@ const discordWatchers = new Set();
 // LoRAトリガーワード一覧の開閉状態（項目ごと）。既定は折りたたみ。
 const triggerPanelOpen = new Map();
 const TRIGGER_PREVIEW_COUNT = 2;
+// トップレベル画面と、その表示領域の要素ID。
+// 初期化（画面復元）より前に評価されている必要があるため、ここで定義する。
+const VIEW_ELEMENTS = {
+  generate: "viewGenerate",
+  gallery: "viewGallery",
+  compare: "viewCompare",
+  settings: "viewSettings"
+};
+
 // AI出力から取り込んだトリガーワードの由来ID（LoRA名と混ざらない形にする）。
 const IMPORT_SOURCE_PREFIX = "import:";
 // プロンプト入力中に同期を走らせすぎないための待ち時間。
@@ -211,7 +251,17 @@ let checkpointSets = [];
 // 「ユーザーが編集中か」を判定するための、最後に適用した設定のスナップショット。
 let appliedSettingsFingerprint = null;
 let historyEntries = [];
-let galleryView = localStorage.getItem("localImageChat.galleryView") === "experiments" ? "experiments" : "images";
+// 表示中のトップレベル画面。生成の進行状況はサーバー側のジョブが持つので、
+// ここを切り替えても生成は止まらない。
+let currentView = "generate";
+// ギャラリーの絞り込み条件（画面側だけの状態。履歴データは変えない）。
+let galleryFilter = { kind: "all", checkpoint: "", lora: "", period: "", query: "" };
+// Sampler / Scheduler の候補一覧（ReForgeから取得、失敗時は既定値）。
+let samplerOptions = { samplers: [], schedulers: [] };
+// 直近に取得した履歴。絞り込みのたびに取り直さないよう保持する。
+let lastHistoryGenerations = [];
+// 選択したまま「今回は使わない」LoRA（ON/OFF）。選択自体は保持する。
+const disabledLoras = new Set();
 const compareSelection = new Map();
 // 次の生成が「どの派生操作から来たか」を履歴へ残すための一時情報。
 let pendingDerivation = null;
@@ -274,7 +324,7 @@ syncRawPromptFromSections();
 await Promise.all([
   checkHealth(), loadCheckpoints(), loadLoras(), loadHistory(), loadCivitaiFolders(), loadLoraRoot(),
   loadExperiments(), loadCheckpointSets(), loadDiscordSettings(), loadPromptTemplate(),
-  loadShareState()
+  loadShareState(), loadSamplerOptions()
 ]);
 markSettingsApplied();
 setGenerationMode("txt2img");
@@ -287,8 +337,14 @@ elements.healthButton.addEventListener("click", checkHealth);
 elements.promptButton.addEventListener("click", buildPrompt);
 elements.generateButton.addEventListener("click", generateCandidates);
 elements.finishButton.addEventListener("click", finishSelected);
-elements.resultTabButton.addEventListener("click", () => setResultTab("result"));
-elements.galleryTabButton.addEventListener("click", () => setResultTab("gallery"));
+elements.mainNav.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-view]");
+  if (button) showView(button.dataset.view);
+});
+window.addEventListener("hashchange", () => {
+  const view = viewFromHash(location.hash);
+  if (view && view !== currentView) showView(view, { remember: false });
+});
 // 生成結果（Hires仕上げ）画像のクリックで拡大モーダルを開く。
 elements.resultImage.addEventListener("click", () => {
   if (finalImage) openImageModal(finalImage.imageUrl, elements.finalTitle.textContent || `Seed ${finalImage.seed}`);
@@ -364,7 +420,10 @@ elements.clearPromptsButton.addEventListener("click", clearBothPrompts);
 elements.candidateCount.addEventListener("change", handleCandidateCountChange);
 elements.description.addEventListener("input", handleDescriptionChange);
 elements.prompt.addEventListener("input", handleRawPromptInput);
-elements.negativePrompt.addEventListener("input", markPromptAsCurrent);
+elements.negativePrompt.addEventListener("input", () => {
+  markPromptAsCurrent();
+  renderPromptFieldPreviews();
+});
 elements.structuredPromptTabButton.addEventListener("click", () => setPromptMode("structured"));
 elements.rawPromptTabButton.addEventListener("click", () => setPromptMode("raw"));
 elements.useStructuredPromptButton.addEventListener("click", useStructuredPrompt);
@@ -425,11 +484,35 @@ elements.updateStatusButton.addEventListener("click", () => {
   void checkForUpdate();
 });
 elements.refreshHistoryButton.addEventListener("click", loadHistory);
-elements.favoritesOnly.addEventListener("change", loadHistory);
-elements.galleryViewImagesButton.addEventListener("click", () => setGalleryView("images"));
-elements.galleryViewExperimentsButton.addEventListener("click", () => void openGalleryExperiments());
+elements.refreshExperimentsButton.addEventListener("click", () => void openGalleryExperiments());
+elements.galleryKindFilter.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-gallery-kind]");
+  if (button) setGalleryFilter({ kind: button.dataset.galleryKind });
+});
+for (const element of [elements.galleryCheckpoint, elements.galleryLora, elements.galleryPeriod]) {
+  element.addEventListener("change", () => setGalleryFilter({
+    checkpoint: elements.galleryCheckpoint.value,
+    lora: elements.galleryLora.value,
+    period: elements.galleryPeriod.value
+  }));
+}
+elements.gallerySearch.addEventListener("input", () => setGalleryFilter({ query: elements.gallerySearch.value }));
+elements.resetGalleryFilterButton.addEventListener("click", resetGalleryFilter);
+elements.samplerPickerButton.addEventListener("click", () => void openSamplerPicker("sampler"));
+elements.schedulerPickerButton.addEventListener("click", () => void openSamplerPicker("scheduler"));
+elements.showCombinedPromptButton.addEventListener("click", showCombinedPrompt);
+elements.sendToCompareButton.addEventListener("click", sendToCompare);
+elements.cancelGenerateButton.addEventListener("click", cancelActiveJob);
+elements.addLoraButton.addEventListener("click", () => void openLoraPicker({ favoritesOnly: false }));
+elements.addFavoriteLoraButton.addEventListener("click", () => void openLoraPicker({ favoritesOnly: true }));
+elements.addCivitaiLoraButton.addEventListener("click", () => {
+  showView("settings");
+  elements.civitaiDetails.open = true;
+  elements.civitaiDetails.scrollIntoView({ behavior: "smooth", block: "start" });
+  elements.civitaiUrl.focus();
+});
 elements.compareSelectionButton.addEventListener("click", compareCurrentSelection);
-setGalleryView(galleryView);
+showView(loadInitialView(), { remember: false });
 elements.applyPreferenceButton.addEventListener("click", applyPreferenceTags);
 elements.clearPromptPartsButton.addEventListener("click", clearPromptParts);
 for (const element of [
@@ -466,6 +549,7 @@ async function loadConfig() {
   elements.autoRetryOnFailure.addEventListener("change", () => {
     localStorage.setItem("localImageChat.autoRetry", String(elements.autoRetryOnFailure.checked));
   });
+  syncSamplerLabels();
 }
 
 function setGenerationMode(mode) {
@@ -486,15 +570,40 @@ function setGenerationMode(mode) {
   updateGenerateButton();
 }
 
-// 右パネルの「生成結果 / ギャラリー」タブ切替。左の設定パネルは触らない。
+// ---- トップレベル画面（生成 / ギャラリー / 比較 / 設定） ----
+
+// 画面の切り替えは表示の出し分けだけ。生成ジョブはサーバー側で進み続けるので、
+// ギャラリーや設定へ移動しても中断・再実行は起きない。
+function showView(view, { remember = true } = {}) {
+  currentView = normalizeAppView(view);
+  for (const name of APP_VIEWS) {
+    elements[VIEW_ELEMENTS[name]].classList.toggle("hidden", name !== currentView);
+  }
+  for (const button of elements.mainNav.querySelectorAll("[data-view]")) {
+    const active = button.dataset.view === currentView;
+    button.classList.toggle("active", active);
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  }
+  if (remember) {
+    localStorage.setItem("localImageChat.view", currentView);
+    if (viewFromHash(location.hash) !== currentView) {
+      history.replaceState(null, "", hashForView(currentView));
+    }
+  }
+  // 表示のたびに最新化する（生成は止めない）。
+  if (currentView === "gallery") void loadHistory();
+  if (currentView === "compare") renderExperimentCards();
+}
+
+function loadInitialView() {
+  return viewFromHash(location.hash)
+    ?? normalizeAppView(localStorage.getItem("localImageChat.view"));
+}
+
+// 旧APIの呼び出し（生成完了時など）を新しい画面切替へ橋渡しする。
 function setResultTab(tab) {
-  const gallery = tab === "gallery";
-  elements.resultTab.classList.toggle("hidden", gallery);
-  elements.galleryTab.classList.toggle("hidden", !gallery);
-  elements.resultTabButton.classList.toggle("active", !gallery);
-  elements.galleryTabButton.classList.toggle("active", gallery);
-  elements.resultTabButton.setAttribute("aria-selected", String(!gallery));
-  elements.galleryTabButton.setAttribute("aria-selected", String(gallery));
+  showView(tab === "gallery" ? "gallery" : "generate");
 }
 
 async function loadInitImageFile(file) {
@@ -1047,10 +1156,12 @@ function renderCheckpointProfileSummary() {
   ].filter(Boolean).join("・");
 }
 
+// 設定値を書き換えたあとは、Sampler/Schedulerの表示も合わせる。
 function applyCheckpointSettings(profile) {
   for (const key of ["width", "height", "steps", "cfgScale", "samplerName", "scheduler", "noiseSchedule"]) {
     if (profile.settings[key] !== undefined && elements[key]) elements[key].value = profile.settings[key];
   }
+  syncSamplerLabels();
 }
 
 function getCheckpointProfileSelection(checkpoint) {
@@ -1230,6 +1341,7 @@ async function applyCheckpointSet(set, { silent = false } = {}) {
   for (const [key, value] of Object.entries(set.settings ?? {})) {
     if (elements[key] && value !== undefined && value !== "") elements[key].value = value;
   }
+  syncSamplerLabels();
   selectedLoras.clear();
   const missing = [];
   for (const lora of set.loras ?? []) {
@@ -2266,6 +2378,7 @@ function renderSelectedLoraSummary() {
   // LoRAの選択・weight・トリガーワード編集はすべてここを通るので、
   // トリガーワード枠の追加・削除もここで同期する。
   syncAppliedTriggerWords();
+  renderUsedLoras();
   const items = [...selectedLoras].map(([name, weight]) => {
     const triggerWords = loraTriggers.get(name);
     const suppressesOutfit = Boolean(loraNegativeWords.get(name));
@@ -2811,6 +2924,7 @@ function setPromptFields(prompt, negativePrompt, description, { source = "genera
   if (!rawPromptOverride) syncRawPromptFromSections();
   syncPromptClearButtons();
   renderPromptModeState();
+  renderPromptFieldPreviews();
 }
 
 function handleDescriptionChange() {
@@ -2916,27 +3030,41 @@ function handleStructuredPromptInput() {
   scheduleLoraSync();
 }
 
-// 折りたたみ中でも中身が分かるように、見出しへ先頭を出す。
+// 折りたたみ中でも中身が分かるように、見出しへ状態と先頭の内容を出す。
 function renderPromptFieldPreviews() {
-  for (const field of PROMPT_FIELDS) {
-    const element = promptFieldElement(field);
-    const preview = document.querySelector(`[data-preview-for="${element.id}"]`);
-    if (!preview) continue;
+  for (const element of promptFieldTextareas()) {
     const value = element.value.trim().replace(/\s+/g, " ");
-    preview.textContent = value ? `：${value.slice(0, 40)}${value.length > 40 ? "…" : ""}` : "";
+    const preview = document.querySelector(`[data-preview-for="${element.id}"]`);
+    if (preview) {
+      preview.textContent = value ? `：${value.slice(0, 40)}${value.length > 40 ? "…" : ""}` : "";
+    }
+    const state = document.querySelector(`[data-state-for="${element.id}"]`);
+    if (!state) continue;
+    const tags = value.split(",").map((tag) => tag.trim()).filter(Boolean);
+    state.textContent = tags.length ? `${tags.length}タグ` : "空";
+    state.classList.toggle("filled", tags.length > 0);
   }
+}
+
+// 構造化プロンプトの6項目 + Negative Prompt。
+function promptFieldTextareas() {
+  return [...PROMPT_FIELDS.map((field) => promptFieldElement(field)), elements.negativePrompt];
 }
 
 // スマホでは縦に長くなるため、中身のある項目とキャラクターだけ開いておく。
 function setupPromptFieldAccordions() {
-  const blocks = [...document.querySelectorAll("[data-prompt-field]")];
   if (isNarrowScreen()) {
-    for (const block of blocks) {
+    for (const block of document.querySelectorAll("[data-prompt-field]")) {
       const field = block.dataset.promptField;
-      block.open = field === "character" || Boolean(promptFieldElement(field)?.value.trim());
+      block.open = field === "character" || Boolean(promptFieldValue(field).trim());
     }
   }
   renderPromptFieldPreviews();
+}
+
+function promptFieldValue(field) {
+  if (field === "negative") return elements.negativePrompt.value;
+  return promptFieldElement(field)?.value ?? "";
 }
 
 function isNarrowScreen() {
@@ -2946,7 +3074,7 @@ function isNarrowScreen() {
 // 履歴復元・インポートで中身が入った項目は開いて見せる。
 function revealFilledPromptFields() {
   for (const block of document.querySelectorAll("[data-prompt-field]")) {
-    if (promptFieldElement(block.dataset.promptField)?.value.trim()) block.open = true;
+    if (promptFieldValue(block.dataset.promptField).trim()) block.open = true;
   }
   renderPromptFieldPreviews();
 }
@@ -3739,6 +3867,7 @@ async function submitGeneration(payload, { allowRecovery = true } = {}) {
   const { job } = await postJson("/api/jobs", request);
   activeJobId = job.id;
   setJobProgress(job);
+  renderGenerateActions();
   elements.jobBar.classList.remove("hidden");
   elements.cancelJobButton.disabled = false;
   // 生成はサーバー側のジョブとして進むので、タブを移動しても継続する。
@@ -3758,6 +3887,7 @@ async function submitGeneration(payload, { allowRecovery = true } = {}) {
           if (retryPayload) {
             // 再試行は同じ生成の続きなので、二重投入チェックを通す。
             activeJobId = null;
+            renderGenerateActions();
             return submitGeneration(retryPayload, { allowRecovery: false });
           }
         }
@@ -3767,6 +3897,7 @@ async function submitGeneration(payload, { allowRecovery = true } = {}) {
     }
   } finally {
     activeJobId = null;
+    renderGenerateActions();
     elements.cancelJobButton.disabled = true;
     setTimeout(() => {
       if (!activeJobId) elements.jobBar.classList.add("hidden");
@@ -3824,7 +3955,15 @@ async function confirmRecovery(recovery, request) {
   };
 }
 
+function renderJobProgressText(job) {
+  const percent = Math.round(Number(job?.progress ?? 0));
+  elements.generateProgressText.textContent = job?.message
+    ? `${job.message}（${percent}%）`
+    : `生成中… ${percent}%`;
+}
+
 function setJobProgress(job) {
+  renderJobProgressText(job);
   elements.jobMessage.textContent = job.message ?? "処理中";
   elements.jobProgress.value = Number(job.progress) || 0;
   elements.jobProgressText.textContent = `${Math.round(Number(job.progress) || 0)}%`;
@@ -3958,7 +4097,7 @@ function notifyQueueChanges(snapshot) {
 }
 
 function isGalleryTabVisible() {
-  return !elements.galleryTab.classList.contains("hidden");
+  return currentView === "gallery";
 }
 
 // 内部エラーをそのまま出さないよう、短いメッセージへ丸める。
@@ -4139,6 +4278,7 @@ function loadRecipeFields(recipe, image) {
   if (settings.inpaintFullRes !== undefined) {
     elements.inpaintFullRes.checked = settings.inpaintFullRes === true;
   }
+  syncSamplerLabels();
   elements.seed.value = image.seed;
   elements.candidateCount.value = "1";
   handleCandidateCountChange();
@@ -4372,9 +4512,8 @@ async function clearDiscordWebhook() {
 
 async function loadHistory() {
   try {
-    const favoritesQuery = elements.favoritesOnly.checked ? "&favorites=1" : "";
     const [historyData, preferences] = await Promise.all([
-      getJson(`/api/history?limit=80${favoritesQuery}`),
+      getJson("/api/history?limit=200"),
       getJson("/api/history/preferences")
     ]);
     preferenceData = preferences;
@@ -4386,12 +4525,15 @@ async function loadHistory() {
 }
 
 function renderHistory(generations) {
+  lastHistoryGenerations = generations ?? [];
   // 送信中のバッジが再描画で消えないよう、最新状態を先に取り込む。
   rememberDiscordStates(generations);
   elements.historyGrid.replaceChildren();
-  const entries = generations.flatMap((generation) =>
-    generation.images.map((image) => ({ generation, image }))
-  );
+  const allEntries = toGalleryEntries(generations);
+  renderGalleryFilterOptions(allEntries);
+  const entries = filterGalleryEntries(allEntries, galleryFilter);
+  elements.galleryFilterSummary.textContent =
+    describeGalleryFilter(galleryFilter, allEntries.length, entries.length);
   historyEntries = entries;
   for (const { generation, image } of entries) {
     elements.historyGrid.append(createHistoryCard(generation, image));
@@ -4399,8 +4541,8 @@ function renderHistory(generations) {
   if (!entries.length) {
     const empty = document.createElement("p");
     empty.className = "hint";
-    empty.textContent = elements.favoritesOnly.checked
-      ? "👍を付けた画像はまだありません"
+    empty.textContent = hasGalleryFilter()
+      ? "条件に一致する画像がありません"
       : "生成すると画像とレシピがここへ保存されます";
     elements.historyGrid.append(empty);
   }
@@ -4408,24 +4550,423 @@ function renderHistory(generations) {
   updateCompareButton();
 }
 
-// ---- ギャラリー表示切替（画像一覧 / 実験ごと） ----
+// ---- ギャラリーの絞り込み ----
 
+function hasGalleryFilter() {
+  return galleryFilter.kind !== "all"
+    || Boolean(galleryFilter.checkpoint || galleryFilter.lora || galleryFilter.period || galleryFilter.query);
+}
+
+function setGalleryFilter(patch) {
+  galleryFilter = { ...galleryFilter, ...patch };
+  for (const button of elements.galleryKindFilter.querySelectorAll("[data-gallery-kind]")) {
+    const active = button.dataset.galleryKind === galleryFilter.kind;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  }
+  // 取得済みの履歴をそのまま絞り込む（再取得しない）。
+  renderHistory(lastHistoryGenerations);
+}
+
+function resetGalleryFilter() {
+  elements.galleryCheckpoint.value = "";
+  elements.galleryLora.value = "";
+  elements.galleryPeriod.value = "";
+  elements.gallerySearch.value = "";
+  setGalleryFilter({ kind: "all", checkpoint: "", lora: "", period: "", query: "" });
+}
+
+// Checkpoint・LoRAの候補は、いま履歴にあるものだけを出す。
+function renderGalleryFilterOptions(entries) {
+  fillFilterSelect(elements.galleryCheckpoint, collectCheckpoints(entries), galleryFilter.checkpoint);
+  fillFilterSelect(elements.galleryLora, collectLoras(entries), galleryFilter.lora);
+}
+
+function fillFilterSelect(select, values, selected) {
+  const current = selected ?? select.value;
+  select.replaceChildren(new Option("すべて", ""));
+  for (const value of values) select.append(new Option(shorten(value, 40), value));
+  select.value = values.includes(current) ? current : "";
+}
+
+// ---- Sampler / Scheduler の選択UI ----
+
+const SAMPLER_STORAGE = {
+  sampler: { favorites: "localImageChat.samplerFavorites", recent: "localImageChat.samplerRecent" },
+  scheduler: { favorites: "localImageChat.schedulerFavorites", recent: "localImageChat.schedulerRecent" }
+};
+
+function readOptionList(storageKey) {
+  const stored = readJsonStorage(storageKey, []);
+  return Array.isArray(stored) ? stored.filter((item) => typeof item === "string" && item) : [];
+}
+
+function writeOptionList(storageKey, values) {
+  localStorage.setItem(storageKey, JSON.stringify(values));
+}
+
+async function loadSamplerOptions() {
+  try {
+    const data = await getJson("/api/samplers");
+    samplerOptions = {
+      samplers: Array.isArray(data.samplers) ? data.samplers : [],
+      schedulers: Array.isArray(data.schedulers) ? data.schedulers : []
+    };
+  } catch {
+    // ReForgeが落ちていても選択UIは使えるようにする（保存済みの値と既定値だけ）。
+    samplerOptions = { samplers: [], schedulers: [] };
+  }
+  renderSamplerPresets();
+  syncSamplerLabels();
+}
+
+// 現在値をボタンへ反映する。Checkpointプロフィール適用や履歴復元の後にも呼ぶ。
+function syncSamplerLabels() {
+  elements.samplerPickerValue.textContent = elements.samplerName.value || "未設定";
+  elements.schedulerPickerValue.textContent = elements.scheduler.value || "未設定";
+  renderSamplerPresets();
+}
+
+function renderSamplerPresets() {
+  elements.samplerPresets.replaceChildren();
+  for (const preset of SAMPLER_PRESETS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "samplerPreset";
+    button.textContent = describeSamplerPreset(preset);
+    button.classList.toggle("active", isActivePreset(preset, elements.samplerName.value, elements.scheduler.value));
+    button.addEventListener("click", () => {
+      // プリセットは両方まとめて変える。個別選択では相手を触らない。
+      applySamplerValue("sampler", preset.sampler);
+      applySamplerValue("scheduler", preset.scheduler);
+    });
+    elements.samplerPresets.append(button);
+  }
+}
+
+function applySamplerValue(kind, value) {
+  const input = kind === "sampler" ? elements.samplerName : elements.scheduler;
+  input.value = value;
+  writeOptionList(SAMPLER_STORAGE[kind].recent, rememberRecentOption(readOptionList(SAMPLER_STORAGE[kind].recent), value));
+  syncSamplerLabels();
+}
+
+async function openSamplerPicker(kind) {
+  const label = kind === "sampler" ? "Sampler" : "Scheduler";
+  const all = kind === "sampler" ? samplerOptions.samplers : samplerOptions.schedulers;
+  const input = kind === "sampler" ? elements.samplerName : elements.scheduler;
+  let favorites = readOptionList(SAMPLER_STORAGE[kind].favorites);
+  let query = "";
+
+  await openModal({
+    title: `${label}を選ぶ`,
+    subtitle: "★でお気に入り。検索でも絞り込めます",
+    size: "small",
+    dismissValue: null,
+    build: (body, close) => {
+      const search = document.createElement("input");
+      search.type = "search";
+      search.className = "optionPickerSearch";
+      search.placeholder = `${label}を検索`;
+      search.setAttribute("data-autofocus", "true");
+
+      const list = document.createElement("div");
+      list.className = "optionPickerList";
+
+      const render = () => {
+        list.replaceChildren();
+        const sections = buildOptionSections({
+          all,
+          favorites,
+          recent: readOptionList(SAMPLER_STORAGE[kind].recent),
+          query,
+          current: input.value
+        });
+        if (!sections.length) {
+          const empty = document.createElement("p");
+          empty.className = "hint";
+          empty.textContent = "候補が見つかりません";
+          list.append(empty);
+          return;
+        }
+        for (const section of sections) {
+          const heading = document.createElement("p");
+          heading.className = "optionPickerHeading";
+          heading.textContent = section.label;
+          list.append(heading);
+          for (const option of section.items) list.append(createOptionRow(option));
+        }
+      };
+
+      const createOptionRow = (option) => {
+        const row = document.createElement("div");
+        row.className = "optionPickerRow";
+        row.classList.toggle("current", option === input.value);
+        const choose = document.createElement("button");
+        choose.type = "button";
+        choose.className = "optionPickerChoice";
+        choose.textContent = option;
+        choose.addEventListener("click", () => {
+          applySamplerValue(kind, option);
+          close(option);
+        });
+        const star = document.createElement("button");
+        star.type = "button";
+        star.className = "optionPickerStar";
+        star.textContent = isFavoriteOption(favorites, option) ? "★" : "☆";
+        star.title = "お気に入り";
+        star.addEventListener("click", () => {
+          favorites = toggleFavoriteOption(favorites, option);
+          writeOptionList(SAMPLER_STORAGE[kind].favorites, favorites);
+          render();
+        });
+        row.append(choose, star);
+        return row;
+      };
+
+      search.addEventListener("input", () => {
+        query = search.value;
+        render();
+      });
+      render();
+      body.append(search, list);
+    },
+    actions: [{ label: "閉じる", value: null, variant: "secondary" }]
+  }).promise;
+}
+
+// ---- 使用中LoRA（生成画面） ----
+
+function renderUsedLoras() {
+  elements.usedLoraList.replaceChildren();
+  elements.loraUseCount.textContent = `${selectedLoras.size}件`;
+  if (!selectedLoras.size) {
+    const empty = document.createElement("p");
+    empty.className = "hint";
+    empty.textContent = "LoRAは未選択です。「LoRA追加」から選ぶか、プロンプトへ <lora:名前:0.8> と書くと追加されます。";
+    elements.usedLoraList.append(empty);
+    return;
+  }
+
+  for (const [name, weight] of selectedLoras) {
+    const lora = findLoraByName(name);
+    const row = document.createElement("div");
+    row.className = "usedLoraRow";
+
+    const title = document.createElement("div");
+    title.className = "usedLoraName";
+    title.textContent = lora?.displayName ?? name;
+    title.title = name;
+    const source = document.createElement("small");
+    source.className = "usedLoraSource";
+    source.textContent = { ui: "UI選択", prompt: "プロンプト由来", both: "UI+プロンプト" }[
+      loraSelectionSources.get(name) ?? "ui"
+    ];
+    title.append(source);
+
+    const weightField = document.createElement("label");
+    weightField.className = "usedLoraWeight";
+    weightField.append("Weight");
+    const weightInput = document.createElement("input");
+    weightInput.type = "number";
+    weightInput.min = "0.05";
+    weightInput.max = "2";
+    weightInput.step = "0.05";
+    weightInput.value = Number(weight).toFixed(2);
+    weightInput.setAttribute("aria-label", `${name}のLoRA Weight`);
+    weightInput.addEventListener("change", () => {
+      const next = clampLoraWeightValue(weightInput.value);
+      weightInput.value = next.toFixed(2);
+      loraWeights.set(name, next);
+      selectedLoras.set(name, next);
+      saveLoraWeights();
+      // プロンプト内に同じタグがあれば、そのWeightだけを書き換える。
+      applyLoraWeightToPrompt(name, next);
+      renderSelectedLoraSummary();
+      renderLoras();
+    });
+    weightField.append(weightInput);
+
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "usedLoraToggle";
+    const enabled = !disabledLoras.has(name);
+    toggle.textContent = enabled ? "ON" : "OFF";
+    toggle.classList.toggle("off", !enabled);
+    toggle.title = enabled ? "この生成では使わない" : "この生成で使う";
+    toggle.addEventListener("click", () => {
+      if (disabledLoras.has(name)) disabledLoras.delete(name);
+      else disabledLoras.add(name);
+      renderUsedLoras();
+      renderSelectedLoraSummary();
+    });
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "usedLoraRemove";
+    remove.textContent = "×";
+    remove.title = "この生成から外す";
+    remove.setAttribute("aria-label", `${name}を外す`);
+    remove.addEventListener("click", () => {
+      setLoraSelected(name, false);
+      renderSelectedLoraSummary();
+      renderLoras();
+    });
+
+    row.append(title, weightField, toggle, remove);
+    elements.usedLoraList.append(row);
+  }
+}
+
+function clampLoraWeightValue(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return loraConfig.defaultWeight;
+  return Number(Math.min(2, Math.max(0.05, number)).toFixed(2));
+}
+
+// 生成画面からLoRAを追加する簡易ピッカー（一覧の管理は設定画面）。
+async function openLoraPicker({ favoritesOnly = false } = {}) {
+  if (!installedLoras.length) return toast.warning("LoRAが読み込まれていません");
+  const candidates = favoritesOnly
+    ? installedLoras.filter((lora) => lora.registry?.favorite)
+    : installedLoras;
+  if (!candidates.length) {
+    return toast.info("お気に入りのLoRAがありません。設定画面のLoRA管理で★を付けられます");
+  }
+
+  let query = "";
+  await openModal({
+    title: favoritesOnly ? "お気に入りLoRAから追加" : "LoRAを追加",
+    subtitle: `最大${loraConfig.maxSelected}個まで選択できます`,
+    size: "medium",
+    build: (body, close) => {
+      const search = document.createElement("input");
+      search.type = "search";
+      search.className = "optionPickerSearch";
+      search.placeholder = "LoRAを検索";
+      search.setAttribute("data-autofocus", "true");
+      const list = document.createElement("div");
+      list.className = "loraPickerList";
+
+      const render = () => {
+        list.replaceChildren();
+        const needle = query.trim().toLowerCase();
+        const matches = candidates.filter((lora) =>
+          `${lora.displayName} ${lora.name} ${lora.folder ?? ""}`.toLowerCase().includes(needle));
+        if (!matches.length) {
+          const empty = document.createElement("p");
+          empty.className = "hint";
+          empty.textContent = "一致するLoRAがありません";
+          list.append(empty);
+          return;
+        }
+        for (const lora of matches.slice(0, 200)) {
+          const row = document.createElement("button");
+          row.type = "button";
+          row.className = "loraPickerRow";
+          row.classList.toggle("selected", selectedLoras.has(lora.name));
+          const name = document.createElement("span");
+          name.className = "loraPickerName";
+          name.textContent = lora.displayName;
+          const meta = document.createElement("small");
+          meta.textContent = [lora.folder, lora.registry?.baseModel].filter(Boolean).join("・");
+          row.append(name, meta);
+          row.addEventListener("click", () => {
+            if (selectedLoras.has(lora.name)) {
+              setLoraSelected(lora.name, false);
+            } else {
+              if (selectedLoras.size >= loraConfig.maxSelected) {
+                return toast.warning(`LoRAは最大${loraConfig.maxSelected}個までです`);
+              }
+              const weight = loraWeights.get(lora.name)
+                ?? lora.registry?.recommendedWeight
+                ?? loraConfig.defaultWeight;
+              setLoraSelected(lora.name, true, weight);
+            }
+            renderSelectedLoraSummary();
+            renderLoras();
+            render();
+          });
+          list.append(row);
+        }
+      };
+
+      search.addEventListener("input", () => {
+        query = search.value;
+        render();
+      });
+      render();
+      body.append(search, list);
+      void close;
+    },
+    actions: [{ label: "閉じる", value: true, primary: true }]
+  }).promise;
+}
+
+// ---- 生成操作バー ----
+
+// 結合結果（実際に送るPositive Prompt）を確認する。
+function showCombinedPrompt() {
+  const positive = currentPositivePrompt().trim();
+  openModal({
+    title: "結合結果",
+    subtitle: rawPromptOverride ? "Raw Promptを優先しています" : "分割入力を上から順に結合した内容です",
+    size: "medium",
+    build: (body) => {
+      const positiveBlock = document.createElement("pre");
+      positiveBlock.className = "sharePreview";
+      positiveBlock.textContent = positive || "（未入力）";
+      const negativeHeading = document.createElement("p");
+      negativeHeading.className = "hint";
+      negativeHeading.textContent = "Negative Prompt";
+      const negativeBlock = document.createElement("pre");
+      negativeBlock.className = "sharePreview";
+      negativeBlock.textContent = elements.negativePrompt.value.trim() || "（未入力）";
+      body.append(positiveBlock, negativeHeading, negativeBlock);
+    },
+    actions: [
+      {
+        label: "Positiveをコピー",
+        variant: "secondary",
+        keepOpen: true,
+        onSelect: async () => {
+          if (!positive) return toast.warning("コピーできる内容がありません");
+          try {
+            await copyToClipboard(positive);
+            toast.success("結合結果をコピーしました");
+          } catch (error) {
+            toast.error(`コピーできませんでした: ${error.message}`);
+          }
+        }
+      },
+      { label: "閉じる", value: true, primary: true }
+    ]
+  });
+}
+
+// 現在の設定のまま比較画面へ移動する（生成は行わない）。
+function sendToCompare() {
+  showView("compare");
+  elements.experimentDetails.open = true;
+  elements.experimentDetails.scrollIntoView({ behavior: "smooth", block: "start" });
+  toast.info("現在のPrompt・LoRA・生成設定のまま比較できます");
+}
+
+// 生成中は同じ位置へ進捗を出し、ボタンを押せなくする。
+function renderGenerateActions() {
+  const busy = Boolean(activeJobId);
+  elements.generateProgress.classList.toggle("hidden", !busy);
+  elements.generateButton.disabled = busy;
+  elements.sendToCompareButton.disabled = busy;
+}
+
+// 実験一覧は「比較」画面、画像一覧は「ギャラリー」画面が持つ。
 function setGalleryView(view) {
-  galleryView = view === "experiments" ? "experiments" : "images";
-  const isExperiments = galleryView === "experiments";
-  elements.historyGrid.classList.toggle("hidden", isExperiments);
-  elements.experimentGrid.classList.toggle("hidden", !isExperiments);
-  elements.galleryViewImagesButton.classList.toggle("active", !isExperiments);
-  elements.galleryViewExperimentsButton.classList.toggle("active", isExperiments);
-  elements.galleryViewImagesButton.setAttribute("aria-pressed", String(!isExperiments));
-  elements.galleryViewExperimentsButton.setAttribute("aria-pressed", String(isExperiments));
-  localStorage.setItem("localImageChat.galleryView", galleryView);
-  if (isExperiments) renderExperimentCards();
+  showView(view === "experiments" ? "compare" : "gallery");
 }
 
 async function openGalleryExperiments() {
-  setResultTab("gallery");
-  setGalleryView("experiments");
+  showView("compare");
   await loadExperiments();
   renderExperimentCards();
 }
@@ -5875,7 +6416,9 @@ function readDerivationPayload() {
 function readSelectedLoras() {
   // 生成直前にプロンプト内のタグと突き合わせて、実効Weightのまま送る。
   syncLorasFromPrompt();
-  return [...selectedLoras].map(([name, weight]) => ({
+  return [...selectedLoras]
+    .filter(([name]) => !disabledLoras.has(name))
+    .map(([name, weight]) => ({
     name,
     weight,
     source: loraSelectionSources.get(name) ?? "ui",
@@ -6039,11 +6582,13 @@ function setBusy(busy, message = "") {
 
 function updateGenerateButton() {
   const count = elements.candidateCount.value;
-  elements.generateButton.textContent = generationMode === "inpaint"
-    ? `${count}枚の部分修正候補を生成`
+  const label = generationMode === "inpaint"
+    ? "部分修正"
     : generationMode === "img2img"
-      ? `${count}枚のimg2img候補を生成`
-      : `${count}枚の候補を生成`;
+      ? "img2img"
+      : "画像";
+  elements.generateButton.textContent = `${label}を生成（${count}枚）`;
+  renderGenerateActions();
 }
 
 function handleCandidateCountChange() {
