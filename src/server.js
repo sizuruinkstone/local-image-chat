@@ -35,6 +35,8 @@ import {
 import { applyPromptWeights, dedupeLoraTags, sameLoraName } from "../public/lora-tags.js";
 import { buildGrokShareMarkdown, createAiShareService } from "./ai-share.js";
 import { createDiscordService, normalizeDiscordState } from "./discord.js";
+import { hashOutputImage, sha256OfBuffer } from "./content-hash.js";
+import { createIntegrationsRouter, isUsableIntegrationKey } from "./integrations.js";
 import { createHistoryService } from "./history.js";
 import { describeBinding, resolveServerBinding } from "./net-info.js";
 import { createPromptTemplateService } from "./prompt-template.js";
@@ -104,6 +106,21 @@ app.use(express.json({ limit: "50mb" }));
 app.use(express.static(path.join(rootDir, "public")));
 app.use("/outputs", express.static(outputDir));
 app.use("/favorites", express.static(favoritesDir));
+
+// stable-diffusion-manager からの Favorite 同期。
+// 連携キーが未設定なら 503 を返して無効のままにする。
+const integrationKey = String(process.env.LOCAL_IMAGE_CHAT_INTEGRATION_KEY ?? "").trim();
+app.use(
+  "/api/integrations",
+  createIntegrationsRouter({
+    history,
+    discord,
+    integrationKey,
+    onDiscordError: (error) => {
+      console.warn(`[Discord] 連携からの自動送信を開始できませんでした: ${error.message}`);
+    }
+  })
+);
 
 app.get("/api/config", (_request, response) => {
   response.json({
@@ -740,6 +757,22 @@ app.listen(binding.port, binding.host, () => {
 
 backfillFavorites();
 recoverStuckDiscordSends();
+backfillContentHashes();
+
+if (!integrationKey) {
+  console.warn(
+    "[Favorite連携] LOCAL_IMAGE_CHAT_INTEGRATION_KEY が未設定のため、連携APIは無効です。"
+  );
+  console.warn(
+    "  stable-diffusion-manager からのFavorite同期を使う場合は、鍵を設定して再起動してください。"
+  );
+} else if (!isUsableIntegrationKey(integrationKey)) {
+  // ヘッダーへ載せられない鍵は、送信側が送れずに必ず 401 になる。
+  console.warn(
+    "[Favorite連携] LOCAL_IMAGE_CHAT_INTEGRATION_KEY にASCII以外の文字が含まれています。"
+  );
+  console.warn("  HTTPヘッダーで送れないため、半角英数字と記号だけの鍵へ変更してください。");
+}
 
 // 失敗時に原因を判定し、安全側の設定で1回だけ再試行する。
 // 自動再試行がOFFの場合は、提案内容をjob.recoveryへ載せてユーザーへ確認させる。
@@ -858,13 +891,23 @@ async function performGeneration(body, { signal, report }) {
   const savedImages = await Promise.all(generated.images.map(async (image, index) => {
     const kind = settings.hiresEnabled ? "hires" : `candidate-${index + 1}`;
     const filename = `${runId}_${kind}_seed-${image.seed}.png`;
-    await fs.writeFile(path.join(outputDir, filename), Buffer.from(image.base64, "base64"));
+    const buffer = Buffer.from(image.base64, "base64");
+    await fs.writeFile(path.join(outputDir, filename), buffer);
+    // 保存したバイト列からそのままハッシュを取る（読み直しより確実で速い）。
+    // 失敗しても生成自体は成功させ、あとでバックフィルへ回す。
+    let contentSha256 = null;
+    try {
+      contentSha256 = sha256OfBuffer(buffer);
+    } catch (error) {
+      console.warn(`[Favorite連携] ${filename} のハッシュ計算に失敗: ${error.message}`);
+    }
     return {
       imageUrl: `/outputs/${filename}`,
       filename,
       seed: image.seed,
       width: outputSize.width,
-      height: outputSize.height
+      height: outputSize.height,
+      contentSha256
     };
   }));
 
@@ -1352,6 +1395,27 @@ async function recoverStuckDiscordSends() {
     if (recovered) console.warn(`[Discord] 中断された送信を${recovered}件だけ再送可能へ戻しました`);
   } catch (error) {
     console.warn(`[Discord] 送信状態の復旧に失敗: ${error.message}`);
+  }
+}
+
+// 古い履歴には画像内容のSHA-256が無い。
+// stable-diffusion-manager と照合できるよう、ファイルが残っている分だけ補完する。
+async function backfillContentHashes() {
+  try {
+    const summary = await history.backfillContentHashes((filename) =>
+      hashOutputImage(outputDir, filename)
+    );
+    if (!summary.checked) return;
+    console.log(`Favorite連携用ハッシュ: ${summary.checked}件確認`);
+    console.log(`  追加: ${summary.added}`);
+    console.log(`  既存: ${summary.existing}`);
+    console.log(`  失敗: ${summary.failed}`);
+    if (summary.failed) {
+      console.log("  （ファイルが残っていない画像はハッシュを付けられません）");
+    }
+  } catch (error) {
+    // 補完に失敗しても起動は続ける。
+    console.warn(`[Favorite連携] ハッシュの補完に失敗: ${error.message}`);
   }
 }
 

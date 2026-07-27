@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import path from "node:path";
 import { JsonStore } from "./json-store.js";
+import { normalizeContentSha256 } from "./content-hash.js";
 import { normalizeDiscordState } from "./discord.js";
 
 export const UNTITLED_DESCRIPTION = "無題";
@@ -186,8 +187,136 @@ export function createHistoryService(dataDir, { limit = 500 } = {}) {
     async getPreferences() {
       const data = await store.read();
       return analyzePreferences(data.generations);
+    },
+
+    // ---- 画像内容SHA-256での照合（stable-diffusion-manager 連携） ----
+
+    // 同じ内容の画像が複数の世代にある場合は、**最新の世代**を代表とする。
+    // 履歴は新しい順に積まれているので、先頭から探せば最新が見つかる。
+    async getRecipeByContentSha256(sha256) {
+      const key = normalizeContentSha256(sha256);
+      if (!key) return null;
+      const data = await store.read();
+      const found = findImageByContentSha256(data, key);
+      if (!found) return null;
+      return { ...found.generation, selectedImage: structuredClone(found.image) };
+    },
+
+    async getFavoriteStateByContentSha256(sha256) {
+      const key = normalizeContentSha256(sha256);
+      if (!key) return null;
+      const data = await store.read();
+      const found = findImageByContentSha256(data, key);
+      if (!found) return null;
+      return {
+        imageId: found.image.id,
+        generationId: found.generation.id,
+        favorite: Boolean(found.image.favorite),
+        discord: normalizeDiscordState(found.image.discord)
+      };
+    },
+
+    // Favorite は同じ内容の画像すべてへ反映する（表示のずれを作らないため）。
+    // 返すのは最新世代の代表 1 件。
+    async setFavoriteByContentSha256(sha256, favorite) {
+      const key = normalizeContentSha256(sha256);
+      if (!key) return null;
+      const next = Boolean(favorite);
+      let result = null;
+
+      await store.update((data) => {
+        const matches = collectImagesByContentSha256(data, key);
+        if (!matches.length) return data;
+
+        const representative = matches[0];
+        const changed = Boolean(representative.image.favorite) !== next;
+        for (const match of matches) {
+          match.image.favorite = next;
+        }
+        result = {
+          imageId: representative.image.id,
+          generationId: representative.generation.id,
+          filename: representative.image.filename,
+          favorite: next,
+          changed,
+          matchedCount: matches.length,
+          discord: normalizeDiscordState(representative.image.discord)
+        };
+        return data;
+      });
+
+      return result;
+    },
+
+    // 起動時のバックフィル用。ファイルが読める画像だけハッシュを補完する。
+    // hashFile は filename を受け取り、SHA-256 か null を返す関数。
+    async backfillContentHashes(hashFile) {
+      const summary = { checked: 0, added: 0, existing: 0, failed: 0 };
+      const data = await store.read();
+
+      // 先に計算だけ済ませる（store.update の中で await を挟まないため）。
+      const computed = new Map();
+      for (const generation of data.generations) {
+        for (const image of generation.images) {
+          summary.checked += 1;
+          if (normalizeContentSha256(image.contentSha256)) {
+            summary.existing += 1;
+            continue;
+          }
+          // 1 件の失敗で全体を止めない。
+          let hash = null;
+          try {
+            hash = normalizeContentSha256(await hashFile(image.filename));
+          } catch {
+            hash = null;
+          }
+          if (hash) computed.set(image.id, hash);
+          else summary.failed += 1;
+        }
+      }
+
+      if (!computed.size) return summary;
+
+      await store.update((current) => {
+        for (const generation of current.generations) {
+          for (const image of generation.images) {
+            const hash = computed.get(image.id);
+            // 計算中に他の経路で埋まっていたら、そちらを優先する。
+            if (!hash || normalizeContentSha256(image.contentSha256)) continue;
+            image.contentSha256 = hash;
+            summary.added += 1;
+          }
+        }
+        return current;
+      });
+
+      return summary;
     }
   };
+}
+
+// 履歴の並び順（新しい順）のまま、最初に一致した画像を返す。
+function findImageByContentSha256(data, sha256) {
+  for (const generation of data.generations) {
+    const image = generation.images.find(
+      (item) => normalizeContentSha256(item.contentSha256) === sha256
+    );
+    if (image) return { generation, image };
+  }
+  return null;
+}
+
+// 同じ内容の画像をすべて集める（先頭が最新）。
+function collectImagesByContentSha256(data, sha256) {
+  const matches = [];
+  for (const generation of data.generations) {
+    for (const image of generation.images) {
+      if (normalizeContentSha256(image.contentSha256) === sha256) {
+        matches.push({ generation, image });
+      }
+    }
+  }
+  return matches;
 }
 
 function findImage(data, imageId) {
@@ -293,6 +422,9 @@ function normalizeGeneration(input) {
       height: image.height ?? input.settings?.height ?? null,
       favorite: Boolean(image.favorite),
       vote: image.vote ?? null,
+      // 画像内容のSHA-256（v2.20以降）。stable-diffusion-manager との共通キー。
+      // 古い履歴やハッシュ計算に失敗した画像はnullのままで、後から補完する。
+      contentSha256: normalizeContentSha256(image.contentSha256),
       // Discord送信状態（v2.15以降）。古い履歴は not_sent として読む。
       discord: normalizeDiscordState(image.discord)
     }))

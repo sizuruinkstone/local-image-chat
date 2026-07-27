@@ -445,6 +445,137 @@ Prompt:
 
 1と2で設定した場合は画面から編集・削除できません。Discord以外のURLは登録できません。
 
+### stable-diffusion-manager とのFavorite連携
+
+別ツールの [stable-diffusion-manager](https://github.com/sizuruinkstone/stable-diffusion-manager) のギャラリーからFavoriteを付けたときも、**このアプリの既存のDiscord送信機能から1回だけ投稿**されるようにする連携です。
+
+**FavoriteとDiscord投稿の正本はこのアプリ**です。Manager側はWebhook URLもDiscord送信処理も持ちません。
+
+#### 共通キーは画像内容のSHA-256
+
+照合には**画像ファイル全体のSHA-256**だけを使います。ファイル名・パス・履歴のUUIDでは照合しません。
+
+```text
+stable-diffusion-manager の generation.id
+=
+local-image-chat の image.contentSha256
+```
+
+同じ内容の画像なら、フォルダを移動してもファイル名を変えても同じ値になります。
+
+生成時に保存したバイト列からそのまま計算するので、書き出し直後に確定します。ハッシュの計算に失敗しても**生成そのものは成功**させ、`contentSha256: null` として警告だけ出します。
+
+#### 過去履歴のバックフィル
+
+`contentSha256`はv2.20以降の項目です。それより前の履歴には入っていないので、**起動時にファイルが残っている画像だけ**補完します。
+
+```text
+Favorite連携用ハッシュ: 542件確認
+  追加: 463
+  既存: 0
+  失敗: 79
+```
+
+- `outputs`直下のファイルだけを読みます（`filename`はbasenameとして検証し、`..`や絶対パスは扱いません）
+- シンボリックリンクは辿りません
+- 既にハッシュがある画像は再計算しません
+- 1件の失敗で全体を止めません（ファイルを消した画像は`失敗`に数え、次回また試します）
+- `history.json`はアトミックに保存します
+
+#### 連携API
+
+連携APIは**連携キーが設定されているときだけ**有効です。
+
+```text
+LOCAL_IMAGE_CHAT_INTEGRATION_KEY=<半角英数字と記号だけの秘密の文字列>
+```
+
+未設定の場合、連携APIは`503`を返し、起動時に警告を出します。HTTPヘッダーで送るため、**鍵にASCII以外（日本語など）は使えません**。使っている場合も起動時に警告します。
+
+リクエストには次のヘッダーが必要です。
+
+```http
+X-Local-Integration-Key: <secret>
+```
+
+APIは従来どおり`127.0.0.1`だけで待ち受けます（`LAN公開`設定を使わない限り外部からは触れません）。
+
+**Favorite更新**
+
+```http
+PUT /api/integrations/favorites/:sha256
+Content-Type: application/json
+X-Local-Integration-Key: <secret>
+
+{ "favorite": true, "source": "stable-diffusion-manager" }
+```
+
+```json
+{
+  "found": true,
+  "sha256": "...",
+  "favorite": true,
+  "changed": true,
+  "matchedCount": 1,
+  "discord": { "status": "sending", "messageId": null, "sentAt": null, "error": "" }
+}
+```
+
+履歴に無い画像は`404`です。
+
+```json
+{
+  "found": false,
+  "reason": "not-in-local-history",
+  "error": "この画像はlocal-image-chatの履歴にありません"
+}
+```
+
+**一括照会**（一覧表示で1件ずつ問い合わせないため。最大500件）
+
+```http
+POST /api/integrations/favorites/resolve
+Content-Type: application/json
+X-Local-Integration-Key: <secret>
+
+{ "sha256": ["...", "..."] }
+```
+
+```json
+{
+  "items": {
+    "sha256-a": { "found": true, "favorite": true, "discord": { "status": "sent" } },
+    "sha256-b": { "found": false }
+  }
+}
+```
+
+**Webhook URL・絶対パス・Discordトークン・ファイル名は返しません。**
+
+#### Discord投稿は1回だけ
+
+連携経由のFavoriteでDiscord送信を始めるのは、**未送信の画像を新しくFavoriteにしたときだけ**です。
+
+| 送信状態 | Favorite同期での挙動 |
+| --- | --- |
+| `not_sent` | 送信を開始する |
+| `sending` | 既存の処理を待つ（何もしない） |
+| `sent` | 再投稿しない |
+| `failed` | **自動再送しない**（`再送`ボタンから明示的に送る） |
+
+そのため次がすべて「1投稿」になります。
+
+- このアプリでFavorite → Discordへ1回
+- ManagerでFavorite → 連携経由でDiscordへ1回
+- 両方から同時にFavorite → Discordへ1回
+- Managerの再送リトライ・ページ再読み込み・再スキャン → 増えない
+
+**一度送信済みの画像は、Favoriteを外して付け直しても自動再投稿しません。** 再投稿したい場合は`再送`操作を使ってください。
+
+Favorite解除時は、このアプリのFavoriteと`favorite`フォルダの複製を外すだけです。**Discordの投稿は削除せず、送信状態も消しません。**
+
+同じ内容の画像が複数の世代にある場合、レシピの代表は**最新の世代**を使い、Favorite状態は同じ内容の画像すべてへ反映します。
+
 ### 履歴詳細からのコピー
 
 `詳細`の中ほどに2つのコピーボタンがあります。コピーに成功するとボタンが一時的に`Copied!`へ変わり、失敗した場合はトーストでエラーを表示します（成功扱いにはしません）。
