@@ -165,7 +165,8 @@ const elements = Object.fromEntries(
     "copyGrokShareButton", "updateShareCsvButton", "shareBarStatus",
     "mainNav", "viewGenerate", "viewGallery", "viewCompare", "viewSettings",
     "generateActions", "generateProgress", "generateProgressText", "cancelGenerateButton",
-    "showCombinedPromptButton", "sendToCompareButton",
+    "showCombinedPromptButton", "compareShortcutDetails", "compareShortcutParameter",
+    "compareShortcutValues", "compareShortcutButton",
     "generationSettingsDetails", "advancedSettingsDetails", "samplerPresets",
     "samplerPickerButton", "samplerPickerValue", "schedulerPickerButton", "schedulerPickerValue",
     "loraUseDetails", "loraUseCount", "usedLoraList", "addLoraButton",
@@ -522,7 +523,18 @@ elements.resetGalleryFilterButton.addEventListener("click", resetGalleryFilter);
 elements.samplerPickerButton.addEventListener("click", () => void openSamplerPicker("sampler"));
 elements.schedulerPickerButton.addEventListener("click", () => void openSamplerPicker("scheduler"));
 elements.showCombinedPromptButton.addEventListener("click", showCombinedPrompt);
-elements.sendToCompareButton.addEventListener("click", sendToCompare);
+elements.compareShortcutButton.addEventListener("click", sendToCompare);
+elements.compareShortcutDetails.addEventListener("toggle", () => {
+  if (elements.compareShortcutDetails.open) syncCompareShortcut();
+});
+elements.compareShortcutParameter.addEventListener("change", () => {
+  // 実体は比較画面のフォーム。ここは入り口なので、値だけ渡す。
+  elements.experimentParameter.value = elements.compareShortcutParameter.value;
+  syncExperimentTargetVisibility();
+});
+elements.compareShortcutValues.addEventListener("input", () => {
+  elements.experimentValues.value = elements.compareShortcutValues.value;
+});
 elements.cancelGenerateButton.addEventListener("click", cancelActiveJob);
 elements.addLoraButton.addEventListener("click", () => void openLoraPicker());
 elements.pickCharacterButton.addEventListener("click", () => void openCharacterPicker());
@@ -5258,11 +5270,28 @@ function showCombinedPrompt() {
 }
 
 // 現在の設定のまま比較画面へ移動する（生成は行わない）。
+// 比較の状態はすべて既存の比較フォームが持ち、ここは値を渡す入り口だけ。
 function sendToCompare() {
+  if (elements.compareShortcutParameter.value) {
+    elements.experimentParameter.value = elements.compareShortcutParameter.value;
+    syncExperimentTargetVisibility();
+  }
+  if (elements.compareShortcutValues.value.trim()) {
+    elements.experimentValues.value = elements.compareShortcutValues.value;
+  }
   showView("compare");
   elements.experimentDetails.open = true;
   elements.experimentDetails.scrollIntoView({ behavior: "smooth", block: "start" });
   toast.info("現在のPrompt・LoRA・生成設定のまま比較できます");
+}
+
+// 生成設定内のショートカットを、比較フォームの現在値へ合わせる。
+function syncCompareShortcut() {
+  elements.compareShortcutParameter.replaceChildren(
+    ...[...elements.experimentParameter.options].map((option) => new Option(option.text, option.value))
+  );
+  elements.compareShortcutParameter.value = elements.experimentParameter.value;
+  elements.compareShortcutValues.value = elements.experimentValues.value;
 }
 
 // 生成中は同じ位置へ進捗を出し、ボタンを押せなくする。
@@ -5271,7 +5300,7 @@ function renderGenerateActions() {
   elements.generateProgress.classList.toggle("hidden", !busy);
   // 生成枚数が不正なままでは開始しない。
   elements.generateButton.disabled = busy || !isValidCandidateCount(elements.candidateCount.value);
-  elements.sendToCompareButton.disabled = busy;
+  elements.compareShortcutButton.disabled = busy;
 }
 
 // 実験一覧は「比較」画面、画像一覧は「ギャラリー」画面が持つ。

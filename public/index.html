@@ -368,6 +368,22 @@
                     <label>高さ<input id="height" type="number" step="64" /></label>
                   </div>
 
+                  <details id="compareShortcutDetails" class="compareShortcut">
+                    <summary>比較実験</summary>
+                    <p class="hint">いまの生成設定のまま、1項目だけ値を変えて順番に生成します。詳細な操作は「比較」画面です。</p>
+                    <div class="settingsGrid">
+                      <label>比較する項目
+                        <select id="compareShortcutParameter"></select>
+                      </label>
+                      <label>比較候補（カンマ区切り）
+                        <input id="compareShortcutValues" type="text" placeholder="0.5, 0.6, 0.7" />
+                      </label>
+                    </div>
+                    <div class="buttonRow compactButtons">
+                      <button id="compareShortcutButton" class="secondary" type="button">現在の設定を比較へ追加</button>
+                    </div>
+                  </details>
+
                   <details id="advancedSettingsDetails" class="advancedSettings">
                     <summary>詳細設定</summary>
                     <div class="settingsGrid">
@@ -452,7 +468,6 @@
                       <button id="candidateCountUp" class="stepperButton" type="button" aria-label="生成枚数を増やす">＋</button>
                     </div>
                     <div class="generateActionButtons">
-                      <button id="sendToCompareButton" class="secondary" type="button">比較実験へ送る</button>
                       <button id="generateButton" class="primary" type="button">画像を生成</button>
                     </div>
                   </div>

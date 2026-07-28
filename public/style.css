@@ -753,10 +753,10 @@ img, canvas, video { max-width: 100%; }
 .genSection > summary { padding: 2px 0; }
 
 /* 中央下部の操作バー（PCでも追従する） */
-.generateActions { position: sticky; bottom: 0; z-index: 5; display: grid; gap: 8px; margin: 14px -22px -22px; padding: 12px 22px calc(12px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); background: var(--panel); }
+.generateActions { position: sticky; bottom: 0; z-index: 5; display: grid; gap: 8px; margin: 14px -22px -22px; padding: 10px 22px calc(10px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); background: var(--panel); }
 .generateActionButtons { display: flex; flex-wrap: wrap; gap: 8px; }
 .generateActionButtons button { flex: 1 1 auto; }
-.generateActionButtons #generateButton { flex: 2 1 200px; font-weight: 800; }
+.generateActionButtons #generateButton { flex: 1 1 200px; min-height: 46px; font-weight: 800; }
 .generateProgress { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 10px; border: 1px solid rgba(185,255,77,.3); border-radius: 10px; background: rgba(185,255,77,.07); color: var(--accent); font-size: 12px; }
 
 /* Sampler / Scheduler 選択 */
@@ -814,6 +814,8 @@ img, canvas, video { max-width: 100%; }
 }
 
 @media (max-width: 760px) {
+  /* 下部ナビの高さ。固定バーの位置と本文の余白で共有する */
+  :root { --mobile-nav-height: 62px; }
   .appShell { grid-template-columns: 1fr; }
   /* スマホはナビを画面下部へ固定し、その上に生成ボタンを置く */
   .mainNav {
@@ -828,14 +830,19 @@ img, canvas, video { max-width: 100%; }
     border-top: 1px solid var(--line);
     border-radius: 0;
   }
-  .navItem { grid-template-columns: 1fr; justify-items: center; gap: 2px; padding: 6px 4px; font-size: 10px; }
+  .navItem { grid-template-columns: 1fr; justify-items: center; gap: 2px; padding: 5px 4px; min-height: 0; font-size: 10px; }
   .navIcon { font-size: 15px; }
   /* 下部ナビの分だけ本文へ余白を足す（入力欄が隠れないように） */
-  .shell { padding-bottom: calc(84px + env(safe-area-inset-bottom)); }
-  .generateActions { bottom: calc(64px + env(safe-area-inset-bottom)); margin: 14px -14px 0; padding: 10px 14px; border-radius: 12px 12px 0 0; }
-  .generateActionButtons { flex-direction: column-reverse; }
-  .generateActionButtons button { width: 100%; }
-  .generateActionButtons #generateButton { flex: 1 1 auto; font-size: 15px; }
+  .shell { padding-bottom: calc(var(--mobile-nav-height) + 96px + env(safe-area-inset-bottom)); }
+  /* 下部ナビの直上へ、必要最小限の高さで置く（原則1行） */
+  .generateActions { bottom: calc(var(--mobile-nav-height) + env(safe-area-inset-bottom)); margin: 12px -14px 0; padding: 8px 12px; border-radius: 12px 12px 0 0; gap: 6px; }
+  .generateActionRow { flex-wrap: wrap; gap: 8px; }
+  .candidateStepper { flex: 0 0 auto; gap: 4px; }
+  /* 文字ラベルは省いてアイコン的に見せる（読み上げ用にaria-labelは残る） */
+  .candidateStepperLabel { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  /* 生成ボタンは52〜56px。横幅が足りない時だけ次の行へ回る */
+  .generateActionButtons { flex: 1 1 120px; }
+  .generateActionButtons #generateButton { width: 100%; min-height: 54px; font-size: 15px; }
   .viewPanel { padding: 14px; }
 }
 
@@ -903,13 +910,30 @@ img, canvas, video { max-width: 100%; }
   .pickerGroups { max-height: 76px; }
   .pickerCard { padding: 8px; }
   .pickerStar { width: 36px; height: 36px; }
-  .generateActionRow { flex-direction: column; align-items: stretch; }
-  .candidateStepper { justify-content: space-between; }
-  .candidateStepper input { width: 72px; height: 44px; }
-  .stepperButton { width: 44px; height: 44px; }
+  .candidateStepper input { width: 54px; height: 46px; }
+  .stepperButton { width: 46px; height: 46px; }
 }
 
 @media (max-width: 380px) {
   .pickerGrid { grid-template-columns: 1fr; }
+}
+
+
+/* 生成設定内の比較実験ショートカット（初期は閉じる） */
+.compareShortcut { margin-top: 10px; }
+.compareShortcut > summary { color: var(--muted); font-size: 12px; cursor: pointer; }
+.compareShortcut[open] > summary { color: var(--text); }
+
+/* ===== 下部固定バー（スマホ）: 生成枚数 + 画像を生成 だけを1行で ===== */
+/* 後段の基本スタイルへ上書きされないよう、ファイル末尾でまとめて指定する */
+@media (max-width: 760px) {
+  .generateActionRow { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .generateActionRow .candidateStepper { flex: 0 0 auto; justify-content: flex-start; gap: 4px; }
+  /* 文字ラベルは省いて幅を稼ぐ（読み上げ用にaria-labelは残す） */
+  .generateActionRow .candidateStepperLabel { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .generateActionRow .generateActionButtons { flex: 1 1 120px; }
+  .generateActionRow .generateActionButtons #generateButton { width: 100%; min-height: 54px; font-size: 15px; }
+  .candidateStepper input { width: 54px; height: 46px; padding: 6px 4px; }
+  .stepperButton { width: 46px; height: 46px; }
 }
 
