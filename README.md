@@ -2,6 +2,13 @@
 
 日本語の指示をOllamaでStable Diffusion向けタグに変換し、ReForge APIでローカル画像生成するツールです。
 
+## v2.21.2の修正
+
+- iPhone Safariで、長いCheckpoint名（`sd\obsessionIllustrious_vPredV20.safetensors` など）を選ぶと生成設定の展開時に画面が横へ広がり、右側に余白が出る問題を修正
+- 原因はCheckpointの`<select>`。Safariはselectの最小幅を「最長optionの幅」として扱うため、`min-width: auto`のままだとgridの列ごと押し広げられていた
+- Checkpointのselectへ`min-width: 0` / `max-width: 100%` / `text-overflow: ellipsis`を指定し、設定系のgridを`minmax(0, 1fr)`へ統一
+- `使用中: モデル名`などモデル名を含む説明・状態表示を`overflow-wrap: anywhere`で折り返すようにした
+
 ## v2.21.1の修正
 
 - スマホの下部固定バーをコンパクト化（127px → 71px）。`生成枚数`のステッパーと`画像を生成`だけを原則1行で表示する
