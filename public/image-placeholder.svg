@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 384" role="img" aria-label="画像を表示できません">
+  <rect width="384" height="384" rx="28" fill="#15171d"/>
+  <path d="M96 270l68-79 44 47 35-39 50 71H96z" fill="#3b4050"/>
+  <circle cx="258" cy="128" r="28" fill="#565d70"/>
+  <path d="M120 104l144 176M264 104L120 280" stroke="#d16a78" stroke-width="14" stroke-linecap="round" opacity=".8"/>
+</svg>

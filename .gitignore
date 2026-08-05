@@ -7,6 +7,7 @@ outputs/favorite/*.png
 outputs/favorite/*.jpg
 outputs/favorite/*.jpeg
 outputs/favorite/*.webp
+outputs/thumbnails/
 favorites/
 config.local.json
 data/

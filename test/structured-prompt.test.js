@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   PROMPT_FIELDS,
+  activeTriggersForSources,
   appendTriggersToRawPrompt,
   buildFinalPrompt,
   classifyTriggerField,
@@ -167,12 +168,57 @@ test("最終プロンプトは各項目の直後にその項目のトリガー�
   );
 });
 
+test("入力欄に同じ由来タグがある場合は最終プロンプトへ重複追加しない", () => {
+  const triggers = [
+    {
+      id: "1",
+      sourceLoraIds: ["ray"],
+      text: "ray_\\(arknights\\)",
+      weight: 1,
+      targetField: "character",
+      enabled: true
+    },
+    {
+      id: "2",
+      sourceLoraIds: ["ray"],
+      text: "rabbit ears",
+      weight: 1,
+      targetField: "character",
+      enabled: true
+    }
+  ];
+  assert.equal(
+    buildFinalPrompt({ character: "1girl, ray_\\(arknights\\), purple eyes" }, triggers),
+    "1girl, ray_\\(arknights\\), purple eyes, rabbit ears"
+  );
+});
+
 test("無効にしたトリガーワードは最終プロンプトへ入らない", () => {
   const triggers = [
     { id: "1", sourceLoraIds: ["a"], text: "character_name", weight: 1, targetField: "character", enabled: false },
     { id: "2", sourceLoraIds: ["a"], text: "kept", weight: 1, targetField: "character", enabled: true }
   ];
   assert.equal(buildFinalPrompt({ character: "1girl" }, triggers), "1girl, kept");
+});
+
+test("LoRAをOFFにしても由来情報を保持し最終Promptだけから除外する", () => {
+  const triggers = [
+    { id: "1", sourceLoraIds: ["ray"], text: "ray_\\(arknights\\)", weight: 1, targetField: "character", enabled: true },
+    { id: "2", sourceLoraIds: ["outfit-choice:ray::dream"], text: "ray_\\(dreaming_high\\)", weight: 1, targetField: "appearance", enabled: true },
+    { id: "3", sourceLoraIds: ["other"], text: "shared_style", weight: 1, targetField: "style", enabled: true }
+  ];
+  const disabled = activeTriggersForSources(triggers, (sourceId) =>
+    !sourceId.includes("ray")
+  );
+  assert.deepEqual(disabled.map((trigger) => trigger.text), ["shared_style"]);
+  assert.equal(triggers.length, 3, "元の由来情報は削除しない");
+
+  const enabled = activeTriggersForSources(triggers, () => true);
+  assert.deepEqual(enabled.map((trigger) => trigger.text), [
+    "ray_\\(arknights\\)",
+    "ray_\\(dreaming_high\\)",
+    "shared_style"
+  ]);
 });
 
 test("入力欄が空でもトリガーワードだけで結合できる", () => {

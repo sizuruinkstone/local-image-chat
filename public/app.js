@@ -14,6 +14,10 @@ import {
 import { confirmModal, copyToClipboard, flashLabel, openModal, toast, withBusy } from "./ui-kit.js";
 import { openLoraEditor } from "./lora-editor.js";
 import { describeRetryInfo, openCompareView } from "./compare-view.js";
+import {
+  configureThumbnailImage,
+  originalImageUrl
+} from "./image-delivery.js";
 import { buildMetadataText, buildPromptText } from "./metadata-format.js";
 import { buildQueuePanel, summarizeQueue } from "./queue-view.js";
 import {
@@ -66,10 +70,17 @@ import {
 import {
   collectCheckpoints,
   collectLoras,
+  collectPromptTags,
   describeGalleryFilter,
   filterGalleryEntries,
+  sortGalleryEntries,
   toGalleryEntries
 } from "./gallery-filter.js";
+import {
+  STUDIO_HISTORY_FILTERS,
+  filterStudioHistoryEntries,
+  normalizeStudioHistoryFilter
+} from "./studio-history.js";
 import {
   buildLoraNotices,
   describeLoraNotices,
@@ -88,6 +99,7 @@ import {
 import {
   PROMPT_FIELDS,
   PROMPT_FIELD_LABELS,
+  activeTriggersForSources,
   appendTriggersToRawPrompt,
   buildFinalPrompt,
   formatTriggerWord,
@@ -100,23 +112,124 @@ import {
   triggerKey,
   triggersForField
 } from "./structured-prompt.js";
+import {
+  defaultLoraOutfitChoice,
+  listLoraOutfitChoices,
+  outfitChoiceSourceId,
+  outfitSourceLoraName,
+  outfitStateSourceId,
+  parseOutfitStateSourceId,
+  resolveLoraBaseTriggerWords,
+  resolveLoraOutfitPrompt
+} from "./lora-outfit-selection.js";
+import {
+  DEFAULT_TITLE_MODE,
+  TITLE_MAX_LENGTH,
+  generationTitle,
+  normalizeManualTitle,
+  normalizeTitleMode,
+  normalizeTitleTemplate
+} from "./history-title.js";
 
 const PROFILE_STORAGE_VERSION = 3;
 const MAX_INIT_IMAGE_BYTES = 20 * 1024 * 1024;
+const TITLE_STORAGE_KEYS = {
+  mode: "localImageChat.titleGenerationMode",
+  template: "localImageChat.titleTemplate"
+};
+
+const SETTINGS_CATEGORIES = Object.freeze([
+  { id: "general", label: "一般", description: "接続確認、共有、日常のアプリ操作をまとめます。" },
+  { id: "prompt", label: "プロンプト", description: "プロンプト部品と生成補助の既存設定をまとめます。" },
+  { id: "model", label: "モデル", description: "Checkpointプロフィール、既定値、自動適用、LoRAセットを管理します。" },
+  { id: "lora", label: "LoRA", description: "LoRAの検索・選択・編集とCivitai登録を管理します。" },
+  { id: "history", label: "履歴・ギャラリー", description: "履歴に表示するタイトルの既存設定を管理します。" },
+  { id: "discord", label: "Discord通知", description: "Favorite通知と生成完了通知の既存設定を管理します。" },
+  { id: "connection", label: "接続", description: "スマホ接続と既存の接続案内を確認します。" },
+  { id: "details", label: "詳細", description: "Grok向け指示テンプレートなど高度な補助設定を管理します。" },
+  { id: "appInfo", label: "アプリ情報", description: "バージョン確認と既存の更新操作を行います。" }
+]);
+
+const SETTINGS_SEARCH_INDEX = Object.freeze([
+  {
+    categoryId: "history",
+    label: "履歴タイトル",
+    targetId: "titleGenerationDetails",
+    keywords: "履歴 ギャラリー タイトル 日時 キャラクター Model モデル 衣装 カスタムテンプレート"
+  },
+  {
+    categoryId: "general",
+    label: "アプリ管理",
+    targetId: "appManagementDetails",
+    keywords: "アプリ 接続確認 Ollama ReForge 最新版 Grok AI共有 CSV"
+  },
+  {
+    categoryId: "model",
+    label: "Checkpoint管理",
+    targetId: "checkpointDetails",
+    keywords: "Checkpoint モデル プロフィール 既定値 自動適用 LoRAセット"
+  },
+  {
+    categoryId: "lora",
+    label: "LoRA管理",
+    targetId: "settingsLoraDetails",
+    keywords: "LoRA 検索 分類 Preview プレビュー 選択 編集 衣装 Trigger"
+  },
+  {
+    categoryId: "lora",
+    label: "CivitaiからLoRAを追加",
+    targetId: "civitaiDetails",
+    keywords: "Civitai URL APIキー 保存先 フォルダ ダウンロード 登録"
+  },
+  {
+    categoryId: "prompt",
+    label: "プロンプト部品・好み補助",
+    targetId: "promptPartsDetails",
+    keywords: "プロンプト 部品 好み 補助 キャラクター 衣装 構図 シチュエーション"
+  },
+  {
+    categoryId: "details",
+    label: "Grok向け指示テンプレート",
+    targetId: "promptTemplateDetails",
+    keywords: "Grok 指示テンプレート MY_SD_SETUP lora_list CSV コピー"
+  },
+  {
+    categoryId: "discord",
+    label: "Discord通知",
+    targetId: "discordDetails",
+    keywords: "Discord Webhook Favorite 生成完了通知 添付 表示項目 テスト通知 保存"
+  },
+  {
+    categoryId: "connection",
+    label: "スマホから接続",
+    targetId: "mobileAccessDetails",
+    keywords: "スマホ ReForge Tailscale LAN 接続 ホーム画面"
+  },
+  {
+    categoryId: "appInfo",
+    label: "アプリのアップデート",
+    targetId: "updateDetails",
+    keywords: "アップデート 更新 GitHub Token 最新版 適用"
+  }
+]);
+
+const DEFAULT_SETTINGS_CATEGORY = "general";
+let activeSettingsCategory = DEFAULT_SETTINGS_CATEGORY;
 
 const elements = Object.fromEntries(
   [
-    "health", "healthButton", "description", "promptButton", "generateButton",
+    "health", "healthButton", "generateButton",
     "prompt", "negativePrompt", "width", "height", "steps", "cfgScale", "seed",
+    "resolutionPreset", "randomizeSeedButton", "seedFixedToggle", "generationSettingsSummary", "generationTitle",
     "samplerName", "scheduler", "noiseSchedule", "candidateCount", "hiresScale", "hiresSteps",
     "hiresDenoising", "hiresUpscaler", "emptyState", "loading", "loadingText",
     "resultTab",
     "resultContent", "candidateSection", "candidateGrid", "candidateSummary",
-    "selectedSeedText", "finishButton", "finalResult", "resultImage", "seedText",
+    "finishButton", "finalResult", "resultImage", "seedText",
     "resolutionText", "downloadLink", "explanation", "error", "loraSearch",
     "loraList", "loraStatus", "loraSelectedCount", "selectedLoraSummary",
     "loraCompatibilityFilter", "loraPreview",
-    "refreshLorasButton", "loraCategories", "versionText", "jobBar", "jobMessage",
+    "refreshLorasButton", "loraCategories", "jobBar", "jobMessage",
     "checkpointDetails", "checkpointSelect", "refreshCheckpointsButton", "checkpointStatus",
     "checkpointFamilyBadge", "checkpointProfileSelect", "checkpointAutoApply",
     "checkpointProfileSummary", "checkpointSetSelect", "checkpointSetAutoApply",
@@ -137,8 +250,15 @@ const elements = Object.fromEntries(
     "refreshCivitaiRegistrationsButton",
     "civitaiPreview", "civitaiStatus", "updateStatusButton", "updateDetails",
     "githubToken", "checkUpdateButton", "applyUpdateButton", "updateStatus",
-    "refreshHistoryButton", "preferenceSummary", "historyGrid",
-    "compareSelectionButton", "experimentGrid", "refreshExperimentsButton",
+    "refreshHistoryButton", "historyLoadMoreButton", "preferenceSummary", "historyGrid",
+    "gallerySort", "galleryFilterButton", "galleryFilterDialog", "galleryFilterCloseButton",
+    "galleryAllButton", "galleryFavoriteButton", "galleryTagSearch", "galleryTagOptions", "gallerySelectedTags",
+    "galleryFilterDialogSummary", "galleryCompareModeButton", "galleryCompareModeBar",
+    "galleryCompareModeCount", "galleryCompareModeMessage", "galleryCompareClearButton", "galleryCompareExitButton",
+    "compareSelectionButton", "compareSelectionBadge", "compareTray", "compareTrayCount",
+    "compareTrayOpenButton", "compareTrayClearButton", "compareTrayItems",
+    "imageCompareMessage", "imageCompareGalleryButton", "imageCompareStartButton",
+    "experimentGrid", "refreshExperimentsButton",
     "txt2imgModeButton", "img2imgModeButton", "inpaintModeButton", "img2imgPanel", "img2imgDropZone",
     "initImageInput", "initImageEmpty", "initImagePreview", "chooseInitImageButton",
     "clearInitImageButton", "initImageStatus", "img2imgPreset", "img2imgDenoising",
@@ -160,25 +280,50 @@ const elements = Object.fromEntries(
     "triggerListCharacter", "triggerListAppearance", "triggerListComposition",
     "triggerListSituation", "triggerListStyle", "triggerListExtra",
     "discordDetails", "discordAutoSend", "discordWebhook", "discordIncludePrompt",
-    "discordIncludeMetadata", "saveDiscordSettingsButton", "clearDiscordWebhookButton",
-    "discordSettingsStatus", "finalDiscordStatus", "importAiPromptButton", "loraSyncNotice",
+    "discordIncludeMetadata", "discordGenerationAutoSend", "discordGenerationIncludeImage",
+    "discordGenerationIncludeTitle", "discordGenerationIncludeModel", "discordGenerationIncludeSeed",
+    "discordGenerationIncludeDuration", "saveDiscordSettingsButton", "clearDiscordWebhookButton",
+    "sendDiscordTestButton", "discordSettingsStatus", "finalDiscordStatus", "finalDiscordGenerationStatus",
+    "importAiPromptButton", "loraSyncNotice", "settingsLoraSyncNotice",
     "copyGrokShareButton", "updateShareCsvButton", "shareBarStatus",
     "mainNav", "viewGenerate", "viewGallery", "viewCompare", "viewSettings",
+    "settingsSearch", "settingsSearchResults", "settingsCategoryNav", "settingsCategorySelect",
+    "settingsContent", "settingsCategoryTitle", "settingsCategoryDescription",
+    "settingsReforgeStatus", "settingsDiscordStatus", "settingsUpdateStatus",
     "generateActions", "generateProgress", "generateProgressText", "cancelGenerateButton",
     "showCombinedPromptButton", "compareShortcutDetails", "compareShortcutParameter",
     "compareShortcutValues", "compareShortcutButton",
-    "generationSettingsDetails", "advancedSettingsDetails", "samplerPresets",
+    "generationSettingsDetails", "advancedSettingsDetails", "samplerPresets", "titleGenerationMode",
+    "titleTemplateRow", "titleTemplate",
     "samplerPickerButton", "samplerPickerValue", "schedulerPickerButton", "schedulerPickerValue",
     "loraUseDetails", "loraUseCount", "usedLoraList", "addLoraButton",
-    "addCivitaiLoraButton", "candidateCountDown", "candidateCountUp",
-    "pickCharacterButton", "pickOutfitButton", "regenerateFinalButton", "openInGalleryButton", "galleryKindFilter", "galleryCheckpoint", "galleryLora",
+    "loraUseSummary", "openLoraManagementButton", "settingsLoraDetails", "candidateCountDown", "candidateCountUp",
+    "regenerateFinalButton", "openInGalleryButton", "galleryKindFilter", "galleryCheckpoint", "galleryLora",
     "galleryPeriod", "gallerySearch", "galleryFilterSummary", "resetGalleryFilterButton",
-    "mobileAccessDetails", "mobileAccessStatus",
+    "studioOutputStats", "studioGenerationStatus", "studioGenerationTime", "studioResolution", "studioSeed",
+    "studioSampler", "studioCfg", "studioSteps", "studioRecentCount", "studioRecentList",
+    "studioHistoryAllButton", "studioHistoryFavoriteButton",
+    "studioMetadataEmpty", "studioMetadataContent", "studioMetaModel", "studioMetaCheckpoint", "studioMetaScheduler",
+    "studioMetaSampler", "studioMetaSteps", "studioMetaCfg", "studioMetaSeed", "studioMetaLoraCount",
+    "studioMetaResolution", "studioMetaLoras", "studioMetaCreated", "studioMetaVram",
+    "studioMetaModelHash", "studioMetaParameterSampler", "studioMetaParameterSteps",
+    "studioMetaParameterCfg", "studioMetaParameterSeed", "studioMetaWidth", "studioMetaHeight",
+    "studioMetaBatchCount", "studioMetaBatchSize", "studioMetaHires", "studioMetaDenoising",
+    "studioMetaVae", "studioMetaClipSkip", "studioMetaPositive", "studioMetaNegative",
+    "studioCopyPromptButton", "studioCopyNegativeButton", "studioCopyMetadataButton",
+    "studioOpenDetailButton", "studioLoadRecipeButton", "studioCompareButton", "studioMetadataButton",
+    "studioMainPreview", "studioMainImage", "studioMainFavoriteButton",
+    "studioMainCompareButton", "studioMainMetadataButton", "studioMainRegenerateButton",
+    "mobileAccessDetails", "mobileAccessStatus", "studioGenerationSettingsMount", "promptPartsDetails",
     "promptTemplateDetails", "grokInstructions", "grokSetupDoc", "grokLoraCsv",
     "copyGrokTemplateButton", "saveGrokTemplateButton", "generateLoraCsvButton",
     "resetGrokInstructionsButton", "grokTemplateStatus"
   ].map((id) => [id, document.getElementById(id)])
 );
+
+// プロンプト部品だけを設定画面へ移す。生成に使う設定フォームは左カラムへ集約する。
+// 同じinput要素をそのまま使うため、生成APIへ渡す設定値や復元処理は変わらない。
+elements.studioGenerationSettingsMount.append(elements.promptPartsDetails);
 
 // 用途別プロンプトの入力欄・トリガーワード表示枠と、要素IDの対応。
 const PROMPT_FIELD_ELEMENTS = {
@@ -196,9 +341,17 @@ const DISCORD_STATUS_LABELS = {
   failed: "★ Favorite済み・Discord送信失敗"
 };
 
+const DISCORD_GENERATION_STATUS_LABELS = {
+  sending: "★ 生成通知送信中…",
+  sent: "★ 生成通知送信済み",
+  failed: "★ 生成通知送信失敗"
+};
+
 // 画像IDごとのDiscord送信状態。履歴の再描画で作り直されるバッジもここから読む。
 const discordStates = new Map();
+const discordGenerationStates = new Map();
 const discordWatchers = new Set();
+const discordGenerationWatchers = new Set();
 
 // LoRAトリガーワード一覧の開閉状態（項目ごと）。既定は折りたたみ。
 const triggerPanelOpen = new Map();
@@ -270,14 +423,25 @@ let historyEntries = [];
 // ここを切り替えても生成は止まらない。
 let currentView = "generate";
 // ギャラリーの絞り込み条件（画面側だけの状態。履歴データは変えない）。
-let galleryFilter = { kind: "all", checkpoint: "", lora: "", period: "", query: "" };
+let galleryFilter = { kind: "all", checkpoint: "", lora: "", period: "", query: "", tags: [] };
+let gallerySort = "newest";
+let galleryTagQuery = "";
+let galleryCompareMode = false;
 // Sampler / Scheduler の候補一覧（ReForgeから取得、失敗時は既定値）。
 let samplerOptions = { samplers: [], schedulers: [] };
 // 直近に取得した履歴。絞り込みのたびに取り直さないよう保持する。
 let lastHistoryGenerations = [];
+const HISTORY_PAGE_SIZE = 20;
+let historyCursor = null;
+let historyHasMore = true;
+let historyLoading = false;
+let historyTotal = 0;
 // 選択したまま「今回は使わない」LoRA（ON/OFF）。選択自体は保持する。
 const disabledLoras = new Set();
 const compareSelection = new Map();
+const experimentEntryCache = new Map();
+// 初回履歴取得はトップレベル初期化中にも完了し得るため、先に用意する。
+const imageFavorites = new Map();
 // 次の生成が「どの派生操作から来たか」を履歴へ残すための一時情報。
 let pendingDerivation = null;
 let installedCheckpoints = [];
@@ -311,6 +475,10 @@ let maskSourceKey = "";
 let maskUndoStack = [];
 let maskRedoStack = [];
 const MAX_MASK_HISTORY = 12;
+let studioInspection = null;
+let studioHistoryFilter = STUDIO_HISTORY_FILTERS.all;
+let studioStartedAt = 0;
+let studioElapsedTimer = null;
 const selectedLoras = new Map();
 // LoRAごとの選択元: "ui"（UI操作）/ "prompt"（プロンプト内タグ）/ "both"
 const loraSelectionSources = new Map();
@@ -322,9 +490,11 @@ const loraNegativeWords = loadStringMap("localImageChat.loraNegativeWords");
 const loraProfileAssignments = loadStringMap("localImageChat.loraProfileAssignments");
 const loraPresetSelections = loadStringMap("localImageChat.loraPresetSelections");
 const loraAddonSelections = loadStringMap("localImageChat.loraAddonSelections");
+const loraOutfitSelections = loadLoraOutfitSelections();
 const checkpointProfileAssignments = loadStringMap("localImageChat.checkpointProfileAssignments");
 
 await loadConfig();
+loadTitleSettings();
 initializeCheckpointControls();
 loadImg2ImgPreferences();
 loadInpaintPreferences();
@@ -344,17 +514,37 @@ await Promise.all([
 markSettingsApplied();
 setGenerationMode("txt2img");
 updateGenerateButton();
+syncStudioOutputStats();
 setupClearableFields();
 // 再読み込み後も、サーバー側で走っているジョブを拾って右上へ表示する。
-startQueuePolling();
+  startQueuePolling();
 
 elements.healthButton.addEventListener("click", checkHealth);
-elements.promptButton.addEventListener("click", buildPrompt);
+elements.titleGenerationMode.addEventListener("change", saveTitleSettings);
+elements.titleTemplate.addEventListener("input", saveTitleSettings);
 elements.generateButton.addEventListener("click", generateCandidates);
 elements.finishButton.addEventListener("click", finishSelected);
 elements.mainNav.addEventListener("click", (event) => {
   const button = event.target.closest("[data-view]");
   if (button) showView(button.dataset.view);
+});
+elements.settingsCategoryNav.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-settings-category]");
+  if (button) activateSettingsCategory(button.dataset.settingsCategory);
+});
+elements.settingsCategorySelect.addEventListener("change", () => {
+  activateSettingsCategory(elements.settingsCategorySelect.value);
+});
+elements.settingsSearch.addEventListener("input", renderSettingsSearchResults);
+elements.settingsSearchResults.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-settings-search-category]");
+  if (!button) return;
+  activateSettingsCategory(button.dataset.settingsSearchCategory, {
+    targetId: button.dataset.settingsSearchTarget,
+    focus: true
+  });
+  elements.settingsSearch.value = "";
+  renderSettingsSearchResults();
 });
 window.addEventListener("hashchange", () => {
   const view = viewFromHash(location.hash);
@@ -362,7 +552,74 @@ window.addEventListener("hashchange", () => {
 });
 // 生成結果（Hires仕上げ）画像のクリックで拡大モーダルを開く。
 elements.resultImage.addEventListener("click", () => {
-  if (finalImage) openImageModal(finalImage.imageUrl, elements.finalTitle.textContent || `Seed ${finalImage.seed}`);
+  if (finalImage) openImageModal(
+    originalImageUrl(finalImage),
+    finalGeneration ? generationTitle(finalGeneration) : elements.finalTitle.textContent
+  );
+});
+elements.studioMetadataButton.addEventListener("click", () => {
+  if (finalGeneration && finalImage) setStudioInspection(finalGeneration, finalImage);
+});
+elements.studioCompareButton.addEventListener("click", () => {
+  if (!finalGeneration || !finalImage) return;
+  toggleCompareSelection(finalImage, finalGeneration);
+});
+elements.studioOpenDetailButton.addEventListener("click", () => {
+  if (studioInspection) openHistoryDetail(studioInspection.generation, studioInspection.image);
+});
+elements.studioLoadRecipeButton.addEventListener("click", () => {
+  if (studioInspection) activateCompositionLock(studioInspection.generation, studioInspection.image);
+});
+elements.studioMainFavoriteButton.addEventListener("click", () => {
+  if (studioInspection) void toggleFavorite(studioInspection.image, elements.studioMainFavoriteButton);
+});
+elements.studioHistoryAllButton.addEventListener("click", () => {
+  void setStudioHistoryFilter(STUDIO_HISTORY_FILTERS.all);
+});
+elements.studioHistoryFavoriteButton.addEventListener("click", () => {
+  void setStudioHistoryFilter(STUDIO_HISTORY_FILTERS.favorite);
+});
+elements.studioMainImage.addEventListener("click", openStudioInspectionImage);
+elements.studioMainImage.addEventListener("keydown", handleStudioMainImageKey);
+elements.studioMainCompareButton.addEventListener("click", () => {
+  if (!studioInspection) return;
+  const { generation, image } = studioInspection;
+  toggleCompareSelection(image, generation, elements.studioMainCompareButton);
+});
+elements.studioMainMetadataButton.addEventListener("click", () => {
+  if (studioInspection) setStudioInspection(studioInspection.generation, studioInspection.image);
+});
+elements.studioMainRegenerateButton.addEventListener("click", () => {
+  if (studioInspection) regenerateWithSameSeed(studioInspection.generation, studioInspection.image);
+});
+elements.studioCopyPromptButton.addEventListener("click", () => {
+  void copyStudioInspectionValue(elements.studioCopyPromptButton, (generation) => buildPromptText(generation));
+});
+elements.studioCopyNegativeButton.addEventListener("click", () => {
+  void copyStudioInspectionValue(
+    elements.studioCopyNegativeButton,
+    (generation) => generation.effectiveNegativePrompt || generation.negativePrompt || ""
+  );
+});
+elements.studioCopyMetadataButton.addEventListener("click", () => {
+  void copyStudioInspectionValue(
+    elements.studioCopyMetadataButton,
+    (generation, image) => buildMetadataText(generation, image)
+  );
+});
+for (const control of [
+  elements.width, elements.height, elements.seed, elements.steps, elements.cfgScale,
+  elements.samplerName, elements.scheduler
+]) {
+  control.addEventListener("input", () => syncStudioOutputStats());
+  control.addEventListener("change", () => syncStudioOutputStats());
+}
+elements.resolutionPreset.addEventListener("change", applyResolutionPreset);
+elements.randomizeSeedButton.addEventListener("click", randomizeGenerationSeed);
+elements.seedFixedToggle.addEventListener("change", toggleGenerationSeedFixed);
+elements.studioOutputStats.addEventListener("click", (event) => {
+  const shortcut = event.target.closest("[data-generation-setting-target]");
+  if (shortcut) focusGenerationSetting(shortcut.dataset.generationSettingTarget);
 });
 elements.txt2imgModeButton.addEventListener("click", () => setGenerationMode("txt2img"));
 elements.img2imgModeButton.addEventListener("click", () => setGenerationMode("img2img"));
@@ -440,7 +697,6 @@ elements.cancelJobButton.addEventListener("click", cancelActiveJob);
 elements.queueIndicator.addEventListener("click", openQueuePanel);
 elements.clearPromptsButton.addEventListener("click", clearBothPrompts);
 elements.candidateCount.addEventListener("change", normalizeCandidateCount);
-elements.description.addEventListener("input", handleDescriptionChange);
 elements.prompt.addEventListener("input", handleRawPromptInput);
 elements.negativePrompt.addEventListener("input", () => {
   markPromptAsCurrent();
@@ -498,15 +754,27 @@ elements.generateLoraCsvButton.addEventListener("click", updateLoraCsvFromInstal
 elements.resetGrokInstructionsButton.addEventListener("click", resetGrokInstructions);
 elements.saveDiscordSettingsButton.addEventListener("click", saveDiscordSettings);
 elements.clearDiscordWebhookButton.addEventListener("click", clearDiscordWebhook);
+elements.sendDiscordTestButton.addEventListener("click", sendDiscordTestNotification);
 elements.checkUpdateButton.addEventListener("click", checkForUpdate);
 elements.applyUpdateButton.addEventListener("click", applyUpdate);
 elements.updateStatusButton.addEventListener("click", () => {
-  elements.updateDetails.open = true;
-  elements.updateDetails.scrollIntoView({ behavior: "smooth", block: "center" });
+  activateSettingsCategory("appInfo", { targetId: "updateDetails" });
   void checkForUpdate();
 });
-elements.refreshHistoryButton.addEventListener("click", loadHistory);
+elements.refreshHistoryButton.addEventListener("click", () => void loadHistory());
+elements.historyLoadMoreButton.addEventListener("click", () => void loadMoreHistory());
 elements.refreshExperimentsButton.addEventListener("click", () => void openGalleryExperiments());
+elements.galleryFilterButton.addEventListener("click", openGalleryFilterDialog);
+elements.galleryFilterCloseButton.addEventListener("click", () => elements.galleryFilterDialog.close());
+elements.galleryFilterDialog.addEventListener("click", (event) => {
+  if (event.target === elements.galleryFilterDialog) elements.galleryFilterDialog.close();
+});
+elements.gallerySort.addEventListener("change", () => {
+  gallerySort = elements.gallerySort.value === "oldest" ? "oldest" : "newest";
+  renderHistory(lastHistoryGenerations);
+});
+elements.galleryAllButton.addEventListener("click", () => setGalleryFilter({ kind: "all" }));
+elements.galleryFavoriteButton.addEventListener("click", () => setGalleryFilter({ kind: "favorite" }));
 elements.galleryKindFilter.addEventListener("click", (event) => {
   const button = event.target.closest("[data-gallery-kind]");
   if (button) setGalleryFilter({ kind: button.dataset.galleryKind });
@@ -519,7 +787,18 @@ for (const element of [elements.galleryCheckpoint, elements.galleryLora, element
   }));
 }
 elements.gallerySearch.addEventListener("input", () => setGalleryFilter({ query: elements.gallerySearch.value }));
+elements.galleryTagSearch.addEventListener("input", () => {
+  galleryTagQuery = elements.galleryTagSearch.value;
+  renderGalleryTagOptions(toGalleryEntries(lastHistoryGenerations));
+});
 elements.resetGalleryFilterButton.addEventListener("click", resetGalleryFilter);
+elements.compareTrayOpenButton.addEventListener("click", compareCurrentSelection);
+elements.compareTrayClearButton.addEventListener("click", clearCompareSelection);
+elements.galleryCompareModeButton.addEventListener("click", () => setGalleryCompareMode(!galleryCompareMode));
+elements.galleryCompareClearButton.addEventListener("click", clearCompareSelection);
+elements.galleryCompareExitButton.addEventListener("click", () => setGalleryCompareMode(false));
+elements.imageCompareGalleryButton.addEventListener("click", () => showView("gallery"));
+elements.imageCompareStartButton.addEventListener("click", compareCurrentSelection);
 elements.samplerPickerButton.addEventListener("click", () => void openSamplerPicker("sampler"));
 elements.schedulerPickerButton.addEventListener("click", () => void openSamplerPicker("scheduler"));
 elements.showCombinedPromptButton.addEventListener("click", showCombinedPrompt);
@@ -537,20 +816,18 @@ elements.compareShortcutValues.addEventListener("input", () => {
 });
 elements.cancelGenerateButton.addEventListener("click", cancelActiveJob);
 elements.addLoraButton.addEventListener("click", () => void openLoraPicker());
-elements.pickCharacterButton.addEventListener("click", () => void openCharacterPicker());
-elements.pickOutfitButton.addEventListener("click", () => void openOutfitPicker());
 elements.candidateCountDown.addEventListener("click", () => stepCandidateCount(-1));
 elements.candidateCountUp.addEventListener("click", () => stepCandidateCount(1));
 elements.candidateCount.addEventListener("input", handleCandidateCountChange);
 elements.candidateCount.addEventListener("blur", normalizeCandidateCount);
-elements.addCivitaiLoraButton.addEventListener("click", () => {
+elements.openLoraManagementButton.addEventListener("click", () => {
   showView("settings");
-  elements.civitaiDetails.open = true;
-  elements.civitaiDetails.scrollIntoView({ behavior: "smooth", block: "start" });
-  elements.civitaiUrl.focus();
+  activateSettingsCategory("lora", { targetId: "settingsLoraDetails", focus: true });
 });
 elements.compareSelectionButton.addEventListener("click", compareCurrentSelection);
+activateSettingsCategory(DEFAULT_SETTINGS_CATEGORY);
 showView(loadInitialView(), { remember: false });
+updateCompareButton();
 elements.applyPreferenceButton.addEventListener("click", applyPreferenceTags);
 elements.clearPromptPartsButton.addEventListener("click", clearPromptParts);
 for (const element of [
@@ -571,7 +848,6 @@ async function loadConfig() {
   const response = await fetch("/api/config");
   const { defaults, lora, version } = await response.json();
   loraConfig = { ...loraConfig, ...lora };
-  if (version) elements.versionText.textContent = `v${version}`;
   for (const [key, value] of Object.entries(defaults)) {
     if (!elements[key]) continue;
     if (key === "inpaintFullRes") {
@@ -588,6 +864,49 @@ async function loadConfig() {
     localStorage.setItem("localImageChat.autoRetry", String(elements.autoRetryOnFailure.checked));
   });
   syncSamplerLabels();
+}
+
+function loadTitleSettings() {
+  let storedMode = "";
+  let storedTemplate = "";
+  try {
+    storedMode = localStorage.getItem(TITLE_STORAGE_KEYS.mode) ?? "";
+    storedTemplate = localStorage.getItem(TITLE_STORAGE_KEYS.template) ?? "";
+  } catch {
+    // localStorageが使えない環境でも、画面の既定値で生成を続ける。
+  }
+  const mode = normalizeTitleMode(storedMode || DEFAULT_TITLE_MODE);
+  const template = normalizeTitleTemplate(storedTemplate);
+  elements.titleGenerationMode.value = mode;
+  elements.titleTemplate.value = template;
+  syncTitleTemplateVisibility();
+  try {
+    localStorage.setItem(TITLE_STORAGE_KEYS.mode, mode);
+    localStorage.setItem(TITLE_STORAGE_KEYS.template, template);
+  } catch {
+    // 設定の保存失敗は画像生成を妨げない。
+  }
+}
+
+function saveTitleSettings() {
+  const mode = normalizeTitleMode(elements.titleGenerationMode.value);
+  const template = normalizeTitleTemplate(elements.titleTemplate.value).slice(0, TITLE_MAX_LENGTH);
+  elements.titleGenerationMode.value = mode;
+  elements.titleTemplate.value = template;
+  syncTitleTemplateVisibility();
+  try {
+    localStorage.setItem(TITLE_STORAGE_KEYS.mode, mode);
+    localStorage.setItem(TITLE_STORAGE_KEYS.template, template);
+  } catch {
+    // 設定の保存失敗は画像生成を妨げない。
+  }
+}
+
+function syncTitleTemplateVisibility() {
+  elements.titleTemplateRow.classList.toggle(
+    "hidden",
+    normalizeTitleMode(elements.titleGenerationMode.value) !== "template"
+  );
 }
 
 function setGenerationMode(mode) {
@@ -614,6 +933,7 @@ function setGenerationMode(mode) {
 // ギャラリーや設定へ移動しても中断・再実行は起きない。
 function showView(view, { remember = true } = {}) {
   currentView = normalizeAppView(view);
+  document.body.dataset.currentView = currentView;
   for (const name of APP_VIEWS) {
     elements[VIEW_ELEMENTS[name]].classList.toggle("hidden", name !== currentView);
   }
@@ -629,9 +949,125 @@ function showView(view, { remember = true } = {}) {
       history.replaceState(null, "", hashForView(currentView));
     }
   }
-  // 表示のたびに最新化する（生成は止めない）。
-  if (currentView === "gallery") void loadHistory();
-  if (currentView === "compare") renderExperimentCards();
+  // 初回起動時に取得したページを再利用し、画面へ戻るだけで履歴を再転送しない。
+  if (currentView === "gallery" && !lastHistoryGenerations.length && !historyLoading) void loadHistory();
+  if (currentView === "compare") {
+    renderImageCompareEntry();
+    renderExperimentCards();
+  }
+}
+
+function settingsCategoryById(categoryId) {
+  return SETTINGS_CATEGORIES.find((category) => category.id === categoryId) ?? null;
+}
+
+function activateSettingsCategory(categoryId, { targetId = "", focus = false } = {}) {
+  const category = settingsCategoryById(categoryId);
+  if (!category) return;
+  activeSettingsCategory = category.id;
+
+  for (const button of elements.settingsCategoryNav.querySelectorAll("[data-settings-category]")) {
+    const selected = button.dataset.settingsCategory === category.id;
+    button.classList.toggle("is-active", selected);
+    button.setAttribute("aria-selected", String(selected));
+  }
+  elements.settingsCategorySelect.value = category.id;
+  elements.settingsCategoryTitle.textContent = category.label;
+  elements.settingsCategoryDescription.textContent = category.description;
+  for (const panel of elements.settingsContent.querySelectorAll("[data-settings-panel]")) {
+    const selected = panel.dataset.settingsCategory === category.id;
+    panel.hidden = !selected;
+    panel.setAttribute("aria-hidden", String(!selected));
+  }
+
+  if (!targetId) return;
+  const target = document.getElementById(targetId);
+  if (!target) return;
+  if (target.tagName === "DETAILS") target.open = true;
+  requestAnimationFrame(() => {
+    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+    target.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "start" });
+    if (!focus) return;
+    const focusTarget = target.matches("input, select, textarea, button")
+      ? target
+      : target.querySelector("input, select, textarea, button");
+    if (focusTarget && !focusTarget.disabled) focusTarget.focus({ preventScroll: true });
+  });
+}
+
+function normalizeSettingsSearch(value) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function renderSettingsSearchResults() {
+  const query = normalizeSettingsSearch(elements.settingsSearch.value);
+  elements.settingsSearchResults.replaceChildren();
+  if (!query) {
+    elements.settingsSearchResults.hidden = true;
+    elements.settingsSearch.setAttribute("aria-expanded", "false");
+    return;
+  }
+
+  const terms = query.split(/\s+/).filter(Boolean);
+  const matches = SETTINGS_SEARCH_INDEX.filter((item) => {
+    const searchable = normalizeSettingsSearch(`${item.label} ${item.keywords}`);
+    return terms.every((term) => searchable.includes(term));
+  });
+  if (!matches.length) {
+    const empty = document.createElement("p");
+    empty.className = "settingsSearchEmpty";
+    empty.textContent = "一致する設定がありません";
+    elements.settingsSearchResults.append(empty);
+  } else {
+    for (const item of matches) {
+      const category = settingsCategoryById(item.categoryId);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "settingsSearchResult";
+      button.setAttribute("role", "option");
+      button.dataset.settingsSearchCategory = item.categoryId;
+      button.dataset.settingsSearchTarget = item.targetId;
+      const label = document.createElement("strong");
+      label.textContent = item.label;
+      const categoryLabel = document.createElement("small");
+      categoryLabel.textContent = category?.label ?? "設定";
+      button.append(label, categoryLabel);
+      elements.settingsSearchResults.append(button);
+    }
+  }
+  elements.settingsSearchResults.hidden = false;
+  elements.settingsSearch.setAttribute("aria-expanded", "true");
+}
+
+function syncSettingsConnectionSummary() {
+  if (!elements.settingsReforgeStatus) return;
+  const healthText = elements.health.textContent ?? "";
+  const reforgeStatus = healthText.includes("確認中")
+    ? "確認中"
+    : healthText.includes("ReForge 接続OK")
+      ? "接続済み"
+      : healthText.includes("ReForge 接続失敗") || healthText.includes("接続確認に失敗")
+        ? "未接続"
+        : "未確認";
+  const discordText = elements.discordSettingsStatus.textContent ?? "";
+  const discordStatus = discordText.includes("確認中")
+    ? "確認中"
+    : discordText.includes("送信先:")
+      ? "設定済み"
+      : discordText.includes("送信先が未設定")
+        ? "未設定"
+        : discordText.includes("取得できません") || discordText.includes("失敗")
+          ? "エラー"
+          : "未確認";
+  const updateText = elements.updateStatus.textContent ?? "";
+  const updateStatus = updateInfo?.updateAvailable || updateText.includes("更新できます")
+    ? "更新あり"
+    : updateInfo && updateText.includes("最新版")
+      ? "最新"
+      : "未確認";
+  elements.settingsReforgeStatus.textContent = reforgeStatus;
+  elements.settingsDiscordStatus.textContent = discordStatus;
+  elements.settingsUpdateStatus.textContent = updateStatus;
 }
 
 function loadInitialView() {
@@ -685,7 +1121,7 @@ function inferImageMimeType(file) {
 function useImageForImg2Img(image) {
   setImageReference({
     dataUrl: null,
-    imageUrl: image.imageUrl,
+    imageUrl: originalImageUrl(image),
     imageId: image.id,
     filename: image.filename,
     width: image.width,
@@ -696,7 +1132,7 @@ function useImageForImg2Img(image) {
 function useImageForInpaint(image) {
   setImageReference({
     dataUrl: null,
-    imageUrl: image.imageUrl,
+    imageUrl: originalImageUrl(image),
     imageId: image.id,
     filename: image.filename,
     width: image.width,
@@ -1396,7 +1832,7 @@ async function applyCheckpointSet(set, { silent = false } = {}) {
   saveLoraTriggers();
   saveLoraNegativeWords();
   if (set.prompt || set.negativePrompt) {
-    setPromptFields(set.prompt ?? "", set.negativePrompt ?? "", elements.description.value.trim());
+    setPromptFields(set.prompt ?? "", set.negativePrompt ?? "", promptDescription);
   }
   renderLoras();
   renderSelectedLoraSummary();
@@ -1612,8 +2048,13 @@ function renderLoraPreview(lora, { pinned = false } = {}) {
   }
   addField("現在値", Number(currentWeight).toFixed(2));
   // 実際に生成へ使う現在値（ユーザー編集後）を優先し、無ければ登録時の値。
-  const triggerWords = loraTriggers.get(lora.name) || registry?.triggerWords || "";
-  if (triggerWords) addField("Trigger Words", createTriggerWordsNode(triggerWords));
+  const triggerWords = resolveLoraTriggerText(lora.name);
+  if (triggerWords) {
+    addField(
+      typeof registry?.characterTriggerWords === "string" ? "基本セット" : "Trigger Words",
+      createTriggerWordsNode(triggerWords)
+    );
+  }
   if (list.childElementCount) pane.append(list);
 
   // 補足情報は既定で折りたたみ、情報量を抑える。
@@ -1756,6 +2197,20 @@ function ensureImageModal() {
   document.body.append(overlay);
   imageModalEl = overlay;
   return overlay;
+}
+
+function openStudioInspectionImage() {
+  if (!studioInspection) return;
+  const { generation, image } = studioInspection;
+  openImageModal(originalImageUrl(image), generationTitle(generation));
+}
+
+function handleStudioMainImageKey(event) {
+  const isSpace = event.key === " " || event.key === "Spacebar";
+  if (event.key !== "Enter" && !isSpace) return;
+  if (isSpace) event.preventDefault();
+  if (event.repeat) return;
+  openStudioInspectionImage();
 }
 
 function openImageModal(url, alt = "") {
@@ -2328,9 +2783,14 @@ function migrateCharacterProfileDefaults() {
 }
 
 function resolveProfile(lora) {
+  const manuallyStructured = lora?.registry?.manualFields?.some((field) =>
+    field === "characterTriggerWords" || field === "outfitPresets"
+  );
+  const registryProfile = createRegistryProfile(lora);
+  if (manuallyStructured && registryProfile) return registryProfile;
   return getProfile(loraProfileAssignments.get(lora.name))
     ?? findProfileForLora(lora)
-    ?? createRegistryProfile(lora);
+    ?? registryProfile;
 }
 
 function fillPresetSelect(select, profile, selectedPresetId) {
@@ -2413,6 +2873,7 @@ function getPresetWeight(profile, preset) {
 }
 
 function renderSelectedLoraSummary() {
+  ensureSelectedLoraOutfits();
   // LoRAの選択・weight・トリガーワード編集はすべてここを通るので、
   // トリガーワード枠の追加・削除もここで同期する。
   syncAppliedTriggerWords();
@@ -2440,6 +2901,7 @@ function renderSelectedLoraSummary() {
 
 async function checkHealth() {
   elements.health.innerHTML = '<span class="status waiting">Ollama 確認中</span><span class="status waiting">ReForge 確認中</span>';
+  syncSettingsConnectionSummary();
   try {
     const response = await fetch("/api/health");
     const data = await response.json();
@@ -2455,12 +2917,14 @@ async function checkHealth() {
     ].join("");
   } catch (error) {
     elements.health.innerHTML = status("接続確認に失敗", false, error.message);
+  } finally {
+    syncSettingsConnectionSummary();
   }
 }
 
 async function buildPrompt() {
   clearError();
-  const description = elements.description.value.trim();
+  const description = promptDescription;
   if (!description) return showError("生成したい画像を日本語で入力してくれ");
   setBusy(true, "日本語からプロンプトを作成中…");
   try {
@@ -2477,7 +2941,7 @@ async function buildPrompt() {
 
 async function generateCandidates() {
   clearError();
-  const description = elements.description.value.trim();
+  const description = promptDescription;
   // 説明文は任意。Promptが空のときだけ、日本語からの自動作成のために必須になる。
   if (!description && !currentPositivePrompt().trim()) {
     return showError("生成したい画像を日本語で入力するか、Promptを入力してくれ");
@@ -2498,6 +2962,8 @@ async function generateCandidates() {
   finalImage = null;
   finalGeneration = null;
   selectedCandidate = null;
+  elements.studioMainPreview.classList.add("hidden");
+  elements.studioMainImage.removeAttribute("src");
   const count = Number(elements.candidateCount.value);
   const modeLabel = generationMode === "inpaint"
     ? "部分修正候補"
@@ -2516,6 +2982,7 @@ async function generateCandidates() {
     const data = await submitGeneration({
       mode: generationMode,
       description,
+      ...readTitlePayload(),
       ...readPromptPayload(),
       loras: readSelectedLoras(),
       promptBoosts: readPromptBoosts(),
@@ -2530,6 +2997,7 @@ async function generateCandidates() {
       sourceImageId: data.sourceImageId,
       sourceImageUrl: data.sourceImageUrl,
       maskImageUrl: data.maskImageUrl,
+      title: data.title ?? "",
       description,
       prompt: data.prompt,
       negativePrompt: data.negativePrompt,
@@ -2570,6 +3038,7 @@ async function finishSelected() {
     const data = await submitGeneration({
       mode: usesSource ? lastGeneration.mode : "txt2img",
       description: lastGeneration.description,
+      ...readTitlePayload(),
       prompt: lastGeneration.prompt,
       negativePrompt: lastGeneration.negativePrompt,
       ...carryStructuredPrompt(lastGeneration),
@@ -2624,6 +3093,7 @@ function presentHiresResult(data, description, eyebrow, title) {
     sourceImageId: data.sourceImageId,
     sourceImageUrl: data.sourceImageUrl,
     maskImageUrl: data.maskImageUrl,
+    title: data.title ?? "",
     description,
     prompt: data.prompt,
     negativePrompt: data.negativePrompt,
@@ -2637,10 +3107,10 @@ function presentHiresResult(data, description, eyebrow, title) {
   };
   elements.finalEyebrow.textContent = eyebrow;
   elements.finalTitle.textContent = title;
-  elements.resultImage.src = `${finished.imageUrl}?t=${Date.now()}`;
+  configureThumbnailImage(elements.resultImage, finished, { eager: true });
   elements.seedText.textContent = `Seed ${finished.seed}`;
   elements.resolutionText.textContent = `${finished.width} × ${finished.height}`;
-  elements.downloadLink.href = finished.imageUrl;
+  elements.downloadLink.href = originalImageUrl(finished);
   elements.downloadLink.download = finished.filename;
   elements.favoriteFinalButton.dataset.favoriteImage = finished.id;
   elements.favoriteFinalButton.dataset.favoriteStyle = "label";
@@ -2649,9 +3119,15 @@ function presentHiresResult(data, description, eyebrow, title) {
   if (finished.discord) discordStates.set(finished.id, finished.discord);
   elements.finalDiscordStatus.dataset.discordImage = finished.id;
   renderDiscordStatusNode(elements.finalDiscordStatus, finished.id);
+  if (finished.discordGeneration) discordGenerationStates.set(finished.id, finished.discordGeneration);
+  elements.finalDiscordGenerationStatus.dataset.discordGenerationImage = finished.id;
+  renderDiscordGenerationStatusNode(elements.finalDiscordGenerationStatus, finished.id);
   elements.emptyState.classList.add("hidden");
   elements.resultContent.classList.remove("hidden");
+  elements.studioMainPreview.classList.add("hidden");
   elements.finalResult.classList.remove("hidden");
+  setStudioInspection(finalGeneration, finished);
+  syncStudioOutputStats(finalGeneration, finished);
   elements.finalResult.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
@@ -2679,6 +3155,7 @@ async function hiresFromGallery(generation, image) {
     const data = await submitGeneration({
       mode: "img2img",
       description: generation.description ?? "",
+      ...readTitlePayload(),
       prompt: generation.prompt ?? "",
       negativePrompt: generation.negativePrompt ?? "",
       ...carryStructuredPrompt(generation),
@@ -2805,7 +3282,7 @@ async function runExperiment() {
     if (!confirmed) return;
   }
 
-  const description = elements.description.value.trim();
+  const description = promptDescription;
   if (!description && !currentPositivePrompt().trim()) {
     return toast.warning("生成したい画像を日本語で入力するか、Promptを入力してください");
   }
@@ -2834,6 +3311,7 @@ async function runExperiment() {
       const baseRequest = {
         mode: generationMode,
         description,
+        ...readTitlePayload(),
         ...readPromptPayload(),
         loras: readSelectedLoras(),
         promptBoosts: readPromptBoosts(),
@@ -2968,28 +3446,8 @@ function setPromptFields(prompt, negativePrompt, description, { source = "genera
   renderPromptFieldPreviews();
 }
 
-function handleDescriptionChange() {
-  const current = elements.description.value.trim();
-  if (promptDescription && current !== promptDescription) {
-    if (compositionLock) unlockComposition();
-    settingPromptProgrammatically = true;
-    // 分割入力の内容は消さない。自動生成・上書きしたRaw Promptだけを破棄する。
-    elements.prompt.value = "";
-    elements.negativePrompt.value = "";
-    settingPromptProgrammatically = false;
-    rawPromptOverride = false;
-    rawPromptOverrideSource = "manual";
-    promptDescription = "";
-    syncRawPromptFromSections();
-    syncPromptClearButtons();
-    renderPromptModeState();
-  }
-}
-
 function markPromptAsCurrent() {
-  if (!settingPromptProgrammatically) {
-    promptDescription = elements.description.value.trim();
-  }
+  if (!settingPromptProgrammatically && !promptDescription) promptDescription = "";
 }
 
 // ---- 用途別Positive Prompt（分割入力）とRaw Prompt ----
@@ -3012,12 +3470,21 @@ function writeStructuredSections(sections) {
 }
 
 function buildCombinedPrompt() {
-  return buildFinalPrompt(readStructuredSections(), appliedTriggerWords);
+  return buildFinalPrompt(readStructuredSections(), activeAppliedTriggerWords());
 }
 
 // 生成に使うPositive Prompt。Raw Promptを直接編集していればそちらを優先する。
 function currentPositivePrompt() {
-  return rawPromptOverride ? elements.prompt.value : buildCombinedPrompt();
+  const prompt = rawPromptOverride
+    ? appendTriggersToRawPrompt(elements.prompt.value, automaticRawLoraTriggers())
+    : buildCombinedPrompt();
+  return removeDisabledLoraTags(prompt);
+}
+
+function removeDisabledLoraTags(prompt) {
+  let result = String(prompt ?? "");
+  for (const name of disabledLoras) result = removeLoraTags(result, name).text;
+  return result;
 }
 
 // Raw Promptは、上書き中でなければ結合結果のミラーとして保つ。
@@ -3056,7 +3523,10 @@ function renderPromptModeState() {
 // Raw Prompt優先中は勝手に差し込まない。追加ボタンだけを出す。
 function renderRawTriggerNotice() {
   const pending = rawPromptOverride
-    ? pendingTriggerWords(elements.prompt.value, appliedTriggerWords.filter((item) => item.enabled))
+    ? pendingTriggerWords(
+        elements.prompt.value,
+        activeAppliedTriggerWords().filter((item) => !isAutomaticLoraTrigger(item))
+      )
     : [];
   elements.rawTriggerNotice.classList.toggle("hidden", !pending.length);
   if (!pending.length) return;
@@ -3186,12 +3656,15 @@ function syncLorasFromPrompt() {
 }
 
 function renderLoraSyncNotice(messages) {
-  elements.loraSyncNotice.replaceChildren();
-  elements.loraSyncNotice.classList.toggle("hidden", !messages.length);
-  for (const message of messages) {
-    const line = document.createElement("div");
-    line.textContent = `⚠ ${message}`;
-    elements.loraSyncNotice.append(line);
+  const targets = [elements.loraSyncNotice, elements.settingsLoraSyncNotice].filter(Boolean);
+  for (const target of targets) {
+    target.replaceChildren();
+    target.classList.toggle("hidden", !messages.length);
+    for (const message of messages) {
+      const line = document.createElement("div");
+      line.textContent = `⚠ ${message}`;
+      target.append(line);
+    }
   }
 }
 
@@ -3235,6 +3708,7 @@ function setLoraSelected(name, selected, weight) {
   }
   selectedLoras.delete(name);
   loraSelectionSources.delete(name);
+  disabledLoras.delete(name);
   const removed = removeLoraTagsFromPrompt(name);
   if (removed) toast.info(`プロンプト内の <lora:${name}> も削除しました`);
 }
@@ -3249,7 +3723,7 @@ function useStructuredPrompt() {
 }
 
 function appendTriggersToRaw() {
-  const enabled = appliedTriggerWords.filter((item) => item.enabled);
+  const enabled = activeAppliedTriggerWords().filter((item) => !isAutomaticLoraTrigger(item));
   const next = appendTriggersToRawPrompt(elements.prompt.value, enabled);
   if (next === elements.prompt.value.trim()) return toast.info("追加できるトリガーワードはありません");
   settingPromptProgrammatically = true;
@@ -3263,20 +3737,86 @@ function appendTriggersToRaw() {
 // 選択中LoRAのトリガーワード（手入力欄 → 登録メタデータの順）を読む。
 function resolveLoraTriggerText(name) {
   const lora = findLoraByName(name);
+  if (typeof lora?.registry?.characterTriggerWords === "string") {
+    return lora.registry.characterTriggerWords;
+  }
   return loraTriggers.get(name) || lora?.registry?.triggerWords || "";
 }
 
 function loraTriggerSources() {
   const sources = [...selectedLoras.keys()].map((name) => {
     const lora = findLoraByName(name);
+    const profile = resolveProfile(lora);
+    const structuredPresets = typeof lora?.registry?.characterTriggerWords === "string";
+    const managedOutfit = structuredPresets
+      || (loraOutfitSelections.has(name) && listLoraOutfitChoices(profile).length > 0);
     return {
       id: name,
       subcategory: lora?.registry?.subcategory ?? "",
       category: lora?.registry?.category ?? lora?.category ?? "",
-      triggerWords: resolveLoraTriggerText(name)
+      targetField: profile?.category === "direction" ? undefined : "character",
+      triggerWords: managedOutfit
+        ? resolveLoraBaseTriggerWords(profile, loraPresetSelections.get(name), resolveLoraTriggerText(name))
+        : resolveLoraTriggerText(name)
     };
   });
-  return [...sources, ...importedTriggerSources()];
+  return [...sources, ...loraOutfitTriggerSources(), ...importedTriggerSources()];
+}
+
+function loraOutfitTriggerSources() {
+  const sources = [];
+  for (const name of selectedLoras.keys()) {
+    const lora = findLoraByName(name);
+    const profile = resolveProfile(lora);
+    const choices = listLoraOutfitChoices(profile);
+    if (!choices.length || !loraOutfitSelections.has(name)) continue;
+    const choiceId = loraOutfitSelections.get(name) ?? "";
+    const base = resolveLoraBaseTriggerWords(profile, loraPresetSelections.get(name), resolveLoraTriggerText(name));
+    const markerWord = splitFirstTriggerWord(base);
+    if (markerWord) {
+      sources.push({
+        id: outfitStateSourceId(name, choiceId),
+        words: [{
+          text: markerWord,
+          targetField: profile?.category === "direction" ? "extra" : "character"
+        }]
+      });
+    }
+    const prompt = resolveLoraOutfitPrompt(profile, choiceId);
+    if (prompt) {
+      sources.push({
+        id: outfitChoiceSourceId(name, choiceId),
+        targetField: "appearance",
+        triggerWords: prompt
+      });
+    }
+  }
+  return sources;
+}
+
+function splitFirstTriggerWord(value) {
+  return String(value ?? "").split(",").map((word) => word.trim()).find(Boolean) ?? "";
+}
+
+function triggerSourceLoraName(sourceId) {
+  return outfitSourceLoraName(sourceId) || String(sourceId ?? "");
+}
+
+function activeAppliedTriggerWords() {
+  return activeTriggersForSources(appliedTriggerWords, (sourceId) => {
+    const loraName = triggerSourceLoraName(sourceId);
+    return !selectedLoras.has(loraName) || !disabledLoras.has(loraName);
+  });
+}
+
+function isAutomaticLoraTrigger(trigger) {
+  return trigger?.sourceLoraIds?.some((sourceId) =>
+    selectedLoras.has(triggerSourceLoraName(sourceId))
+  ) === true;
+}
+
+function automaticRawLoraTriggers() {
+  return activeAppliedTriggerWords().filter(isAutomaticLoraTrigger);
 }
 
 // AI出力から取り込んだトリガーワードは、LoRAの選択状態に関係なく残す。
@@ -3367,7 +3907,10 @@ function createTriggerRow(trigger) {
   text.textContent = trigger.text;
   const source = document.createElement("small");
   source.className = "triggerSource";
-  const sourceNames = trigger.sourceLoraIds.map((name) => findLoraByName(name)?.displayName ?? name);
+  const sourceNames = [...new Set(trigger.sourceLoraIds.map((name) => {
+    const resolvedName = outfitSourceLoraName(name) || name;
+    return findLoraByName(resolvedName)?.displayName ?? resolvedName;
+  }))];
   source.textContent = sourceNames.join(" / ");
   source.title = `由来LoRA: ${sourceNames.join(" / ")}`;
 
@@ -3453,6 +3996,7 @@ function openAiPromptImport() {
     subtitle: "GrokやChatGPTの回答を全文そのまま貼り付けてください",
     size: "large",
     dismissValue: false,
+    closeOnBackdrop: false,
     build: (body, close) => {
       const input = document.createElement("textarea");
       input.className = "importInput";
@@ -3823,55 +4367,15 @@ function renderCandidates(images) {
 
     const image = document.createElement("img");
     image.className = "candidateImage";
-    image.src = `${candidate.imageUrl}?t=${Date.now()}`;
+    configureThumbnailImage(image, candidate, { eager: index < 4 });
     image.alt = `生成候補 ${index + 1}`;
-    image.title = "クリックで拡大";
-    // 画像クリックで拡大、選択は下の「選択」ボタンで行う。
-    image.addEventListener("click", () =>
-      openImageModal(candidate.imageUrl, `候補 ${index + 1} · Seed ${candidate.seed}`)
-    );
+    image.title = "クリックして選択";
+    image.addEventListener("click", () => selectCandidate(candidate, card));
 
     const footer = document.createElement("footer");
     const label = document.createElement("span");
     label.textContent = `#${index + 1} · Seed ${candidate.seed}`;
-    const download = document.createElement("a");
-    download.href = candidate.imageUrl;
-    download.download = candidate.filename;
-    download.textContent = "保存";
-    download.addEventListener("click", (event) => event.stopPropagation());
-    const actions = document.createElement("div");
-    actions.className = "candidateCardActions";
-    const favorite = createFavoriteButton(candidate, { className: "favoriteButton smallButton" });
-    favorite.title = "Favoriteに登録";
-    const toImg2Img = document.createElement("button");
-    toImg2Img.type = "button";
-    toImg2Img.className = "candidateImg2ImgButton";
-    toImg2Img.textContent = "img2img";
-    toImg2Img.title = "この画像をimg2imgの参照にする";
-    toImg2Img.addEventListener("click", (event) => {
-      event.stopPropagation();
-      useImageForImg2Img(candidate);
-    });
-    const toInpaint = document.createElement("button");
-    toInpaint.type = "button";
-    toInpaint.className = "candidateImg2ImgButton";
-    toInpaint.textContent = "修正";
-    toInpaint.title = "この画像を部分修正する";
-    toInpaint.addEventListener("click", (event) => {
-      event.stopPropagation();
-      useImageForInpaint(candidate);
-    });
-    const select = document.createElement("button");
-    select.type = "button";
-    select.className = "candidateSelectButton";
-    select.textContent = "選択";
-    select.title = "この画像を仕上げ対象に選ぶ";
-    select.addEventListener("click", (event) => {
-      event.stopPropagation();
-      selectCandidate(candidate, card);
-    });
-    actions.append(favorite, createDiscordStatusNode(candidate), toImg2Img, toInpaint, select, download);
-    footer.append(label, actions);
+    footer.append(label);
     card.append(image, footer);
     elements.candidateGrid.append(card);
   });
@@ -3884,14 +4388,26 @@ function selectCandidate(candidate, card) {
   selectedCandidate = candidate;
   for (const item of elements.candidateGrid.children) item.classList.remove("selected");
   card.classList.add("selected");
-  elements.selectedSeedText.textContent = `選択中: Seed ${candidate.seed}`;
   elements.finishButton.disabled = false;
   elements.lockCompositionButton.disabled = false;
-  elements.finishButton.textContent = lastGeneration?.mode === "inpaint"
+  if (lastGeneration) {
+    elements.studioMainImage.src = originalImageUrl(candidate);
+    elements.studioMainImage.alt = generationTitle(lastGeneration);
+    elements.studioMainPreview.classList.remove("hidden");
+    syncCompareControl(elements.studioMainCompareButton, candidate.id);
+    setStudioInspection(lastGeneration, candidate);
+    syncStudioOutputStats(lastGeneration, candidate);
+  }
+  const finishLabel = lastGeneration?.mode === "inpaint"
     ? "選択画像を部分修正仕上げ"
     : lastGeneration?.mode === "img2img"
       ? "選択画像をimg2img仕上げ"
       : "選択画像をHires.fix";
+  elements.finishButton.textContent = lastGeneration?.mode === "txt2img" || !lastGeneration
+    ? "Hires.fix"
+    : "仕上げ";
+  elements.finishButton.title = finishLabel;
+  elements.finishButton.setAttribute("aria-label", finishLabel);
 }
 
 async function submitGeneration(payload, { allowRecovery = true } = {}) {
@@ -4223,7 +4739,10 @@ function setupClearableFields() {
     },
     onClear: () => {
       if (compositionLock) unlockComposition();
-      else elements.seed.value = RANDOM_SEED;
+      else {
+        elements.seed.value = RANDOM_SEED;
+        elements.seed.dispatchEvent(new Event("input", { bubbles: true }));
+      }
       toast.info("Seedをランダム（-1）へ戻しました");
     }
   });
@@ -4287,18 +4806,20 @@ function activateCompositionLock(recipe, image) {
   compositionLock = { recipe, image };
   elements.compositionLockStatus.querySelector("span").textContent = `構図・Seed固定中: ${image.seed}`;
   elements.compositionLockStatus.classList.remove("hidden");
-  elements.description.scrollIntoView({ behavior: "smooth", block: "center" });
+  elements.promptDetails.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 function unlockComposition() {
   compositionLock = null;
   elements.compositionLockStatus.classList.add("hidden");
   elements.seed.value = RANDOM_SEED;
+  elements.seed.dispatchEvent(new Event("input", { bubbles: true }));
   syncSeedClearButton();
 }
 
 function loadRecipeFields(recipe, image) {
-  elements.description.value = recipe.description ?? "";
+  promptDescription = recipe.description ?? "";
+  elements.generationTitle.value = normalizeManualTitle(recipe.title);
   restorePromptFieldsFromRecipe(recipe);
   const settings = recipe.settings ?? {};
   for (const key of [
@@ -4314,6 +4835,7 @@ function loadRecipeFields(recipe, image) {
   }
   syncSamplerLabels();
   elements.seed.value = image.seed;
+  syncStudioOutputStats();
   elements.candidateCount.value = "1";
   handleCandidateCountChange();
   handleImg2ImgDenoisingInput();
@@ -4321,15 +4843,18 @@ function loadRecipeFields(recipe, image) {
 
   selectedLoras.clear();
   loraSelectionSources.clear();
+  disabledLoras.clear();
   for (const lora of recipe.loras ?? []) {
     if (!installedLoras.some((item) => item.name === lora.name)) continue;
     // 履歴のWeightは実際に生成へ使った実効値。選択元もそのまま復元する。
     selectedLoras.set(lora.name, Number(lora.weight));
     loraSelectionSources.set(lora.name, ["ui", "prompt", "both"].includes(lora.source) ? lora.source : "ui");
     loraWeights.set(lora.name, Number(lora.weight));
+    if (lora.enabled === false) disabledLoras.add(lora.name);
     if (lora.triggerWords) loraTriggers.set(lora.name, lora.triggerWords);
     if (lora.negativeWords) loraNegativeWords.set(lora.name, lora.negativeWords);
   }
+  restoreLoraOutfitsFromRecipe(recipe);
   saveLoraWeights();
   saveLoraTriggers();
   saveLoraNegativeWords();
@@ -4377,6 +4902,7 @@ async function toggleFavorite(image, button) {
     renderPreferenceSummary();
     applyDiscordState(image.id, data.image.discord);
     await loadHistory();
+    await loadStudioRecent();
   } catch (error) {
     showError(error.message);
   } finally {
@@ -4385,9 +4911,6 @@ async function toggleFavorite(image, button) {
 }
 
 // ---- 画像Favoriteの表示同期 ----
-
-// 画像IDごとのFavorite状態。LoRAのFavorite（LoRAマスタ側）とは別データ。
-const imageFavorites = new Map();
 
 function rememberImageFavorites(generations) {
   for (const generation of generations ?? []) {
@@ -4410,12 +4933,14 @@ function refreshFavoriteButtons(imageId) {
 }
 
 function renderFavoriteButton(button, favorite) {
+  const accessibleLabel = favorite ? "お気に入りから削除" : "お気に入りに追加";
   button.classList.toggle("active", favorite);
   button.setAttribute("aria-pressed", String(favorite));
+  button.setAttribute("aria-label", accessibleLabel);
   button.textContent = button.dataset.favoriteStyle === "label"
     ? (favorite ? "★ Favorite" : "☆ Favorite")
     : (favorite ? "★" : "☆");
-  button.title = favorite ? "Favoriteを外す" : "Favoriteに登録";
+  button.title = accessibleLabel;
 }
 
 // 画像用のFavoriteボタン（星）。表示場所ごとにスタイルだけ変える。
@@ -4444,10 +4969,25 @@ function applyDiscordState(imageId, state) {
   if (state.status === "sending") void watchDiscordSend(imageId);
 }
 
+function applyDiscordGenerationState(imageId, state) {
+  if (!imageId || !state) return;
+  discordGenerationStates.set(imageId, state);
+  refreshDiscordBadges(imageId);
+  if (state.status === "sending") void watchDiscordGenerationSend(imageId);
+}
+
 function rememberDiscordStates(generations) {
   for (const generation of generations ?? []) {
     for (const image of generation.images ?? []) {
-      if (image?.id && image.discord) discordStates.set(image.id, image.discord);
+      if (!image?.id) continue;
+      if (image.discord) {
+        discordStates.set(image.id, image.discord);
+        if (image.discord.status === "sending") void watchDiscordSend(image.id);
+      }
+      if (image.discordGeneration) {
+        discordGenerationStates.set(image.id, image.discordGeneration);
+        if (image.discordGeneration.status === "sending") void watchDiscordGenerationSend(image.id);
+      }
     }
   }
 }
@@ -4458,6 +4998,15 @@ function createDiscordStatusNode(image) {
   node.dataset.discordImage = image.id;
   if (image.discord) discordStates.set(image.id, image.discord);
   renderDiscordStatusNode(node, image.id);
+  return node;
+}
+
+function createDiscordGenerationStatusNode(image) {
+  const node = document.createElement("span");
+  node.className = "discordStatus";
+  node.dataset.discordGenerationImage = image.id;
+  if (image.discordGeneration) discordGenerationStates.set(image.id, image.discordGeneration);
+  renderDiscordGenerationStatusNode(node, image.id);
   return node;
 }
 
@@ -4485,13 +5034,42 @@ function renderDiscordStatusNode(node, imageId) {
   }
 }
 
+function renderDiscordGenerationStatusNode(node, imageId) {
+  const state = discordGenerationStates.get(imageId) ?? { status: "not_sent", error: "" };
+  node.replaceChildren();
+  node.className = `discordStatus status-${state.status}`;
+  node.title = state.error || "";
+  if (state.status === "not_sent") {
+    node.classList.add("hidden");
+    return;
+  }
+  const label = document.createElement("span");
+  label.textContent = DISCORD_GENERATION_STATUS_LABELS[state.status] ?? "";
+  node.append(label);
+  if (state.status === "failed") {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "discordRetryButton";
+    retry.textContent = "再送";
+    retry.title = state.error || "生成完了通知を再送する";
+    retry.addEventListener("click", () => void resendDiscordGeneration(imageId, retry));
+    node.append(retry);
+  }
+}
+
 function refreshDiscordBadges(imageId) {
   const selector = `[data-discord-image="${CSS.escape(String(imageId))}"]`;
   for (const node of document.querySelectorAll(selector)) renderDiscordStatusNode(node, imageId);
+  const generationSelector = `[data-discord-generation-image="${CSS.escape(String(imageId))}"]`;
+  for (const node of document.querySelectorAll(generationSelector)) {
+    renderDiscordGenerationStatusNode(node, imageId);
+  }
   // 生成結果パネルのバッジはIDが固定なので、対象画像のときだけ更新する。
   if (finalImage?.id === imageId) {
     elements.finalDiscordStatus.dataset.discordImage = imageId;
     renderDiscordStatusNode(elements.finalDiscordStatus, imageId);
+    elements.finalDiscordGenerationStatus.dataset.discordGenerationImage = imageId;
+    renderDiscordGenerationStatusNode(elements.finalDiscordGenerationStatus, imageId);
   }
 }
 
@@ -4517,9 +5095,36 @@ async function watchDiscordSend(imageId) {
   }
 }
 
+// 生成完了通知もFavorite通知と同じ状態監視を別チャンネルで行う。
+async function watchDiscordGenerationSend(imageId) {
+  if (discordGenerationWatchers.has(imageId)) return;
+  discordGenerationWatchers.add(imageId);
+  try {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      await sleep(1200);
+      const { discord } = await getJson(`/api/history/${imageId}/discord/generation`);
+      discordGenerationStates.set(imageId, discord);
+      refreshDiscordBadges(imageId);
+      if (discord.status === "sending") continue;
+      if (discord.status === "failed") notifyDiscordGenerationFailure(imageId, discord);
+      return;
+    }
+  } catch {
+    // 状態取得に失敗しても、生成結果と履歴の表示は維持する。
+  } finally {
+    discordGenerationWatchers.delete(imageId);
+  }
+}
+
 function notifyDiscordFailure(imageId, state) {
   toast.error(`Discordへ送信できませんでした: ${state.error || "原因不明"}`, {
     action: { label: "再送", onSelect: () => void resendToDiscord(imageId) }
+  });
+}
+
+function notifyDiscordGenerationFailure(imageId, state) {
+  toast.error(`生成完了通知をDiscordへ送信できませんでした: ${state.error || "原因不明"}`, {
+    action: { label: "再送", onSelect: () => void resendDiscordGeneration(imageId) }
   });
 }
 
@@ -4535,6 +5140,18 @@ async function resendToDiscord(imageId, button = null) {
   }
 }
 
+async function resendDiscordGeneration(imageId, button = null) {
+  if (button) button.disabled = true;
+  try {
+    const { discord } = await postJson(`/api/history/${imageId}/discord/generation/send`, {});
+    applyDiscordGenerationState(imageId, discord);
+  } catch (error) {
+    toast.error(error.message);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 // ---- Discord設定 ----
 
 async function loadDiscordSettings() {
@@ -4543,9 +5160,17 @@ async function loadDiscordSettings() {
     elements.discordAutoSend.checked = settings.autoSend;
     elements.discordIncludePrompt.checked = settings.includePrompt;
     elements.discordIncludeMetadata.checked = settings.includeMetadata;
+    elements.discordGenerationAutoSend.checked = settings.generationAutoSend;
+    elements.discordGenerationIncludeImage.checked = settings.generationIncludeImage;
+    elements.discordGenerationIncludeTitle.checked = settings.generationIncludeTitle;
+    elements.discordGenerationIncludeModel.checked = settings.generationIncludeModel;
+    elements.discordGenerationIncludeSeed.checked = settings.generationIncludeSeed;
+    elements.discordGenerationIncludeDuration.checked = settings.generationIncludeDuration;
     renderDiscordSettingsStatus(settings);
   } catch (error) {
     elements.discordSettingsStatus.textContent = `Discord設定を取得できません: ${error.message}`;
+  } finally {
+    syncSettingsConnectionSummary();
   }
 }
 
@@ -4553,13 +5178,14 @@ function renderDiscordSettingsStatus(settings) {
   // Webhook URL自体は返ってこない。設定済みかどうかと、伏せ字の目印だけ出す。
   const source = { env: "環境変数", config: "config.local.json", stored: "この画面で保存" }[settings.webhookSource];
   elements.discordSettingsStatus.textContent = settings.webhookConfigured
-    ? `送信先: ${settings.webhookHint}（${source}）${settings.autoSend ? "・自動送信ON" : "・自動送信OFF"}`
-    : "送信先が未設定のため、Favoriteしても送信しません";
+    ? `送信先: ${settings.webhookHint}（${source}）Favorite ${settings.autoSend ? "ON" : "OFF"}・生成通知 ${settings.generationAutoSend ? "ON" : "OFF"}`
+    : "送信先が未設定のため、Favorite・生成完了通知ともに送信しません";
   elements.discordWebhook.disabled = !settings.webhookEditable;
   elements.discordWebhook.placeholder = settings.webhookEditable
     ? "https://discord.com/api/webhooks/…"
     : `${source}の設定を使用中`;
   elements.clearDiscordWebhookButton.disabled = !settings.storedWebhookConfigured;
+  syncSettingsConnectionSummary();
 }
 
 async function saveDiscordSettings() {
@@ -4569,6 +5195,12 @@ async function saveDiscordSettings() {
         autoSend: elements.discordAutoSend.checked,
         includePrompt: elements.discordIncludePrompt.checked,
         includeMetadata: elements.discordIncludeMetadata.checked,
+        generationAutoSend: elements.discordGenerationAutoSend.checked,
+        generationIncludeImage: elements.discordGenerationIncludeImage.checked,
+        generationIncludeTitle: elements.discordGenerationIncludeTitle.checked,
+        generationIncludeModel: elements.discordGenerationIncludeModel.checked,
+        generationIncludeSeed: elements.discordGenerationIncludeSeed.checked,
+        generationIncludeDuration: elements.discordGenerationIncludeDuration.checked,
         webhookUrl: elements.discordWebhook.value
       });
       // 入力欄には残さない（画面・sessionStorageへ秘密情報を置かない）。
@@ -4577,6 +5209,17 @@ async function saveDiscordSettings() {
       toast.success("Discord設定を保存しました");
     } catch (error) {
       toast.error(error.message);
+    }
+  });
+}
+
+async function sendDiscordTestNotification() {
+  await withBusy(elements.sendDiscordTestButton, "送信中…", async () => {
+    try {
+      await postJson("/api/discord/test", {});
+      toast.success("Discordへテスト通知を送信しました");
+    } catch (error) {
+      toast.error(`Discordテスト通知に失敗しました: ${error.message}`);
     }
   });
 }
@@ -4597,18 +5240,68 @@ async function clearDiscordWebhook() {
   }
 }
 
-async function loadHistory() {
+async function loadHistory({ append = false } = {}) {
+  if (historyLoading) return;
+  if (append && !historyHasMore) return;
+  historyLoading = true;
+  elements.historyLoadMoreButton.disabled = true;
+  elements.historyLoadMoreButton.textContent = append ? "読み込み中…" : "履歴を読み込み中…";
   try {
-    const [historyData, preferences] = await Promise.all([
-      getJson("/api/history?limit=200"),
-      getJson("/api/history/preferences")
-    ]);
-    preferenceData = preferences;
-    renderPreferenceSummary();
-    renderHistory(historyData.generations ?? []);
+    const cursor = append && historyCursor ? `&cursor=${encodeURIComponent(historyCursor)}` : "";
+    const favoriteQuery = galleryFilter.kind === "favorite" ? "&favorites=1" : "";
+    const historyRequest = getJson(`/api/history?limit=${HISTORY_PAGE_SIZE}${favoriteQuery}${cursor}`);
+    const [historyData, preferences] = append
+      ? [await historyRequest, null]
+      : await Promise.all([historyRequest, getJson("/api/history/preferences")]);
+    if (preferences) {
+      preferenceData = preferences;
+      renderPreferenceSummary();
+    }
+    historyCursor = historyData.nextCursor ?? null;
+    historyHasMore = historyData.hasMore === true;
+    historyTotal = Number(historyData.total) || 0;
+    lastHistoryGenerations = append
+      ? mergeHistoryGenerations(lastHistoryGenerations, historyData.generations ?? [])
+      : (historyData.generations ?? []);
+    renderHistory(lastHistoryGenerations);
   } catch (error) {
-    elements.historyGrid.textContent = `履歴を取得できません: ${error.message}`;
+    if (!append) elements.historyGrid.textContent = `履歴を取得できません: ${error.message}`;
+    else toast.error(`追加の履歴を取得できません: ${error.message}`);
+  } finally {
+    historyLoading = false;
+    elements.historyLoadMoreButton.disabled = false;
+    elements.historyLoadMoreButton.textContent = `さらに${HISTORY_PAGE_SIZE}件読み込む`;
+    elements.historyLoadMoreButton.hidden = !historyHasMore;
   }
+}
+
+async function loadMoreHistory() {
+  await loadHistory({ append: true });
+}
+
+function mergeHistoryGenerations(current, incoming) {
+  const merged = current.map((generation) => ({
+    ...generation,
+    images: [...(generation.images ?? [])]
+  }));
+  const byGeneration = new Map(merged.map((generation) => [generation.id, generation]));
+  for (const generation of incoming) {
+    const existing = byGeneration.get(generation.id);
+    if (!existing) {
+      const added = { ...generation, images: [...(generation.images ?? [])] };
+      merged.push(added);
+      byGeneration.set(added.id, added);
+      continue;
+    }
+    const imageIds = new Set(existing.images.map((image) => image.id));
+    for (const image of generation.images ?? []) {
+      if (!imageIds.has(image.id)) {
+        existing.images.push(image);
+        imageIds.add(image.id);
+      }
+    }
+  }
+  return merged;
 }
 
 function renderHistory(generations) {
@@ -4619,12 +5312,12 @@ function renderHistory(generations) {
   elements.historyGrid.replaceChildren();
   const allEntries = toGalleryEntries(generations);
   renderGalleryFilterOptions(allEntries);
-  const entries = filterGalleryEntries(allEntries, galleryFilter);
+  const entries = sortGalleryEntries(filterGalleryEntries(allEntries, galleryFilter), gallerySort);
   elements.galleryFilterSummary.textContent =
     describeGalleryFilter(galleryFilter, allEntries.length, entries.length);
   historyEntries = entries;
-  for (const { generation, image } of entries) {
-    elements.historyGrid.append(createHistoryCard(generation, image));
+  for (const [index, { generation, image }] of entries.entries()) {
+    elements.historyGrid.append(createHistoryCard(generation, image, index));
   }
   if (!entries.length) {
     const empty = document.createElement("p");
@@ -4634,25 +5327,381 @@ function renderHistory(generations) {
       : "生成すると画像とレシピがここへ保存されます";
     elements.historyGrid.append(empty);
   }
+  elements.galleryFilterSummary.textContent = historyTotal > allEntries.length
+    ? `${elements.galleryFilterSummary.textContent}（${historyTotal}枚中${allEntries.length}枚を取得済み）`
+    : elements.galleryFilterSummary.textContent;
+  syncGalleryFilterState();
+  updateGalleryFilterDialogSummary();
+  elements.historyLoadMoreButton.hidden = !historyHasMore;
+  const galleryUsesFavoriteDataset = galleryFilter.kind === "favorite";
+  const studioUsesFavoriteDataset = studioHistoryFilter === STUDIO_HISTORY_FILTERS.favorite;
+  if (galleryUsesFavoriteDataset === studioUsesFavoriteDataset) renderStudioRecent(generations);
+  else void loadStudioRecent();
   renderExperimentCards();
   updateCompareButton();
+}
+
+// ---- v3生成ワークスペース: 中央ステータス / 右インスペクター ----
+
+function syncResolutionPreset() {
+  const value = `${elements.width.value}x${elements.height.value}`;
+  elements.resolutionPreset.value = [...elements.resolutionPreset.options].some((option) => option.value === value)
+    ? value
+    : "";
+}
+
+function syncGenerationSeedControls() {
+  elements.seedFixedToggle.checked = Number(elements.seed.value) >= 0;
+}
+
+function syncGenerationSettingsSummary() {
+  const resolution = elements.width.value && elements.height.value
+    ? `${elements.width.value}×${elements.height.value}`
+    : "--";
+  const sampler = elements.samplerPickerValue.textContent || elements.samplerName.value || "--";
+  const steps = elements.steps.value || "--";
+  const cfg = elements.cfgScale.value || "--";
+  elements.generationSettingsSummary.textContent = `${resolution} · ${sampler} · ${steps} steps · CFG ${cfg}`;
+  elements.generationSettingsSummary.title = elements.generationSettingsSummary.textContent;
+  syncResolutionPreset();
+  syncGenerationSeedControls();
+}
+
+function applyResolutionPreset() {
+  const [width, height] = elements.resolutionPreset.value.split("x").map(Number);
+  if (!width || !height) return;
+  elements.width.value = String(width);
+  elements.height.value = String(height);
+  elements.width.dispatchEvent(new Event("input", { bubbles: true }));
+  elements.height.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function randomizeGenerationSeed() {
+  const values = new Uint32Array(1);
+  crypto.getRandomValues(values);
+  elements.seed.value = String(values[0] & 0x7fffffff);
+  elements.seed.dispatchEvent(new Event("input", { bubbles: true }));
+  syncSeedClearButton();
+}
+
+function toggleGenerationSeedFixed() {
+  if (elements.seedFixedToggle.checked) {
+    if (Number(elements.seed.value) < 0) randomizeGenerationSeed();
+    return;
+  }
+  if (compositionLock) unlockComposition();
+  else elements.seed.value = RANDOM_SEED;
+  elements.seed.dispatchEvent(new Event("input", { bubbles: true }));
+  syncSeedClearButton();
+}
+
+function focusGenerationSetting(targetId) {
+  const target = document.getElementById(targetId);
+  if (!target) return;
+  elements.generationSettingsDetails.open = true;
+  requestAnimationFrame(() => {
+    target.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    target.focus({ preventScroll: true });
+  });
+}
+
+function syncStudioOutputStats(generation = null, image = null) {
+  const settings = generation?.settings ?? {};
+  const width = image?.width ?? settings.width ?? elements.width.value;
+  const height = image?.height ?? settings.height ?? elements.height.value;
+  const seed = image?.seed ?? settings.seed ?? elements.seed.value;
+  elements.studioResolution.textContent = width && height ? `${width}×${height}` : "--";
+  elements.studioSeed.textContent = Number(seed) >= 0 ? String(seed) : "RANDOM";
+  elements.studioSampler.textContent =
+    settings.samplerName || elements.samplerPickerValue.textContent || elements.samplerName.value || "--";
+  elements.studioCfg.textContent = String(settings.cfgScale ?? elements.cfgScale.value ?? "--");
+  elements.studioSteps.textContent = String(settings.steps ?? elements.steps.value ?? "--");
+  syncGenerationSettingsSummary();
+}
+
+function updateStudioGenerationState(busy, message = "") {
+  elements.studioGenerationStatus.classList.toggle("busy", busy);
+  if (busy) {
+    if (!studioStartedAt) studioStartedAt = Date.now();
+    elements.studioGenerationStatus.textContent = /プロンプト/.test(message) ? "PREPARING" : "GENERATING";
+    const updateElapsed = () => {
+      const seconds = Math.max(0, Math.floor((Date.now() - studioStartedAt) / 1000));
+      elements.studioGenerationTime.textContent = formatElapsed(seconds);
+    };
+    updateElapsed();
+    if (!studioElapsedTimer) studioElapsedTimer = setInterval(updateElapsed, 1000);
+    syncStudioOutputStats();
+    return;
+  }
+
+  if (studioElapsedTimer) clearInterval(studioElapsedTimer);
+  studioElapsedTimer = null;
+  if (studioStartedAt) {
+    const seconds = Math.max(0, Math.floor((Date.now() - studioStartedAt) / 1000));
+    elements.studioGenerationTime.textContent = formatElapsed(seconds);
+  }
+  studioStartedAt = 0;
+  elements.studioGenerationStatus.textContent = finalImage || lastGeneration ? "COMPLETE" : "READY";
+}
+
+function formatElapsed(seconds) {
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
+}
+
+async function setStudioHistoryFilter(filter) {
+  studioHistoryFilter = normalizeStudioHistoryFilter(filter);
+  renderStudioHistoryFilterState();
+  await loadStudioRecent();
+}
+
+async function loadStudioRecent() {
+  const favoriteQuery = studioHistoryFilter === STUDIO_HISTORY_FILTERS.favorite
+    ? "&favorites=1"
+    : "";
+  try {
+    const data = await getJson(`/api/history?limit=${HISTORY_PAGE_SIZE}${favoriteQuery}`);
+    renderStudioRecent(data.generations ?? []);
+  } catch (error) {
+    elements.studioRecentList.replaceChildren();
+    const empty = document.createElement("p");
+    empty.className = "studioMetadataEmpty";
+    empty.textContent = `履歴を取得できません: ${error.message}`;
+    elements.studioRecentList.append(empty);
+  }
+}
+
+function renderStudioHistoryFilterState() {
+  const favoriteActive = studioHistoryFilter === STUDIO_HISTORY_FILTERS.favorite;
+  elements.studioHistoryAllButton.classList.toggle("active", !favoriteActive);
+  elements.studioHistoryAllButton.setAttribute("aria-pressed", String(!favoriteActive));
+  elements.studioHistoryFavoriteButton.classList.toggle("active", favoriteActive);
+  elements.studioHistoryFavoriteButton.setAttribute("aria-pressed", String(favoriteActive));
+}
+
+function renderStudioRecent(generations) {
+  const allEntries = toGalleryEntries(generations ?? []);
+  const filteredEntries = filterStudioHistoryEntries(allEntries, studioHistoryFilter);
+  const entries = filteredEntries.slice(0, 8);
+  elements.studioRecentCount.textContent = `${entries.length}件`;
+  elements.studioRecentList.replaceChildren();
+  renderStudioHistoryFilterState();
+
+  if (!entries.length) {
+    const empty = document.createElement("p");
+    empty.className = "studioMetadataEmpty";
+    empty.textContent = studioHistoryFilter === STUDIO_HISTORY_FILTERS.favorite
+      ? "お気に入りの画像はまだありません"
+      : "生成履歴はまだありません";
+    elements.studioRecentList.append(empty);
+    return;
+  }
+
+  for (const [index, entry] of entries.entries()) {
+    const { generation, image } = entry;
+    const card = document.createElement("article");
+    card.className = "studioRecentCard";
+    card.dataset.studioImageId = image.id;
+    card.classList.toggle("selected", studioInspection?.image?.id === image.id);
+
+    const selectButton = document.createElement("button");
+    selectButton.type = "button";
+    selectButton.className = "studioRecentSelect";
+    selectButton.setAttribute("aria-label", `${generationTitle(generation)}を選択`);
+
+    const preview = document.createElement("img");
+    configureThumbnailImage(preview, image, { eager: index < 2 });
+    preview.alt = "";
+
+    const text = document.createElement("span");
+    text.className = "studioRecentText";
+    const title = document.createElement("strong");
+    title.textContent = generationTitle(generation);
+    const meta = document.createElement("small");
+    meta.textContent = [
+      formatDate(generation.createdAt),
+      formatCheckpointBadge(generation.settings?.checkpoint),
+      `Seed ${image.seed}`
+    ].filter(Boolean).join(" · ");
+    text.append(title, meta);
+    selectButton.append(preview, text);
+    selectButton.addEventListener("click", () => setStudioInspection(generation, image, { showOnCanvas: true }));
+
+    const favoriteButton = createFavoriteButton(image, { className: "studioRecentFavorite" });
+    card.append(selectButton, favoriteButton);
+    elements.studioRecentList.append(card);
+  }
+
+  if (!studioInspection) setStudioInspection(entries[0].generation, entries[0].image);
+}
+
+function setStudioMetadataValue(element, value, fallback = "--") {
+  const text = value === null || value === undefined || String(value).trim() === ""
+    ? fallback
+    : String(value).trim();
+  element.textContent = text;
+  element.title = text === fallback ? "" : text;
+}
+
+function formatStudioCreatedAt(value) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "--";
+  return new Intl.DateTimeFormat("ja-JP", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(date);
+}
+
+function studioDenoisingValue(generation, settings) {
+  if (settings.hiresEnabled) return settings.hiresDenoising;
+  if (generation.mode === "inpaint") return settings.inpaintDenoising;
+  if (generation.mode === "img2img") return settings.img2imgDenoising;
+  return null;
+}
+
+async function copyStudioInspectionValue(button, buildText) {
+  if (!studioInspection) return toast.warning("コピーする画像を選択してください");
+  let text = "";
+  try {
+    text = buildText(studioInspection.generation, studioInspection.image);
+  } catch {
+    text = "";
+  }
+  if (!String(text ?? "").trim()) return toast.warning("コピーできる情報が保存されていません");
+  try {
+    await copyToClipboard(String(text));
+    flashLabel(button, "Copied!");
+  } catch (error) {
+    toast.error(`コピーできませんでした: ${error.message}`);
+  }
+}
+
+function setStudioInspection(generation, image, { showOnCanvas = false } = {}) {
+  if (!generation || !image) return;
+  studioInspection = { generation, image };
+  const favorite = imageFavorites.has(image.id)
+    ? imageFavorites.get(image.id) === true
+    : Boolean(image.favorite);
+  image.favorite = favorite;
+  imageFavorites.set(image.id, favorite);
+  elements.studioMainFavoriteButton.dataset.favoriteImage = image.id;
+  elements.studioMainFavoriteButton.dataset.favoriteStyle = "star";
+  renderFavoriteButton(elements.studioMainFavoriteButton, favorite);
+  for (const card of elements.studioRecentList.querySelectorAll("[data-studio-image-id]")) {
+    card.classList.toggle("selected", card.dataset.studioImageId === String(image.id));
+  }
+
+  const settings = generation.settings ?? {};
+  const checkpoint = settings.checkpoint || "記録なし";
+  const sampler = settings.samplerName || "--";
+  const steps = settings.steps ?? "--";
+  const cfg = settings.cfgScale ?? "--";
+  const seed = image.seed ?? settings.seed ?? "--";
+  const resolution = image.width && image.height
+    ? `${image.width}×${image.height}`
+    : settings.width && settings.height
+      ? `${settings.width}×${settings.height}`
+      : "--";
+  const loras = generation.loras ?? [];
+  const loraText = loras.length
+    ? loras.map((lora) => {
+      const name = lora.displayName || lora.name || "LoRA";
+      return `${name}${Number.isFinite(Number(lora.weight)) ? ` ${Number(lora.weight).toFixed(2)}` : ""}`;
+    }).join(" / ")
+    : "なし";
+  const hiresText = settings.hiresEnabled
+    ? [
+        "ON",
+        settings.hiresScale ? `${settings.hiresScale}×` : "",
+        settings.hiresSteps ? `${settings.hiresSteps} steps` : "",
+        settings.hiresUpscaler
+      ].filter(Boolean).join(" · ")
+    : "OFF";
+  const vramUsage = image.vramUsage ?? generation.vramUsage ?? settings.vramUsage;
+
+  setStudioMetadataValue(elements.studioMetaResolution, resolution);
+  setStudioMetadataValue(elements.studioMetaSampler, sampler);
+  setStudioMetadataValue(elements.studioMetaSteps, steps);
+  setStudioMetadataValue(elements.studioMetaCfg, cfg);
+  setStudioMetadataValue(elements.studioMetaSeed, seed);
+  setStudioMetadataValue(elements.studioMetaModel, formatCheckpointBadge(checkpoint));
+  setStudioMetadataValue(elements.studioMetaLoraCount, `${loras.length} Active`);
+  setStudioMetadataValue(elements.studioMetaCreated, formatStudioCreatedAt(generation.createdAt));
+  setStudioMetadataValue(elements.studioMetaVram, vramUsage);
+
+  setStudioMetadataValue(elements.studioMetaCheckpoint, checkpoint);
+  setStudioMetadataValue(elements.studioMetaModelHash, settings.checkpointHash);
+  setStudioMetadataValue(elements.studioMetaParameterSampler, sampler);
+  setStudioMetadataValue(elements.studioMetaScheduler, settings.scheduler);
+  setStudioMetadataValue(elements.studioMetaParameterSteps, steps);
+  setStudioMetadataValue(elements.studioMetaParameterCfg, cfg);
+  setStudioMetadataValue(elements.studioMetaParameterSeed, seed);
+  setStudioMetadataValue(elements.studioMetaWidth, settings.width ?? image.width);
+  setStudioMetadataValue(elements.studioMetaHeight, settings.height ?? image.height);
+  setStudioMetadataValue(elements.studioMetaBatchCount, settings.candidateCount ?? generation.images?.length);
+  setStudioMetadataValue(elements.studioMetaBatchSize, settings.batchSize ?? 1);
+  setStudioMetadataValue(elements.studioMetaHires, hiresText);
+  setStudioMetadataValue(elements.studioMetaDenoising, studioDenoisingValue(generation, settings));
+  setStudioMetadataValue(elements.studioMetaVae, settings.vae);
+  setStudioMetadataValue(elements.studioMetaClipSkip, settings.clipSkip);
+  setStudioMetadataValue(elements.studioMetaLoras, loraText, "なし");
+
+  setStudioMetadataValue(
+    elements.studioMetaPositive,
+    generation.effectivePrompt || generation.prompt,
+    "（記録なし）"
+  );
+  setStudioMetadataValue(
+    elements.studioMetaNegative,
+    generation.effectiveNegativePrompt || generation.negativePrompt,
+    "（記録なし）"
+  );
+  elements.studioMetadataEmpty.classList.add("hidden");
+  elements.studioMetadataContent.classList.remove("hidden");
+
+  if (showOnCanvas) {
+    elements.emptyState.classList.add("hidden");
+    elements.loading.classList.add("hidden");
+    elements.resultContent.classList.remove("hidden");
+    elements.finalResult.classList.add("hidden");
+    elements.studioMainImage.src = originalImageUrl(image);
+    elements.studioMainImage.alt = generationTitle(generation);
+    syncCompareControl(elements.studioMainCompareButton, image.id);
+    elements.studioMainPreview.classList.remove("hidden");
+    syncStudioOutputStats(generation, image);
+  }
 }
 
 // ---- ギャラリーの絞り込み ----
 
 function hasGalleryFilter() {
   return galleryFilter.kind !== "all"
-    || Boolean(galleryFilter.checkpoint || galleryFilter.lora || galleryFilter.period || galleryFilter.query);
+    || Boolean(galleryFilter.checkpoint || galleryFilter.lora || galleryFilter.period || galleryFilter.query)
+    || galleryFilter.tags.length > 0;
 }
 
 function setGalleryFilter(patch) {
-  galleryFilter = { ...galleryFilter, ...patch };
-  for (const button of elements.galleryKindFilter.querySelectorAll("[data-gallery-kind]")) {
-    const active = button.dataset.galleryKind === galleryFilter.kind;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", String(active));
+  const wasFavorite = galleryFilter.kind === "favorite";
+  galleryFilter = {
+    ...galleryFilter,
+    ...patch,
+    tags: Array.isArray(patch.tags)
+      ? [...new Map(patch.tags.map((tag) => [String(tag).trim().toLowerCase(), String(tag).trim()])).values()]
+      : galleryFilter.tags
+  };
+  syncGalleryFilterState();
+  // Favoriteだけはサーバー側でも絞り込み、未取得ページ内のお気に入りを取りこぼさない。
+  if (wasFavorite !== (galleryFilter.kind === "favorite")) {
+    historyCursor = null;
+    historyHasMore = true;
+    void loadHistory();
+    return;
   }
-  // 取得済みの履歴をそのまま絞り込む（再取得しない）。
+  // その他の条件は取得済みページをそのまま絞り込み、追加読み込み時にも維持する。
   renderHistory(lastHistoryGenerations);
 }
 
@@ -4661,13 +5710,91 @@ function resetGalleryFilter() {
   elements.galleryLora.value = "";
   elements.galleryPeriod.value = "";
   elements.gallerySearch.value = "";
-  setGalleryFilter({ kind: "all", checkpoint: "", lora: "", period: "", query: "" });
+  elements.galleryTagSearch.value = "";
+  galleryTagQuery = "";
+  setGalleryFilter({ kind: "all", checkpoint: "", lora: "", period: "", query: "", tags: [] });
 }
 
 // Checkpoint・LoRAの候補は、いま履歴にあるものだけを出す。
 function renderGalleryFilterOptions(entries) {
   fillFilterSelect(elements.galleryCheckpoint, collectCheckpoints(entries), galleryFilter.checkpoint);
   fillFilterSelect(elements.galleryLora, collectLoras(entries), galleryFilter.lora);
+  renderGallerySelectedTags();
+  renderGalleryTagOptions(entries);
+  updateGalleryFilterDialogSummary();
+}
+
+function syncGalleryFilterState() {
+  for (const button of elements.galleryKindFilter.querySelectorAll("[data-gallery-kind]")) {
+    const active = button.dataset.galleryKind === galleryFilter.kind;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  }
+  const favoriteActive = galleryFilter.kind === "favorite";
+  for (const [button, active] of [[elements.galleryAllButton, !favoriteActive], [elements.galleryFavoriteButton, favoriteActive]]) {
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  }
+  elements.gallerySort.value = gallerySort;
+}
+
+function openGalleryFilterDialog() {
+  renderGalleryFilterOptions(toGalleryEntries(lastHistoryGenerations));
+  if (!elements.galleryFilterDialog.open) elements.galleryFilterDialog.showModal();
+}
+
+function updateGalleryFilterDialogSummary() {
+  elements.galleryFilterDialogSummary.textContent =
+    `${elements.galleryFilterSummary.textContent}（取得済みデータのみ）`;
+}
+
+function renderGallerySelectedTags() {
+  elements.gallerySelectedTags.replaceChildren();
+  if (!galleryFilter.tags.length) {
+    const empty = document.createElement("span");
+    empty.className = "galleryTagEmpty";
+    empty.textContent = "選択中のタグはありません";
+    elements.gallerySelectedTags.append(empty);
+    return;
+  }
+  for (const tag of galleryFilter.tags) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "gallerySelectedTag";
+    button.textContent = `× ${tag}`;
+    button.title = `${tag}を解除`;
+    button.addEventListener("click", () => {
+      setGalleryFilter({ tags: galleryFilter.tags.filter((item) => item !== tag) });
+    });
+    elements.gallerySelectedTags.append(button);
+  }
+}
+
+function renderGalleryTagOptions(entries) {
+  const query = galleryTagQuery.trim().toLowerCase();
+  const tags = collectPromptTags(entries)
+    .filter((tag) => !query || tag.toLowerCase().includes(query));
+  elements.galleryTagOptions.replaceChildren();
+  if (!tags.length) {
+    const empty = document.createElement("span");
+    empty.className = "galleryTagEmpty";
+    empty.textContent = query ? "一致するタグがありません" : "取得済みPromptから候補を収集中です";
+    elements.galleryTagOptions.append(empty);
+    return;
+  }
+  for (const tag of tags) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "galleryTagOption";
+    button.textContent = tag;
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", String(galleryFilter.tags.some((item) => item.toLowerCase() === tag.toLowerCase())));
+    button.disabled = galleryFilter.tags.some((item) => item.toLowerCase() === tag.toLowerCase());
+    button.addEventListener("click", () => {
+      setGalleryFilter({ tags: [...galleryFilter.tags, tag] });
+    });
+    elements.galleryTagOptions.append(button);
+  }
 }
 
 function fillFilterSelect(select, values, selected) {
@@ -4828,6 +5955,12 @@ async function openSamplerPicker(kind) {
 function renderUsedLoras() {
   elements.usedLoraList.replaceChildren();
   elements.loraUseCount.textContent = `${selectedLoras.size}件`;
+  const selectedNames = [...selectedLoras.keys()]
+    .map((name) => findLoraByName(name)?.displayName ?? name);
+  elements.loraUseSummary.textContent = selectedNames.length
+    ? `${selectedNames.slice(0, 2).join(" / ")}${selectedNames.length > 2 ? ` ほか${selectedNames.length - 2}件` : ""}`
+    : "未選択";
+  elements.loraUseSummary.classList.toggle("filled", selectedNames.length > 0);
   if (!selectedLoras.size) {
     const empty = document.createElement("p");
     empty.className = "hint";
@@ -4902,8 +6035,80 @@ function renderUsedLoras() {
     });
 
     row.append(title, weightField, toggle, remove);
+    const profile = resolveProfile(lora);
+    const outfitChoices = listLoraOutfitChoices(profile);
+    if (profile?.category !== "direction") {
+      const base = document.createElement("div");
+      base.className = "usedLoraBaseTrigger";
+      const baseText = resolveLoraBaseTriggerWords(profile, loraPresetSelections.get(name), resolveLoraTriggerText(name));
+      base.textContent = "基本セット: キャラクター特徴のみ";
+      base.title = baseText || "未設定";
+      row.append(base);
+    }
+    if (outfitChoices.length) {
+      const outfitField = document.createElement("label");
+      outfitField.className = "usedLoraOutfit";
+      const outfitLabel = document.createElement("span");
+      outfitLabel.textContent = "衣装";
+      const outfitSelect = document.createElement("select");
+      outfitSelect.setAttribute("aria-label", `${lora?.displayName ?? name}の衣装`);
+      outfitSelect.append(new Option("衣装を指定しない", ""));
+      for (const choice of outfitChoices) {
+        const option = new Option(choice.name, choice.id);
+        option.title = choice.name;
+        outfitSelect.append(option);
+      }
+      outfitSelect.value = loraOutfitSelections.get(name) ?? "";
+      outfitSelect.title = outfitSelect.selectedOptions[0]?.textContent ?? "";
+      outfitSelect.addEventListener("change", () => {
+        loraOutfitSelections.set(name, outfitSelect.value);
+        outfitSelect.title = outfitSelect.selectedOptions[0]?.textContent ?? "";
+        saveLoraOutfitSelections();
+        syncAppliedTriggerWords();
+        renderPromptFieldPreviews();
+      });
+      outfitField.append(outfitLabel, outfitSelect);
+      row.append(outfitField);
+    }
     elements.usedLoraList.append(row);
   }
+}
+
+function ensureSelectedLoraOutfits() {
+  let changed = false;
+  for (const name of selectedLoras.keys()) {
+    if (loraOutfitSelections.has(name)) continue;
+    const profile = resolveProfile(findLoraByName(name));
+    if (!listLoraOutfitChoices(profile).length) continue;
+    loraOutfitSelections.set(
+      name,
+      defaultLoraOutfitChoice(profile, loraPresetSelections.get(name), loraAddonSelections.get(name))
+    );
+    changed = true;
+  }
+  if (changed) saveLoraOutfitSelections();
+}
+
+function restoreLoraOutfitsFromRecipe(recipe) {
+  for (const lora of recipe.loras ?? []) loraOutfitSelections.delete(lora.name);
+  for (const lora of recipe.loras ?? []) {
+    if (typeof lora?.outfitChoiceId !== "string") continue;
+    const profile = resolveProfile(findLoraByName(lora.name));
+    const valid = lora.outfitChoiceId === ""
+      || listLoraOutfitChoices(profile).some((choice) => choice.id === lora.outfitChoiceId);
+    if (valid) loraOutfitSelections.set(lora.name, lora.outfitChoiceId);
+  }
+  for (const trigger of normalizeAppliedTriggerWords(recipe.appliedTriggerWords)) {
+    for (const sourceId of trigger.sourceLoraIds) {
+      const state = parseOutfitStateSourceId(sourceId);
+      if (!state) continue;
+      const profile = resolveProfile(findLoraByName(state.loraName));
+      const valid = state.choiceId === ""
+        || listLoraOutfitChoices(profile).some((choice) => choice.id === state.choiceId);
+      if (valid) loraOutfitSelections.set(state.loraName, state.choiceId);
+    }
+  }
+  saveLoraOutfitSelections();
 }
 
 function clampLoraWeightValue(value) {
@@ -5330,8 +6535,24 @@ function renderExperimentCards() {
 
 function experimentEntries(experiment) {
   const imageIds = new Set(experiment.runs.flatMap((run) => run.imageIds ?? []));
-  return historyEntries.filter((entry) => entry.generation.experimentId === experiment.id
-    || imageIds.has(entry.image.id));
+  const combined = [...historyEntries, ...(experimentEntryCache.get(experiment.id) ?? [])];
+  const seen = new Set();
+  return combined.filter((entry) => {
+    if (seen.has(entry.image.id)) return false;
+    if (entry.generation.experimentId !== experiment.id && !imageIds.has(entry.image.id)) return false;
+    seen.add(entry.image.id);
+    return true;
+  });
+}
+
+async function ensureExperimentEntries(experiment) {
+  const expected = new Set(experiment.runs.flatMap((run) => run.imageIds ?? []));
+  const current = experimentEntries(experiment);
+  if ([...expected].every((id) => current.some((entry) => entry.image.id === id))) return current;
+  const data = await getJson(`/api/experiments/${experiment.id}/history`);
+  const entries = toGalleryEntries(data.generations ?? []);
+  experimentEntryCache.set(experiment.id, entries);
+  return experimentEntries(experiment);
 }
 
 function createExperimentCard(experiment) {
@@ -5360,23 +6581,18 @@ function createExperimentCard(experiment) {
   const entries = experimentEntries(experiment);
   for (const entry of entries.slice(0, 4)) {
     const image = document.createElement("img");
-    image.src = entry.image.imageUrl;
+    configureThumbnailImage(image, entry.image);
     image.alt = `${experiment.name} ${entry.generation.comparedValue ?? ""}`;
-    image.loading = "lazy";
     image.title = "クリックで拡大";
-    image.addEventListener("click", () => openImageModal(entry.image.imageUrl, experiment.name));
+    image.addEventListener("click", () => openImageModal(originalImageUrl(entry.image), experiment.name));
     thumbs.append(image);
   }
 
   const actions = document.createElement("div");
   actions.className = "experimentCardActions";
   actions.append(
-    actionButton("開く", "secondary", () => openExperimentDetail(experiment)),
-    actionButton("比較", "secondary", () => {
-      const selected = experimentEntries(experiment).slice(0, 4);
-      if (selected.length < 2) return toast.warning("比較できる画像が2枚以上ありません");
-      void openComparison(selected, experiment);
-    }),
+    actionButton("開く", "secondary", () => void openExperimentDetail(experiment)),
+    actionButton("比較", "secondary", () => void openExperimentComparison(experiment)),
     actionButton("名前変更", "ghost", () => void renameExperiment(experiment)),
     actionButton("削除", "historyDelete", () => void deleteExperiment(experiment))
   );
@@ -5400,8 +6616,24 @@ function actionButton(label, className, handler) {
   return button;
 }
 
-function openExperimentDetail(experiment) {
-  const entries = experimentEntries(experiment);
+async function openExperimentComparison(experiment) {
+  try {
+    const selected = (await ensureExperimentEntries(experiment)).slice(0, 4);
+    if (selected.length < 2) return toast.warning("比較できる画像が2枚以上ありません");
+    await openComparison(selected, experiment);
+  } catch (error) {
+    toast.error(`比較画像を取得できません: ${error.message}`);
+  }
+}
+
+async function openExperimentDetail(experiment) {
+  let entries;
+  try {
+    entries = await ensureExperimentEntries(experiment);
+  } catch (error) {
+    toast.error(`実験画像を取得できません: ${error.message}`);
+    return;
+  }
   openModal({
     title: experiment.name,
     subtitle: `${experiment.parameter}${experiment.target ? ` / ${experiment.target}` : ""}・${experiment.total}枚`,
@@ -5415,10 +6647,9 @@ function openExperimentDetail(experiment) {
         cell.className = "experimentDetailCell";
         if (entry) {
           const image = document.createElement("img");
-          image.src = entry.image.imageUrl;
+          configureThumbnailImage(image, entry.image);
           image.alt = `${run.value}`;
-          image.loading = "lazy";
-          image.addEventListener("click", () => openImageModal(entry.image.imageUrl, `${experiment.name} ${run.value}`));
+          image.addEventListener("click", () => openImageModal(originalImageUrl(entry.image), `${experiment.name} ${run.value}`));
           cell.append(image);
         } else {
           const placeholder = document.createElement("div");
@@ -5539,21 +6770,150 @@ async function deleteExperiment(experiment) {
 
 // ---- 画像比較 ----
 
+function isCompareSelected(imageId) {
+  return imageId !== undefined
+    && imageId !== null
+    && (compareSelection.has(imageId) || compareSelection.has(String(imageId)));
+}
+
+function syncCompareControl(button, imageId) {
+  if (!button) return;
+  const selected = isCompareSelected(imageId);
+  const label = selected ? "比較から外す" : "比較に追加";
+  button.textContent = label;
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  button.setAttribute("aria-pressed", String(selected));
+  button.classList.toggle("active", selected);
+}
+
 function updateCompareButton() {
   const count = compareSelection.size;
+  const startLabel = count ? `画像比較を開始（${count}）` : "画像比較を開始";
   elements.compareSelectionButton.disabled = count < 2;
-  elements.compareSelectionButton.textContent = count ? `比較する（${count}）` : "比較する";
+  elements.compareSelectionButton.textContent = startLabel;
+  elements.compareSelectionButton.title = count < 2
+    ? "画像比較を開始するには2枚以上を選んでください"
+    : startLabel;
+  elements.compareSelectionButton.setAttribute("aria-label", elements.compareSelectionButton.title);
+
+  elements.compareSelectionBadge.textContent = count ? String(count) : "";
+  elements.compareSelectionBadge.classList.toggle("hidden", count === 0);
+  const compareNavButton = elements.mainNav.querySelector('[data-view="compare"]');
+  compareNavButton?.setAttribute("aria-label", count ? `比較（${count}枚選択中）` : "比較");
+
+  syncCompareControl(elements.studioMainCompareButton, selectedCandidate?.id);
+  syncCompareControl(elements.studioCompareButton, finalImage?.id);
+  for (const button of document.querySelectorAll("[data-compare-image-id]")) {
+    syncCompareControl(button, button.dataset.compareImageId);
+  }
+  renderCompareTray();
+  renderImageCompareEntry();
+  updateGalleryCompareModeUi();
 }
 
 function toggleCompareSelection(image, generation, button) {
-  if (compareSelection.has(image.id)) {
+  if (!image || image.id === undefined || image.id === null) return false;
+  const selected = compareSelection.has(image.id);
+  if (selected) {
     compareSelection.delete(image.id);
   } else {
-    if (compareSelection.size >= 4) return toast.warning("比較は最大4枚までです");
+    if (compareSelection.size >= 4) {
+      toast.warning("比較は最大4枚までです");
+      return false;
+    }
     compareSelection.set(image.id, { image, generation });
   }
-  button?.classList.toggle("active", compareSelection.has(image.id));
+  if (button) button.dataset.compareImageId = String(image.id);
   updateCompareButton();
+  toast.info(selected ? "比較から外しました" : "比較に追加しました");
+  return true;
+}
+
+function clearCompareSelection() {
+  if (!compareSelection.size) return;
+  compareSelection.clear();
+  updateCompareButton();
+  toast.info("比較候補をすべて解除しました");
+}
+
+function renderCompareTray() {
+  const entries = [...compareSelection.values()];
+  elements.compareTray.classList.toggle("hidden", entries.length === 0);
+  elements.compareTrayCount.textContent = `${entries.length}枚`;
+  elements.compareTrayOpenButton.disabled = entries.length < 2;
+  elements.compareTrayOpenButton.title = entries.length < 2
+    ? "比較を開始するには2枚以上を選んでください"
+    : "選択した画像で画像比較を開始";
+  elements.compareTrayClearButton.disabled = entries.length === 0;
+  elements.compareTrayItems.replaceChildren();
+
+  for (const [index, entry] of entries.slice(0, 4).entries()) {
+    const item = document.createElement("div");
+    item.className = "compareTrayItem";
+    const preview = document.createElement("img");
+    configureThumbnailImage(preview, entry.image);
+    const title = generationTitle(entry.generation);
+    preview.alt = `比較候補${index + 1}: ${title}`;
+    preview.title = "比較候補から外すには右上のボタンを押してください";
+    const label = document.createElement("span");
+    label.className = "compareTrayItemLabel";
+    label.textContent = `${index + 1}. ${title}`;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "compareTrayRemove";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", `${title}を比較から外す`);
+    remove.title = "この画像を比較から外す";
+    remove.addEventListener("click", () => toggleCompareSelection(entry.image, entry.generation));
+    item.append(preview, label, remove);
+    elements.compareTrayItems.append(item);
+  }
+}
+
+function renderImageCompareEntry() {
+  if (!elements.imageCompareMessage) return;
+  const count = compareSelection.size;
+  if (count === 0) {
+    elements.imageCompareMessage.textContent = "比較する画像がありません";
+    elements.imageCompareGalleryButton.textContent = "ギャラリーで画像を選ぶ";
+  } else if (count === 1) {
+    elements.imageCompareMessage.textContent = "あと1枚追加すると比較できます";
+    elements.imageCompareGalleryButton.textContent = "ギャラリーで画像を追加";
+  } else {
+    elements.imageCompareMessage.textContent = `${count}枚を選択中です。比較を開始できます。`;
+    elements.imageCompareGalleryButton.textContent = "ギャラリーで追加";
+  }
+  elements.imageCompareStartButton.classList.toggle("hidden", count < 2);
+  elements.imageCompareStartButton.disabled = count < 2;
+}
+
+function setGalleryCompareMode(active) {
+  galleryCompareMode = Boolean(active);
+  elements.galleryCompareModeBar.classList.toggle("hidden", !galleryCompareMode);
+  elements.galleryCompareModeButton.setAttribute("aria-pressed", String(galleryCompareMode));
+  elements.galleryCompareModeButton.textContent = galleryCompareMode ? "比較モードを終了" : "比較モード";
+  syncGalleryCompareModeControls();
+  updateGalleryCompareModeUi();
+}
+
+function syncGalleryCompareModeControls() {
+  for (const checkbox of document.querySelectorAll(".historyCompareCheck")) {
+    checkbox.hidden = !galleryCompareMode;
+    checkbox.checked = isCompareSelected(checkbox.dataset.compareImageId);
+  }
+}
+
+function updateGalleryCompareModeUi() {
+  const count = compareSelection.size;
+  elements.galleryCompareModeCount.textContent = `${count}枚選択中`;
+  elements.galleryCompareModeMessage.textContent = count === 0
+    ? "あと2枚選択してください"
+    : count === 1
+      ? "あと1枚選択してください"
+      : `${count}枚を選択中です。比較を開始できます。`;
+  elements.galleryCompareClearButton.disabled = count === 0;
+  syncGalleryCompareModeControls();
 }
 
 async function openComparison(entries, experiment = null) {
@@ -5585,7 +6945,7 @@ function compareCurrentSelection() {
   void openComparison(entries);
 }
 
-function createHistoryCard(generation, image) {
+function createHistoryCard(generation, image, index = 0) {
   const card = document.createElement("article");
   card.className = "historyCard";
   const previewWrap = document.createElement("div");
@@ -5593,79 +6953,111 @@ function createHistoryCard(generation, image) {
 
   const preview = document.createElement("img");
   preview.className = "historyCardImage";
-  preview.src = image.imageUrl;
-  preview.alt = generation.description || `Seed ${image.seed}`;
-  preview.loading = "lazy";
+  configureThumbnailImage(preview, image, { eager: index < 4 });
+  preview.alt = generationTitle(generation);
   preview.title = "クリックで拡大";
-  preview.addEventListener("click", () =>
-    openImageModal(image.imageUrl, generation.description || `Seed ${image.seed}`)
-  );
+  card.addEventListener("click", (event) => {
+    if (event.target.closest("button, summary, details, input, a")) return;
+    openImageModal(originalImageUrl(image), generationTitle(generation));
+  });
 
   const body = document.createElement("div");
   body.className = "historyCardBody";
 
   const meta = document.createElement("div");
   meta.className = "historyCardMeta";
+  const title = document.createElement("strong");
+  title.className = "historyCardTitle";
+  title.textContent = generationTitle(generation);
   const summary = document.createElement("span");
   summary.className = "historyCardSummary";
   const badge = generation.settings?.checkpoint
     ? formatCheckpointBadge(generation.settings.checkpoint)
     : null;
-  summary.textContent = [badge, loraCountLabel(generation.loras), historyModeLabel(generation.mode)]
+  summary.textContent = [badge, historyModeLabel(generation.mode)]
     .filter(Boolean)
-    .join("・");
-  const seedLine = document.createElement("span");
-  seedLine.className = "historyCardSeed";
-  seedLine.textContent = `Seed ${image.seed}`;
-  meta.append(summary, seedLine);
-
-  const actions = document.createElement("div");
-  actions.className = "historyCardActions";
+    .join("・") || "通常生成";
+  const dateLine = document.createElement("span");
+  dateLine.className = "historyCardDate";
+  dateLine.textContent = formatDate(generation.createdAt);
+  meta.append(title, summary, dateLine);
 
   // カード右上の星（画像のFavorite）。一覧・詳細・最新結果で状態を共有する。
   previewWrap.append(preview, createFavoriteButton(image, { className: "cardFavorite" }));
+  const compareCheck = document.createElement("input");
+  compareCheck.type = "checkbox";
+  compareCheck.className = "historyCompareCheck";
+  compareCheck.dataset.compareImageId = String(image.id);
+  compareCheck.hidden = !galleryCompareMode;
+  compareCheck.checked = isCompareSelected(image.id);
+  compareCheck.setAttribute("aria-label", `${generationTitle(generation)}を比較対象に選択`);
+  compareCheck.title = "比較対象に選択";
+  compareCheck.addEventListener("click", (event) => event.stopPropagation());
+  compareCheck.addEventListener("change", () => {
+    const selected = isCompareSelected(image.id);
+    if (compareCheck.checked !== selected) toggleCompareSelection(image, generation);
+  });
+  previewWrap.append(compareCheck);
+
   const discordBadge = createDiscordStatusNode(image);
+  const discordGenerationBadge = createDiscordGenerationStatusNode(image);
 
-  const del = document.createElement("button");
-  del.type = "button";
-  del.className = "historyDelete";
-  del.textContent = "削除";
-  del.title = "この画像を削除する";
-  del.addEventListener("click", () => void deleteHistoryImage(image, del));
+  const menu = document.createElement("details");
+  menu.className = "historyCardMenu";
+  const menuSummary = document.createElement("summary");
+  menuSummary.textContent = "⋯";
+  menuSummary.setAttribute("aria-label", "画像操作");
+  menuSummary.title = "画像操作";
+  menuSummary.addEventListener("click", (event) => event.stopPropagation());
+  const menuBody = document.createElement("div");
+  menuBody.className = "historyCardMenuBody";
+  menuBody.append(discordBadge, discordGenerationBadge);
 
-  const load = document.createElement("button");
-  load.type = "button";
-  load.className = "secondary";
-  load.textContent = "読込";
-  load.title = "この画像の設定を読み込む";
-  load.addEventListener("click", () => activateCompositionLock(generation, image));
+  const addMenuAction = (label, className, handler, title = label) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = className;
+    button.textContent = label;
+    button.title = title;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      menu.open = false;
+      handler(button);
+    });
+    menuBody.append(button);
+    return button;
+  };
 
-  const detail = document.createElement("button");
-  detail.type = "button";
-  detail.className = "ghost";
-  detail.textContent = "詳細";
-  detail.title = "生成情報を表示";
-  detail.addEventListener("click", () => openHistoryDetail(generation, image));
+  addMenuAction("読込", "secondary", () => activateCompositionLock(generation, image), "この画像の設定を読み込む");
 
   const compare = document.createElement("button");
   compare.type = "button";
-  compare.className = `ghost compareToggle${compareSelection.has(image.id) ? " active" : ""}`;
-  compare.textContent = "比較";
-  compare.title = "比較対象に追加・解除";
-  compare.addEventListener("click", () => toggleCompareSelection(image, generation, compare));
+  compare.className = "ghost compareToggle";
+  compare.dataset.compareImageId = String(image.id);
+  syncCompareControl(compare, image.id);
+  compare.title = "比較対象へ追加または解除";
+  compare.addEventListener("click", (event) => {
+    event.stopPropagation();
+    menu.open = false;
+    toggleCompareSelection(image, generation, compare);
+  });
+  menuBody.append(compare);
+  addMenuAction("詳細", "ghost", () => openHistoryDetail(generation, image), "生成情報を表示");
+  addMenuAction("削除", "historyDelete", (button) => void deleteHistoryImage(image, button), "この画像を削除する");
+
+  menu.append(menuSummary, menuBody);
 
   if (generation.experimentName) {
-    const badge = document.createElement("span");
-    badge.className = "historyExperimentBadge";
-    badge.textContent = generation.comparedValue != null
+    const experimentBadge = document.createElement("span");
+    experimentBadge.className = "historyExperimentBadge";
+    experimentBadge.textContent = generation.comparedValue != null
       ? `${generation.experimentName}: ${generation.comparedValue}`
       : generation.experimentName;
-    badge.title = "実験グループ";
-    meta.append(badge);
+    experimentBadge.title = "実験グループ";
+    meta.append(experimentBadge);
   }
 
-  actions.append(discordBadge, del, load, detail, compare);
-  body.append(meta, actions);
+  body.append(meta, menu);
   card.append(previewWrap, body);
   return card;
 }
@@ -5775,7 +7167,7 @@ function openHistoryDetail(generation, image) {
   const header = document.createElement("div");
   header.className = "detailHeader";
   const heading = document.createElement("strong");
-  heading.textContent = generation.description || "生成情報";
+  heading.textContent = generationTitle(generation);
   const close = document.createElement("button");
   close.type = "button";
   close.className = "imageModalClose";
@@ -5783,6 +7175,13 @@ function openHistoryDetail(generation, image) {
   close.textContent = "×";
   close.addEventListener("click", closeDetail);
   header.append(heading, close);
+
+  const detailImage = document.createElement("img");
+  detailImage.className = "detailImage";
+  detailImage.src = originalImageUrl(image);
+  detailImage.alt = generationTitle(generation);
+  detailImage.title = "クリックで拡大";
+  detailImage.addEventListener("click", () => openImageModal(detailImage.src, detailImage.alt));
 
   const settings = generation.settings ?? {};
   const dl = document.createElement("dl");
@@ -5858,17 +7257,18 @@ function openHistoryDetail(generation, image) {
     closeDetail();
     duplicateRecipe(generation, image);
   }, "Seedは-1のまま設定だけ読み込みます");
-  addAction("比較対象へ追加", "ghost", () => {
-    toggleCompareSelection(image, generation);
-    toast.info(compareSelection.has(image.id) ? "比較対象へ追加しました" : "比較対象から外しました");
+  const detailCompare = addAction("比較に追加", "ghost", () => {
+    toggleCompareSelection(image, generation, detailCompare);
   });
+  detailCompare.dataset.compareImageId = String(image.id);
+  syncCompareControl(detailCompare, image.id);
   addAction("Hiresする", "primary", () => { closeDetail(); void hiresFromGallery(generation, image); },
     "この画像を元に高解像度仕上げ");
 
   overlay.addEventListener("click", (event) => { if (event.target === overlay) closeDetail(); });
   document.addEventListener("keydown", onKey);
 
-  box.append(header, dl, copyRow, prompts, footer);
+  box.append(header, detailImage, dl, copyRow, prompts, footer);
   overlay.append(box);
   document.body.append(overlay);
 }
@@ -6013,14 +7413,14 @@ async function deriveWithInstruction(generation, image, type) {
     setPromptFields(
       appendPromptInstruction(elements.prompt.value, addition),
       elements.negativePrompt.value,
-      elements.description.value.trim()
+      promptDescription
     );
   }
   savePromptPartSelections();
   updatePromptPartsSummary();
   pendingDerivation = { type, instruction, parentGenerationId: generation.id };
   toast.success(`${definition.title}の指示を読み込みました: ${instruction}`);
-  elements.description.scrollIntoView({ behavior: "smooth", block: "center" });
+  elements.promptDetails.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 function appendPromptInstruction(prompt, addition) {
@@ -6631,6 +8031,7 @@ async function checkForUpdate() {
   elements.checkUpdateButton.disabled = true;
   elements.applyUpdateButton.disabled = true;
   elements.updateStatus.textContent = "GitHubの最新版を確認中…";
+  syncSettingsConnectionSummary();
   try {
     updateInfo = await postJson("/api/update/check", {
       token: elements.githubToken.value
@@ -6646,6 +8047,7 @@ async function checkForUpdate() {
     elements.updateStatus.textContent = error.message;
   } finally {
     elements.checkUpdateButton.disabled = false;
+    syncSettingsConnectionSummary();
   }
 }
 
@@ -6733,6 +8135,14 @@ function readSettings(overrides = {}) {
   };
 }
 
+function readTitlePayload() {
+  return {
+    title: elements.generationTitle.value,
+    titleMode: normalizeTitleMode(elements.titleGenerationMode.value),
+    titleTemplate: normalizeTitleTemplate(elements.titleTemplate.value)
+  };
+}
+
 function readInitImagePayload() {
   if (generationMode === "txt2img" || !initImageReference) return {};
   return initImageReference.imageId
@@ -6760,20 +8170,40 @@ function readSelectedLoras() {
   // 生成直前にプロンプト内のタグと突き合わせて、実効Weightのまま送る。
   syncLorasFromPrompt();
   return [...selectedLoras]
-    .filter(([name]) => !disabledLoras.has(name))
-    .map(([name, weight]) => ({
-    name,
-    weight,
-    source: loraSelectionSources.get(name) ?? "ui",
-    // トリガーワードは画面側でプロンプトへ組み込むため、サーバーの自動追記へは渡さない。
-    // 枠が無いLoRA（トリガーワード未設定）だけ従来どおりの値を送る。
-    triggerWords: hasManagedTriggerWords(name) ? "" : loraTriggers.get(name) ?? "",
-    negativeWords: loraNegativeWords.get(name) ?? ""
-  }));
+    .map(([name, weight]) => {
+      const lora = findLoraByName(name);
+      const profile = resolveProfile(lora);
+      const outfitChoiceId = loraOutfitSelections.get(name) ?? "";
+      const outfitChoice = listLoraOutfitChoices(profile).find((choice) => choice.id === outfitChoiceId);
+      return {
+        name,
+        weight,
+        enabled: !disabledLoras.has(name),
+        source: loraSelectionSources.get(name) ?? "ui",
+        characterTriggerWords: resolveLoraBaseTriggerWords(
+          profile,
+          loraPresetSelections.get(name),
+          resolveLoraTriggerText(name)
+        ),
+        outfitChoiceId,
+        outfitPresetName: outfitChoice?.name ?? "",
+        outfitTriggerWords: outfitChoice?.prompt ?? "",
+        // トリガーワードは画面側でプロンプトへ組み込むため、サーバーの自動追記へは渡さない。
+        // 枠が無いLoRA（トリガーワード未設定）だけ従来どおりの値を送る。
+        triggerWords: hasManagedTriggerWords(name) || hasStructuredLoraPresets(name)
+          ? ""
+          : loraTriggers.get(name) ?? "",
+        negativeWords: loraNegativeWords.get(name) ?? ""
+      };
+    });
 }
 
 function hasManagedTriggerWords(loraName) {
   return appliedTriggerWords.some((trigger) => trigger.sourceLoraIds.includes(loraName));
+}
+
+function hasStructuredLoraPresets(loraName) {
+  return typeof findLoraByName(loraName)?.registry?.characterTriggerWords === "string";
 }
 
 function loadLoraCategory() {
@@ -6832,6 +8262,15 @@ function loadStringMap(storageKey) {
   }
 }
 
+function loadLoraOutfitSelections() {
+  const stored = readJsonStorage("localImageChat.generationLoraOutfits", {});
+  if (!stored || typeof stored !== "object" || Array.isArray(stored)) return new Map();
+  return new Map(
+    Object.entries(stored)
+      .filter(([name, choiceId]) => name && typeof choiceId === "string")
+  );
+}
+
 function saveLoraWeights() {
   localStorage.setItem("localImageChat.loraWeights", JSON.stringify(Object.fromEntries(loraWeights)));
 }
@@ -6848,6 +8287,13 @@ function saveProfileSettings() {
   localStorage.setItem("localImageChat.loraProfileAssignments", JSON.stringify(Object.fromEntries(loraProfileAssignments)));
   localStorage.setItem("localImageChat.loraPresetSelections", JSON.stringify(Object.fromEntries(loraPresetSelections)));
   localStorage.setItem("localImageChat.loraAddonSelections", JSON.stringify(Object.fromEntries(loraAddonSelections)));
+}
+
+function saveLoraOutfitSelections() {
+  localStorage.setItem(
+    "localImageChat.generationLoraOutfits",
+    JSON.stringify(Object.fromEntries(loraOutfitSelections))
+  );
 }
 
 async function getJson(url) {
@@ -6887,7 +8333,6 @@ async function deleteJson(url) {
 }
 
 function setBusy(busy, message = "") {
-  elements.promptButton.disabled = busy;
   elements.generateButton.disabled = busy;
   elements.healthButton.disabled = busy;
   elements.refreshLorasButton.disabled = busy;
@@ -6921,6 +8366,7 @@ function setBusy(busy, message = "") {
   elements.lockCompositionButton.disabled = busy || !selectedCandidate;
   elements.loading.classList.toggle("hidden", !busy);
   if (message) elements.loadingText.textContent = message;
+  updateStudioGenerationState(busy, message);
 }
 
 function updateGenerateButton() {

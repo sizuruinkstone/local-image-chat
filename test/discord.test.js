@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  buildGenerationMessage,
   buildFavoriteMessage,
   createDiscordService,
   isDiscordWebhookUrl,
@@ -67,6 +68,33 @@ test("長すぎるPromptは切り詰めて全文をテキスト添付する", ()
   assert.equal(promptFile.text, longPrompt);
 });
 
+test("生成完了通知はタイトル・生成メタデータ・枚数だけを含みPromptを送らない", () => {
+  const { content } = buildGenerationMessage({
+    generation: {
+      title: "夜の街",
+      description: "旧説明文",
+      prompt: "secret prompt should not be sent",
+      settings: { checkpointModelName: "model_name", width: 768, height: 1024 },
+      images: [
+        { seed: 123, width: 768, height: 1024 },
+        { seed: 124, width: 768, height: 1024 },
+        { seed: 125, width: 768, height: 1024 },
+        { seed: 126, width: 768, height: 1024 }
+      ]
+    },
+    startedAt: "2026-08-05T00:00:00.000Z",
+    completedAt: "2026-08-05T00:00:12.345Z"
+  });
+  assert.match(content, /^Local Image Chatで画像生成が完了しました/);
+  assert.match(content, /タイトル: 夜の街/);
+  assert.match(content, /Model: model_name/);
+  assert.match(content, /Seed: 123/);
+  assert.match(content, /解像度: 768 × 1024/);
+  assert.match(content, /生成時間: 12秒/);
+  assert.match(content, /生成枚数: 4/);
+  assert.equal(content.includes("secret prompt"), false);
+});
+
 test("送信先はDiscordのWebhook URLだけ許可する", () => {
   assert.equal(isDiscordWebhookUrl(WEBHOOK), true);
   assert.equal(isDiscordWebhookUrl("https://canary.discord.com/api/v10/webhooks/1234/abcd"), true);
@@ -91,19 +119,23 @@ test("送信状態は既知の値だけを受け付ける", () => {
   assert.equal(normalizeDiscordState({ status: "sent", messageId: "42" }).messageId, "42");
 });
 
-async function setupService({ fetchImpl, webhookFromEnv = "", stored = WEBHOOK } = {}) {
+async function setupService({ fetchImpl, webhookFromEnv = "", stored = WEBHOOK, images = null } = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "local-image-chat-discord-"));
   const dataDir = path.join(directory, "data");
   const outputDir = path.join(directory, "outputs");
   await fs.mkdir(dataDir, { recursive: true });
   await fs.mkdir(outputDir, { recursive: true });
-  await fs.writeFile(path.join(outputDir, "one.png"), Buffer.from("fake-png"));
+  const imageInputs = images ?? [{ filename: "one.png", imageUrl: "/outputs/one.png", seed: 123456789 }];
+  await Promise.all(imageInputs.map((image) =>
+    fs.writeFile(path.join(outputDir, image.filename), Buffer.from(`fake-${image.filename}`))
+  ));
 
   const history = createHistoryService(dataDir);
   const stored_ = await history.addGeneration({
     description: "テスト",
     ...generation,
-    images: [{ filename: "one.png", imageUrl: "/outputs/one.png", seed: 123456789 }]
+    title: "テストタイトル",
+    images: imageInputs
   });
   const service = createDiscordService({
     dataDir,
@@ -114,7 +146,7 @@ async function setupService({ fetchImpl, webhookFromEnv = "", stored = WEBHOOK }
     logger: { warn: () => {} }
   });
   if (stored) await service.updateSettings({ webhookUrl: stored });
-  return { directory, history, service, image: stored_.images[0] };
+  return { directory, history, service, image: stored_.images[0], stored: stored_ };
 }
 
 test("Favorite時にWebhookへ画像を送り、状態をsentにする", async (t) => {
@@ -146,6 +178,103 @@ test("Favorite時にWebhookへ画像を送り、状態をsentにする", async (
   assert.match(payload.content, /Seed: 123456789/);
   assert.deepEqual(payload.allowed_mentions, { parse: [] });
   assert.ok(form.get("files[0]"), "画像を添付する");
+});
+
+test("生成完了後の通知はFavoriteと別状態で1回だけ送り、先頭画像を添付する", async (t) => {
+  const calls = [];
+  const { directory, service, history, image, stored } = await setupService({
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return { ok: true, status: 200, json: async () => ({ id: "generation-message-1" }) };
+    }
+  });
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+
+  await service.updateSettings({ generationAutoSend: true, generationIncludeImage: true });
+  const first = await service.sendForGeneration(stored, {
+    startedAt: "2026-08-05T00:00:00.000Z",
+    completedAt: "2026-08-05T00:00:01.000Z"
+  });
+  assert.equal(first.status, "sending");
+  // 同じgenerationをもう一度開始しても、先に確保した状態を再利用する。
+  assert.ok(["sending", "sent"].includes((await service.sendForGeneration(stored)).status));
+  await waitForStatus(history, image.id, "sent", "generation");
+
+  assert.equal(calls.length, 1);
+  const form = calls[0].options.body;
+  const payload = JSON.parse(form.get("payload_json"));
+  assert.match(payload.content, /Local Image Chatで画像生成が完了しました/);
+  assert.match(payload.content, /生成枚数: 1/);
+  assert.equal(payload.content.includes("Prompt"), false);
+  assert.deepEqual(payload.allowed_mentions, { parse: [] });
+  assert.ok(form.get("files[0]"), "生成完了通知へ先頭画像を添付する");
+  assert.equal((await history.getDiscordState(image.id)).status, "not_sent", "Favorite状態を変更しない");
+});
+
+test("生成完了通知の添付OFF・通知OFF・test通知を分離して扱う", async (t) => {
+  const calls = [];
+  const fourImages = Array.from({ length: 4 }, (_, index) => ({
+    filename: `image-${index + 1}.png`,
+    imageUrl: `/outputs/image-${index + 1}.png`,
+    seed: 100 + index,
+    width: 512,
+    height: 512
+  }));
+  const { directory, service, history, stored } = await setupService({
+    images: fourImages,
+    fetchImpl: async (_url, options) => {
+      calls.push(options);
+      return { ok: true, status: 200, json: async () => ({ id: `message-${calls.length}` }) };
+    }
+  });
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+
+  // 既定OFFでは、生成完了しても送信しない。
+  assert.equal((await service.sendForGeneration(stored)).status, "not_sent");
+  assert.equal(calls.length, 0);
+  await service.updateSettings({ generationAutoSend: true, generationIncludeImage: false });
+  await service.sendForGeneration(stored);
+  await waitForStatus(history, stored.images[0].id, "sent", "generation");
+  assert.equal(calls.length, 1);
+  const notificationPayload = JSON.parse(calls[0].body.get("payload_json"));
+  assert.match(notificationPayload.content, /生成枚数: 4/);
+  assert.equal(calls[0].body.get("files[0]"), null, "添付OFFでは画像を送らない");
+
+  const testResult = await service.sendTestNotification();
+  assert.equal(testResult.messageId, "message-2");
+  const testPayload = JSON.parse(calls[1].body.get("payload_json"));
+  assert.equal(testPayload.content, "Local Image Chat Discord通知テスト\n\n接続に成功しました。");
+  assert.equal(calls[1].body.get("files[0]"), null, "test通知へ画像を添付しない");
+});
+
+test("生成完了通知のfailedだけを再送でき、sentは再送できない", async (t) => {
+  let shouldFail = true;
+  let calls = 0;
+  const { directory, service, history, stored } = await setupService({
+    fetchImpl: async () => {
+      calls += 1;
+      return shouldFail
+        ? { ok: false, status: 500, json: async () => ({}) }
+        : { ok: true, status: 200, json: async () => ({ id: "generation-message-2" }) };
+    }
+  });
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+
+  await service.updateSettings({ generationAutoSend: true });
+  await service.sendForGeneration(stored);
+  await waitForStatus(history, stored.images[0].id, "failed", "generation");
+  assert.match((await history.getDiscordState(stored.images[0].id, "generation")).error, /HTTP 500/);
+  assert.equal((await service.sendForGeneration(stored)).status, "failed", "失敗は自動再送しない");
+  assert.equal(calls, 1);
+
+  shouldFail = false;
+  await service.resendGeneration(stored.images[0].id);
+  await waitForStatus(history, stored.images[0].id, "sent", "generation");
+  assert.equal(calls, 2);
+  await assert.rejects(
+    () => service.resendGeneration(stored.images[0].id),
+    /すでにDiscordへ送信済み/
+  );
 });
 
 test("sending・sentの画像は再送しない", async (t) => {
@@ -264,10 +393,12 @@ test("HTTPステータスごとに分かりやすい理由へ変換する", asyn
   await assert.rejects(() => send(429), /レート制限/);
 });
 
-async function waitForStatus(history, imageId, status, timeoutMs = 3000) {
+async function waitForStatus(history, imageId, status, channelOrTimeout = "favorite", timeoutMs = 3000) {
+  const channel = typeof channelOrTimeout === "string" ? channelOrTimeout : "favorite";
+  if (typeof channelOrTimeout === "number") timeoutMs = channelOrTimeout;
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    const state = await history.getDiscordState(imageId);
+    const state = await history.getDiscordState(imageId, channel);
     if (state.status === status) return state;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }

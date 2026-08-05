@@ -101,11 +101,66 @@ export function buildFavoriteMessage({
   };
 }
 
+function generationTitle(generation) {
+  const title = String(generation?.title ?? "").trim();
+  if (title) return title.slice(0, 160);
+  const description = String(generation?.description ?? "").trim();
+  return (description || "無題").slice(0, 160);
+}
+
+function hasValue(value) {
+  return value !== undefined && value !== null && String(value).trim() !== "";
+}
+
+function formatGenerationDuration(startedAt, completedAt) {
+  const started = Date.parse(String(startedAt ?? ""));
+  const completed = Date.parse(String(completedAt ?? ""));
+  if (!Number.isFinite(started) || !Number.isFinite(completed) || completed < started) return null;
+  const seconds = (completed - started) / 1000;
+  return seconds < 10 ? `${seconds.toFixed(1)}秒` : `${Math.round(seconds)}秒`;
+}
+
+// 生成完了通知の本文。Favorite通知のPrompt設定とは独立して扱う。
+export function buildGenerationMessage({
+  generation = {},
+  startedAt = null,
+  completedAt = null,
+  includeTitle = true,
+  includeModel = true,
+  includeSeed = true,
+  includeDuration = true
+} = {}) {
+  const images = Array.isArray(generation.images) ? generation.images : [];
+  const firstImage = images[0] ?? {};
+  const settings = generation.settings ?? {};
+  const lines = ["Local Image Chatで画像生成が完了しました"];
+
+  if (includeTitle) lines.push("", `タイトル: ${generationTitle(generation)}`);
+
+  const metadata = [];
+  const model = settings.checkpointModelName || settings.checkpoint || settings.modelName || settings.model || "";
+  if (includeModel && hasValue(model)) metadata.push(`Model: ${model}`);
+  if (includeSeed && hasValue(firstImage.seed)) metadata.push(`Seed: ${firstImage.seed}`);
+
+  const width = firstImage.width ?? settings.width;
+  const height = firstImage.height ?? settings.height;
+  if (hasValue(width) && hasValue(height)) metadata.push(`解像度: ${width} × ${height}`);
+
+  if (includeDuration) {
+    const duration = formatGenerationDuration(startedAt, completedAt);
+    if (duration) metadata.push(`生成時間: ${duration}`);
+  }
+  metadata.push(`生成枚数: ${images.length}`);
+  if (metadata.length) lines.push("", ...metadata);
+
+  return { content: lines.join("\n").slice(0, DISCORD_CONTENT_LIMIT) };
+}
+
 // Webhookへ画像とテキストを送る。成功時はDiscordのメッセージIDを返す。
 export async function postToDiscordWebhook(webhookUrl, {
   content,
   promptFile = null,
-  image,
+  image = null,
   fetchImpl = fetch
 }) {
   const url = new URL(webhookUrl);
@@ -117,7 +172,9 @@ export async function postToDiscordWebhook(webhookUrl, {
     // プロンプト本文に@everyoneなどが含まれていてもメンションを飛ばさない。
     allowed_mentions: { parse: [] }
   }));
-  form.append("files[0]", new Blob([image.buffer], { type: image.contentType }), image.filename);
+  if (image) {
+    form.append("files[0]", new Blob([image.buffer], { type: image.contentType }), image.filename);
+  }
   if (promptFile) {
     form.append("files[1]", new Blob([promptFile.text], { type: "text/plain" }), promptFile.name);
   }
@@ -159,9 +216,21 @@ export function createDiscordService({
 }) {
   const store = new JsonStore(path.join(dataDir, "discord-settings.json"), {
     schemaVersion: 1,
-    settings: { autoSend: true, includePrompt: true, includeMetadata: true, webhookUrl: "" }
+    settings: {
+      autoSend: true,
+      includePrompt: true,
+      includeMetadata: true,
+      generationAutoSend: false,
+      generationIncludeImage: true,
+      generationIncludeTitle: true,
+      generationIncludeModel: true,
+      generationIncludeSeed: true,
+      generationIncludeDuration: true,
+      generationAttachmentMode: "first",
+      webhookUrl: ""
+    }
   });
-  // 実行中の送信。プロセス内で同じ画像を二重に走らせない。
+  // 実行中の送信。Favoriteと生成完了通知を別キーで二重実行しない。
   const running = new Set();
 
   async function readSettings() {
@@ -171,6 +240,13 @@ export function createDiscordService({
       autoSend: settings.autoSend !== false,
       includePrompt: settings.includePrompt !== false,
       includeMetadata: settings.includeMetadata !== false,
+      generationAutoSend: settings.generationAutoSend === true,
+      generationIncludeImage: settings.generationIncludeImage !== false,
+      generationIncludeTitle: settings.generationIncludeTitle !== false,
+      generationIncludeModel: settings.generationIncludeModel !== false,
+      generationIncludeSeed: settings.generationIncludeSeed !== false,
+      generationIncludeDuration: settings.generationIncludeDuration !== false,
+      generationAttachmentMode: "first",
       webhookUrl: typeof settings.webhookUrl === "string" ? settings.webhookUrl : ""
     };
   }
@@ -190,6 +266,13 @@ export function createDiscordService({
       autoSend: settings.autoSend,
       includePrompt: settings.includePrompt,
       includeMetadata: settings.includeMetadata,
+      generationAutoSend: settings.generationAutoSend,
+      generationIncludeImage: settings.generationIncludeImage,
+      generationIncludeTitle: settings.generationIncludeTitle,
+      generationIncludeModel: settings.generationIncludeModel,
+      generationIncludeSeed: settings.generationIncludeSeed,
+      generationIncludeDuration: settings.generationIncludeDuration,
+      generationAttachmentMode: settings.generationAttachmentMode,
       webhookConfigured: Boolean(webhook.url),
       webhookSource: webhook.source,
       webhookHint: maskWebhookUrl(webhook.url),
@@ -209,47 +292,72 @@ export function createDiscordService({
     return { buffer, filename: safeName, contentType };
   }
 
-  async function run(imageId) {
-    running.add(imageId);
+  async function run(channel, imageId, options = {}) {
+    const runKey = `${channel}:${imageId}`;
+    running.add(runKey);
     try {
       const settings = await readSettings();
       const webhook = resolveWebhook(settings.webhookUrl);
       if (!webhook.url) throw new Error("Discordの送信先が設定されていません");
 
       const recipe = await history.getRecipe(imageId);
-      const image = recipe.selectedImage;
-      const { content, promptFile } = buildFavoriteMessage({
-        generation: recipe,
-        image,
-        includePrompt: settings.includePrompt,
-        includeMetadata: settings.includeMetadata
-      });
-      const file = await readImageFile(image.filename);
+      let content;
+      let promptFile = null;
+      let file = null;
+      if (channel === "generation") {
+        const message = buildGenerationMessage({
+          generation: recipe,
+          startedAt: options.startedAt,
+          completedAt: options.completedAt,
+          includeTitle: settings.generationIncludeTitle,
+          includeModel: settings.generationIncludeModel,
+          includeSeed: settings.generationIncludeSeed,
+          includeDuration: settings.generationIncludeDuration
+        });
+        content = message.content;
+        if (settings.generationIncludeImage) {
+          const firstImage = recipe.images?.[0];
+          if (!firstImage) throw new Error("生成完了通知へ添付できる画像がありません");
+          file = await readImageFile(firstImage.filename);
+        }
+      } else {
+        const image = recipe.selectedImage;
+        const message = buildFavoriteMessage({
+          generation: recipe,
+          image,
+          includePrompt: settings.includePrompt,
+          includeMetadata: settings.includeMetadata
+        });
+        content = message.content;
+        promptFile = message.promptFile;
+        file = await readImageFile(image.filename);
+      }
       const messageId = await postToDiscordWebhook(webhook.url, {
         content,
         promptFile,
         image: file,
         fetchImpl
       });
-      return await history.completeDiscordSend(imageId, { messageId });
+      return await history.completeDiscordSend(imageId, { messageId }, channel);
     } catch (error) {
       const message = error?.message ?? String(error);
-      logger.warn?.(`[Discord] 送信に失敗しました: ${message}`);
-      return await history.failDiscordSend(imageId, message).catch(() => null);
+      const label = channel === "generation" ? "生成完了通知" : "Favorite通知";
+      logger.warn?.(`[Discord] ${label}の送信に失敗しました: ${message}`);
+      return await history.failDiscordSend(imageId, message, channel).catch(() => null);
     } finally {
-      running.delete(imageId);
+      running.delete(runKey);
     }
   }
 
   // 状態を「sending」にできた場合だけ送信を始める。戻り値は最新の送信状態。
-  async function start(imageId, { background = true } = {}) {
-    const claimed = await history.beginDiscordSend(imageId);
-    if (!claimed) return history.getDiscordState(imageId);
-    const finished = run(imageId);
+  async function start(channel, imageId, { background = true, ...runOptions } = {}) {
+    const claimed = await history.beginDiscordSend(imageId, channel);
+    if (!claimed) return history.getDiscordState(imageId, channel);
+    const finished = run(channel, imageId, runOptions);
     if (!background) return finished;
-    // Favorite操作を待たせないため、完了は待たない。
+    // Favorite操作・生成ジョブをDiscord送信の完了まで待たせない。
     void finished;
-    return history.getDiscordState(imageId);
+    return history.getDiscordState(imageId, channel);
   }
 
   return {
@@ -267,6 +375,35 @@ export function createDiscordService({
         if (patch.includeMetadata !== undefined) {
           settings.includeMetadata = patch.includeMetadata === true || patch.includeMetadata === "true";
         }
+        if (patch.generationAutoSend !== undefined) {
+          settings.generationAutoSend = patch.generationAutoSend === true || patch.generationAutoSend === "true";
+        }
+        if (patch.generationIncludeImage !== undefined) {
+          settings.generationIncludeImage = patch.generationIncludeImage !== false
+            && patch.generationIncludeImage !== "false";
+        }
+        if (patch.generationIncludeTitle !== undefined) {
+          settings.generationIncludeTitle = patch.generationIncludeTitle !== false
+            && patch.generationIncludeTitle !== "false";
+        }
+        if (patch.generationIncludeModel !== undefined) {
+          settings.generationIncludeModel = patch.generationIncludeModel !== false
+            && patch.generationIncludeModel !== "false";
+        }
+        if (patch.generationIncludeSeed !== undefined) {
+          settings.generationIncludeSeed = patch.generationIncludeSeed !== false
+            && patch.generationIncludeSeed !== "false";
+        }
+        if (patch.generationIncludeDuration !== undefined) {
+          settings.generationIncludeDuration = patch.generationIncludeDuration !== false
+            && patch.generationIncludeDuration !== "false";
+        }
+        if (patch.generationAttachmentMode !== undefined) {
+          if (patch.generationAttachmentMode !== "first") {
+            throw new Error("生成完了通知の添付方式は先頭1枚のみ対応しています");
+          }
+          settings.generationAttachmentMode = "first";
+        }
         if (patch.clearWebhook === true) {
           settings.webhookUrl = "";
         } else if (typeof patch.webhookUrl === "string" && patch.webhookUrl.trim()) {
@@ -283,6 +420,13 @@ export function createDiscordService({
         autoSend: next.settings.autoSend !== false,
         includePrompt: next.settings.includePrompt !== false,
         includeMetadata: next.settings.includeMetadata !== false,
+        generationAutoSend: next.settings.generationAutoSend === true,
+        generationIncludeImage: next.settings.generationIncludeImage !== false,
+        generationIncludeTitle: next.settings.generationIncludeTitle !== false,
+        generationIncludeModel: next.settings.generationIncludeModel !== false,
+        generationIncludeSeed: next.settings.generationIncludeSeed !== false,
+        generationIncludeDuration: next.settings.generationIncludeDuration !== false,
+        generationAttachmentMode: "first",
         webhookUrl: next.settings.webhookUrl ?? ""
       });
     },
@@ -292,7 +436,20 @@ export function createDiscordService({
       const settings = await readSettings();
       if (!settings.autoSend) return history.getDiscordState(imageId);
       if (!resolveWebhook(settings.webhookUrl).url) return history.getDiscordState(imageId);
-      return start(imageId);
+      return start("favorite", imageId);
+    },
+
+    // 生成・画像・履歴の保存後にだけ開始する。設定OFF・送信先未設定なら何もしない。
+    async sendForGeneration(generation, options = {}) {
+      const imageId = generation?.images?.[0]?.id;
+      if (!imageId) return normalizeDiscordState();
+      const current = await history.getDiscordState(imageId, "generation");
+      // 自動契機では未送信だけを開始し、失敗からの再送は明示操作へ限定する。
+      if (current.status !== "not_sent") return current;
+      const settings = await readSettings();
+      if (!settings.generationAutoSend) return current;
+      if (!resolveWebhook(settings.webhookUrl).url) return current;
+      return start("generation", imageId, options);
     },
 
     // 失敗した画像の手動再送。sent / sending は対象外。
@@ -303,12 +460,44 @@ export function createDiscordService({
       }
       const current = await history.getDiscordState(imageId);
       if (current.status === "sent") throw new Error("この画像はすでにDiscordへ送信済みです");
-      if (current.status === "sending" || running.has(imageId)) throw new Error("この画像はDiscordへ送信中です");
-      return start(imageId, options);
+      if (current.status === "sending" || running.has(`favorite:${imageId}`)) throw new Error("この画像はDiscordへ送信中です");
+      return start("favorite", imageId, options);
+    },
+
+    // 失敗した生成完了通知の手動再送。sent / sending は対象外。
+    async resendGeneration(imageId, options = {}) {
+      const settings = await readSettings();
+      if (!resolveWebhook(settings.webhookUrl).url) {
+        throw new Error("Discordの送信先が設定されていません");
+      }
+      const current = await history.getDiscordState(imageId, "generation");
+      if (current.status === "sent") throw new Error("この生成完了通知はすでにDiscordへ送信済みです");
+      if (current.status === "sending" || running.has(`generation:${imageId}`)) {
+        throw new Error("この生成完了通知はDiscordへ送信中です");
+      }
+      if (current.status !== "failed") throw new Error("失敗した生成完了通知だけ再送できます");
+      return start("generation", imageId, options);
+    },
+
+    // 保存済みWebhookへ固定本文だけを送る接続テスト。画像は添付しない。
+    async sendTestNotification() {
+      const settings = await readSettings();
+      const webhook = resolveWebhook(settings.webhookUrl);
+      if (!webhook.url) throw new Error("Discordの送信先が設定されていません");
+      const messageId = await postToDiscordWebhook(webhook.url, {
+        content: "Local Image Chat Discord通知テスト\n\n接続に成功しました。",
+        image: null,
+        fetchImpl
+      });
+      return { messageId };
     },
 
     getState(imageId) {
       return history.getDiscordState(imageId);
+    },
+
+    getGenerationState(imageId) {
+      return history.getDiscordState(imageId, "generation");
     }
   };
 }

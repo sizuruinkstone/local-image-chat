@@ -180,8 +180,13 @@ test("登録済みLoRAを再ダウンロードせず一括再解析する", asyn
 
   const stored = JSON.parse(await fs.readFile(path.join(dataDir, "lora-registry.json"), "utf8"));
   assert.equal(stored.entries[0].modelName, "更新後");
-  assert.equal(stored.entries[0].triggerWords, "NewDefault, black dress, NewSwimsuit, bikini");
+  assert.equal(stored.entries[0].triggerWords, "NewDefault");
+  assert.equal(stored.entries[0].characterTriggerWords, "NewDefault");
   assert.equal(stored.entries[0].outfitPresets.length, 2);
+  assert.deepEqual(stored.entries[0].outfitPresets.map((preset) => preset.triggerWords), [
+    "black dress",
+    "NewSwimsuit, bikini"
+  ]);
   assert.equal(stored.entries[0].category, "character");
   assert.equal(stored.entries[0].filename, "example.safetensors");
   assert.equal(stored.entries[1].triggerWords, "keepMe");

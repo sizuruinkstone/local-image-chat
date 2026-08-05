@@ -22,6 +22,25 @@ test("Civitai経由のLoRAをファイル名に依存せずmodelIdから衣装�
   assert.equal(profile.defaultPreset, "identity");
 });
 
+test("手動プリセット構造はキャラクター特徴と衣装を混ぜずにプロフィール化する", () => {
+  const profile = createRegistryProfile({
+    name: "Characters/structured",
+    registry: {
+      category: "character",
+      characterTriggerWords: "character_a, red hair, blue eyes",
+      triggerWords: "legacy_character, base coat",
+      outfitPresets: [
+        { id: "base", name: "ベース衣装", triggerWords: "base coat, black boots" },
+        { id: "coat-remove", name: "Coat remove", triggerWords: "white shirt, bare arms" }
+      ]
+    }
+  });
+  assert.equal(profile.presets[0].id, "identity");
+  assert.equal(profile.presets[0].triggerWords, "character_a, red hair, blue eyes");
+  assert.equal(profile.presets[0].negativeWords, "", "衣装タグを自動でNegativeへ混入させない");
+  assert.deepEqual(profile.presets.slice(1).map((preset) => preset.name), ["ベース衣装", "Coat remove"]);
+});
+
 test("同じCivitaiモデルの別バージョンもmodelIdで既知プロフィールへ接続する", () => {
   const profile = findProfileForLora({
     name: "Characters/new-version",

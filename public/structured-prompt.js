@@ -266,6 +266,16 @@ export function triggersForField(triggers, field) {
   return (Array.isArray(triggers) ? triggers : []).filter((item) => item?.targetField === field);
 }
 
+// LoRA本体のON/OFFを、由来情報を消さず最終Promptだけへ反映する。
+// 共有タグは供給元が1つでも有効なら残し、個別のenabled=falseも尊重する。
+export function activeTriggersForSources(triggers, isSourceActive) {
+  return normalizeAppliedTriggerWords(triggers).filter((trigger) => {
+    if (!trigger.enabled) return false;
+    if (!trigger.sourceLoraIds.length || typeof isSourceActive !== "function") return true;
+    return trigger.sourceLoraIds.some((sourceId) => isSourceActive(sourceId));
+  });
+}
+
 // 最終Positive Prompt。各項目の直後に、その項目へ割り当てたトリガーワードを置く。
 export function buildFinalPrompt(sections, triggers = []) {
   const normalized = normalizeSections(sections);
@@ -273,9 +283,14 @@ export function buildFinalPrompt(sections, triggers = []) {
   for (const field of PROMPT_FIELDS) {
     const value = trimSection(normalized[field]);
     if (value) parts.push(value);
+    const existing = new Set(splitTriggerText(value).map((word) => triggerKey(word)));
     for (const trigger of triggersForField(triggers, field)) {
       const text = formatTriggerWord(trigger);
-      if (text) parts.push(text);
+      if (!text) continue;
+      if (existing.has(triggerKey(text)) || existing.has(triggerKey(trigger.text))) continue;
+      parts.push(text);
+      existing.add(triggerKey(text));
+      existing.add(triggerKey(trigger.text));
     }
   }
   return parts.join(", ");

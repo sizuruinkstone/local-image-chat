@@ -34,7 +34,7 @@ export function createCivitaiService({
   fetchLoraDir = fetchLoraDirectory
 }) {
   const registry = new JsonStore(path.join(dataDir, "lora-registry.json"), {
-    schemaVersion: 2,
+    schemaVersion: 6,
     entries: []
   });
 

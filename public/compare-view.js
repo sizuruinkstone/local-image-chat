@@ -1,4 +1,5 @@
 import { openModal, toast } from "./ui-kit.js";
+import { configureThumbnailImage, originalImageUrl } from "./image-delivery.js";
 
 // 2〜4枚の画像を並べて比較するモーダル。
 // ズーム・パンは全ペインで同期し、設定差分とPrompt差分を表示する。
@@ -98,7 +99,7 @@ export function openCompareView({ entries, onVote }) {
         const stage = document.createElement("div");
         stage.className = "compareStage";
         const image = document.createElement("img");
-        image.src = entry.image.imageUrl;
+        configureThumbnailImage(image, entry.image);
         image.alt = `比較 ${labelFor(index)}`;
         image.draggable = false;
         stage.append(image);
@@ -132,7 +133,7 @@ export function openCompareView({ entries, onVote }) {
 
         pane.append(stage, caption);
         grid.append(pane);
-        panes.push(image);
+        panes.push({ image, originalUrl: originalImageUrl(entry.image) });
 
         stage.addEventListener("wheel", (event) => {
           event.preventDefault();
@@ -163,12 +164,29 @@ export function openCompareView({ entries, onVote }) {
       }
 
       function applyZoom() {
-        for (const image of panes) {
+        for (const { image } of panes) {
           image.style.transform = `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`;
         }
       }
 
       body.append(grid);
+
+      const loadOriginals = document.createElement("button");
+      loadOriginals.type = "button";
+      loadOriginals.className = "secondary smallButton compareReset";
+      loadOriginals.textContent = "原寸で比較";
+      loadOriginals.title = "選択した画像だけを1枚ずつ原寸へ切り替えます";
+      loadOriginals.addEventListener("click", async () => {
+        loadOriginals.disabled = true;
+        loadOriginals.textContent = "原寸を読み込み中…";
+        for (const pane of panes) {
+          if (!pane.originalUrl) continue;
+          pane.image.src = pane.originalUrl;
+          await waitForImage(pane.image);
+        }
+        loadOriginals.textContent = "原寸を読み込み済み";
+      });
+      body.append(loadOriginals);
 
       const reset = document.createElement("button");
       reset.type = "button";
@@ -222,6 +240,14 @@ export function openCompareView({ entries, onVote }) {
     },
     actions: [{ label: "閉じる", value: null, primary: true }]
   }).promise;
+}
+
+function waitForImage(image) {
+  if (image.complete) return Promise.resolve();
+  return new Promise((resolve) => {
+    image.addEventListener("load", resolve, { once: true });
+    image.addEventListener("error", resolve, { once: true });
+  });
 }
 
 function labelFor(index) {

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createHistoryService } from "../src/history.js";
+import { buildGenerationTitle, generationTitle } from "../public/history-title.js";
 
 test("生成レシピを保存し、画像単位の👍から傾向を集計できる", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "local-image-chat-history-"));
@@ -162,6 +163,54 @@ test("説明文が無い生成は「無題」として履歴へ残る", async (t
   assert.equal(titled.description, "夜の秋葉原");
 });
 
+test("新規履歴のtitleを確定し、旧履歴の表示fallbackを維持する", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "local-image-chat-history-title-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const history = createHistoryService(directory);
+
+  const stored = await history.addGeneration({
+    title: " 手動タイトル ",
+    description: "Prompt生成用の説明文",
+    images: [{ filename: "manual.png", imageUrl: "/outputs/manual.png", seed: 10 }]
+  });
+  assert.equal(stored.title, "手動タイトル");
+  assert.equal(stored.description, "Prompt生成用の説明文");
+
+  assert.equal(generationTitle({ title: "新しいタイトル", description: "旧説明" }), "新しいタイトル");
+  assert.equal(generationTitle({ description: "旧説明" }), "旧説明");
+  assert.equal(generationTitle({}), "無題");
+});
+
+test("タイトル自動生成はdescriptionを参照せず、実Seedと未知変数を安全に扱う", () => {
+  const base = {
+    createdAt: "2026-08-05T12:34:00.000Z",
+    structuredPrompt: {
+      character: "1girl, solo, character_name",
+      appearance: " , sailor uniform"
+    },
+    settings: { checkpointModelName: "model-name" },
+    images: [{ seed: 987654 }]
+  };
+
+  assert.equal(buildGenerationTitle({ ...base, title: "  手動  ", description: "使わない説明" }), "手動");
+  assert.match(buildGenerationTitle({ ...base, titleMode: "date" }), /^2026\/08\/05 \d{2}:\d{2}$/);
+  assert.equal(buildGenerationTitle({ ...base, titleMode: "character" }), "character_name");
+  assert.equal(buildGenerationTitle({ ...base, titleMode: "model" }), "model-name");
+  assert.equal(buildGenerationTitle({ ...base, titleMode: "character-date" }).startsWith("character_name · "), true);
+  assert.equal(buildGenerationTitle({ ...base, titleMode: "character-outfit" }), "character_name · sailor uniform");
+  const localDate = new Date(base.createdAt);
+  const dateText = `${localDate.getFullYear()}/${String(localDate.getMonth() + 1).padStart(2, "0")}/${String(localDate.getDate()).padStart(2, "0")}`;
+  const timeText = `${String(localDate.getHours()).padStart(2, "0")}:${String(localDate.getMinutes()).padStart(2, "0")}`;
+  assert.equal(
+    buildGenerationTitle({ ...base, titleMode: "template", titleTemplate: "{character} / {unknown} / {seed} / {date} {time}" }),
+    `character_name / / 987654 / ${dateText} ${timeText}`
+  );
+  assert.match(
+    buildGenerationTitle({ titleMode: "character", createdAt: "2026-08-05T12:34:00.000Z", description: "使わない説明" }),
+    /^2026\/08\/05 \d{2}:\d{2}$/
+  );
+});
+
 test("複数画像から1枚だけ削除でき、最後の1枚で世代ごと消える", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "local-image-chat-history-del-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
@@ -196,4 +245,52 @@ test("複数画像から1枚だけ削除でき、最後の1枚で世代ごと消
   // 最後の1枚を削除 → 世代ごと消える
   await history.deleteImage(second.id);
   assert.equal((await history.list()).length, 0);
+});
+
+test("履歴を画像単位で20件ずつページングし、重複なく最後で停止する", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "local-image-chat-history-page-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const history = createHistoryService(directory);
+
+  for (let generationIndex = 0; generationIndex < 7; generationIndex += 1) {
+    await history.addGeneration({
+      id: `generation-${generationIndex}`,
+      description: `generation ${generationIndex}`,
+      images: Array.from({ length: 4 }, (_, imageIndex) => ({
+        id: `image-${generationIndex}-${imageIndex}`,
+        filename: `${generationIndex}-${imageIndex}.png`,
+        imageUrl: `/outputs/${generationIndex}-${imageIndex}.png`,
+        seed: generationIndex * 10 + imageIndex,
+        favorite: imageIndex === 0
+      }))
+    });
+  }
+
+  const first = await history.listPage({ limit: 20 });
+  assert.equal(first.generations.flatMap((item) => item.images).length, 20);
+  assert.equal(first.total, 28);
+  assert.equal(first.nextCursor, first.generations.at(-1).images.at(-1).id);
+  assert.equal(first.hasMore, true);
+
+  // 1ページ目の後に新規生成が先頭へ追加されても、カーソル以降はずれない。
+  await history.addGeneration({
+    id: "generation-new",
+    images: Array.from({ length: 4 }, (_, index) => ({
+      id: `image-new-${index}`,
+      filename: `new-${index}.png`,
+      imageUrl: `/outputs/new-${index}.png`,
+      seed: 100 + index
+    }))
+  });
+  const last = await history.listPage({ limit: 20, cursor: first.nextCursor });
+  assert.equal(last.generations.flatMap((item) => item.images).length, 8);
+  assert.equal(last.nextCursor, null);
+  assert.equal(last.hasMore, false);
+  const ids = [...first.generations, ...last.generations].flatMap((item) => item.images.map((image) => image.id));
+  assert.equal(new Set(ids).size, 28);
+
+  const favorites = await history.listPage({ favoritesOnly: true, limit: 20 });
+  assert.equal(favorites.total, 7);
+  assert.equal(favorites.generations.flatMap((item) => item.images).every((image) => image.favorite), true);
+  await assert.rejects(() => history.listPage({ cursor: "../20" }), /カーソルが不正/);
 });

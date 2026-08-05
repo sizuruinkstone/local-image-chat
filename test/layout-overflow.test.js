@@ -66,10 +66,10 @@ test("100vwや max-content で横幅を固定していない", async () => {
   assert.equal(/body\s*\{[^}]*overflow-x:\s*hidden/.test(css), false);
 });
 
-test("固定生成バーは幅を100vwで広げない", async () => {
+test("デスクトップの生成操作は通常フローで幅を100vwへ広げない", async () => {
   const css = await readCss();
   const bar = css.match(/\.generateActions \{[^}]*\}/);
   assert.ok(bar);
   assert.equal(/100vw/.test(bar[0]), false);
-  assert.match(bar[0], /position: sticky/);
+  assert.match(bar[0], /position: static/);
 });

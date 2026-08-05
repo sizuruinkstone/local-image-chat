@@ -10,8 +10,72 @@ export const GALLERY_KIND_LABELS = {
   experiment: "比較実験"
 };
 
+const STRUCTURED_POSITIVE_FIELDS = [
+  "character", "appearance", "composition", "situation", "style", "extra"
+];
+
 function text(value) {
   return String(value ?? "").trim().toLowerCase();
+}
+
+function splitPromptTags(value) {
+  const tags = [];
+  let start = 0;
+  let depth = 0;
+  let escaped = false;
+  const source = String(value ?? "");
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      escaped = true;
+      continue;
+    }
+    if ("([{\u3008".includes(character)) depth += 1;
+    else if (")]}".includes(character)) depth = Math.max(0, depth - 1);
+    else if (character === "," && depth === 0) {
+      const tag = source.slice(start, index).trim();
+      if (tag) tags.push(tag);
+      start = index + 1;
+    }
+  }
+  const last = source.slice(start).trim();
+  if (last) tags.push(last);
+  return tags;
+}
+
+function positivePromptText(entry) {
+  const structured = entry.generation?.structuredPrompt;
+  const structuredValues = STRUCTURED_POSITIVE_FIELDS
+    .map((field) => structured?.[field])
+    .filter((value) => typeof value === "string" && value.trim());
+  if (structuredValues.length) return structuredValues.join(", ");
+  const generation = entry.generation ?? {};
+  return generation.effectivePrompt || generation.prompt || "";
+}
+
+export function promptTagsForEntry(entry) {
+  const seen = new Set();
+  return splitPromptTags(positivePromptText(entry)).filter((tag) => {
+    const key = text(tag);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+export function collectPromptTags(entries = []) {
+  const tags = new Map();
+  for (const entry of entries) {
+    for (const tag of promptTagsForEntry(entry)) {
+      const key = text(tag);
+      if (key && !tags.has(key)) tags.set(key, tag);
+    }
+  }
+  return [...tags.values()].sort((left, right) => left.localeCompare(right, "ja"));
 }
 
 // 履歴の世代→画像の一覧へ平坦化する（表示順は履歴の並びのまま）。
@@ -85,17 +149,35 @@ export function filterGalleryEntries(entries = [], {
   lora = "",
   period = "",
   query = "",
+  tags = [],
   now = Date.now()
 } = {}) {
   const since = resolveSince(period, now);
+  const selectedTags = Array.isArray(tags) ? tags.filter((tag) => text(tag)) : [];
   return entries.filter((entry) => {
     if (!matchesKind(entry, kind)) return false;
     if (checkpoint && text(entry.generation?.settings?.checkpoint) !== text(checkpoint)) return false;
     if (lora && !(entry.generation?.loras ?? []).some((item) => text(item?.name) === text(lora))) return false;
     if (!matchesSince(entry, since)) return false;
     if (!matchesQuery(entry, query)) return false;
+    if (!selectedTags.every((tag) => promptTagsForEntry(entry).some((item) => text(item) === text(tag)))) return false;
     return true;
   });
+}
+
+export function sortGalleryEntries(entries = [], sort = "newest") {
+  const direction = sort === "oldest" ? 1 : -1;
+  return entries
+    .map((entry, index) => ({ entry, index, time: Date.parse(entry.generation?.createdAt ?? "") }))
+    .sort((left, right) => {
+      const leftValid = Number.isFinite(left.time);
+      const rightValid = Number.isFinite(right.time);
+      if (leftValid && !rightValid) return -1;
+      if (!leftValid && rightValid) return 1;
+      if (leftValid && rightValid && left.time !== right.time) return (left.time - right.time) * direction;
+      return left.index - right.index;
+    })
+    .map(({ entry }) => entry);
 }
 
 export function describeGalleryFilter(filter = {}, total = 0, shown = 0) {
@@ -105,5 +187,6 @@ export function describeGalleryFilter(filter = {}, total = 0, shown = 0) {
   if (filter.lora) parts.push(`LoRA: ${filter.lora}`);
   if (filter.period) parts.push({ today: "今日", week: "7日以内", month: "30日以内" }[filter.period] ?? filter.period);
   if (filter.query) parts.push(`検索: ${filter.query}`);
+  if (filter.tags?.length) parts.push(`タグ: ${filter.tags.join(" + ")}`);
   return parts.join("・");
 }

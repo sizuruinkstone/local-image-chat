@@ -466,9 +466,12 @@ export function createRegistryProfile(lora) {
   if (!registry || registry.category !== "character") return null;
 
   const triggerWords = String(registry.triggerWords ?? "").trim();
+  const hasStructuredCharacterWords = typeof registry.characterTriggerWords === "string";
+  const structuredCharacterWords = String(registry.characterTriggerWords ?? "").trim();
   const registeredOutfits = normalizeRegistryOutfits(registry.outfitPresets);
   const defaultOutfitWords = registeredOutfits[0]?.triggerWords || triggerWords;
-  const { identityWords } = splitCharacterTriggerWords(defaultOutfitWords);
+  const { identityWords: inferredIdentityWords } = splitCharacterTriggerWords(defaultOutfitWords);
+  const identityWords = hasStructuredCharacterWords ? structuredCharacterWords : inferredIdentityWords;
   const outfitWords = uniqueWords(registeredOutfits
     .flatMap((preset) => splitCharacterTriggerWords(preset.triggerWords).outfitWords.split(",")))
     .join(", ") || splitCharacterTriggerWords(triggerWords).outfitWords;
@@ -486,13 +489,15 @@ export function createRegistryProfile(lora) {
     sourceUrl: registry.sourceUrl || "",
     recommendedWeight: Number(registry.recommendedWeight) || 0.75,
     defaultPreset: "identity",
-    note: "Civitaiの専用Trigger Wordsを衣装ごとに分け、キャラ特徴と服装タグも分離した自動プリセットです。",
+    note: hasStructuredCharacterWords
+      ? "設定画面で登録したキャラクター特徴と衣装プリセットです。"
+      : "Civitaiの専用Trigger Wordsを衣装ごとに分け、キャラ特徴と服装タグも分離した自動プリセットです。",
     presets: [
       {
         id: "identity",
         name: "衣装自由（服タグなし）",
         triggerWords: identityWords,
-        negativeWords: outfitWords
+        negativeWords: hasStructuredCharacterWords ? "" : outfitWords
       },
       ...(registeredOutfits.length
         ? registeredOutfits

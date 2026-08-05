@@ -1,10 +1,15 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { ensureEntryUid, normalizeSubcategory } from "./lora-registry.js";
+import {
+  ensureEntryUid,
+  normalizeOutfitPresets,
+  normalizeSubcategory,
+  structureCharacterTriggerPresets
+} from "./lora-registry.js";
 
 // 既存データを壊さずにschemaVersionを上げる。書き換える前に必ずバックアップを取る。
 export const HISTORY_SCHEMA_VERSION = 2;
-export const REGISTRY_SCHEMA_VERSION = 2;
+export const REGISTRY_SCHEMA_VERSION = 6;
 
 export async function backupDataFile(dataDir, filename) {
   const source = path.join(dataDir, filename);
@@ -19,14 +24,19 @@ export async function backupDataFile(dataDir, filename) {
     String(now.getMonth() + 1).padStart(2, "0"),
     String(now.getDate()).padStart(2, "0")
   ].join("");
-  const target = path.join(backupsDir, `${path.basename(filename, ".json")}-${stamp}.json`);
-  // 同日に複数回移行しても、最初のバックアップを上書きしない。
-  try {
-    await fs.writeFile(target, raw, { flag: "wx" });
-  } catch (error) {
-    if (error?.code !== "EEXIST") throw error;
+  const baseName = `${path.basename(filename, ".json")}-${stamp}`;
+  // 同日に複数回移行しても、各移行直前の状態を世代別に残す。
+  for (let version = 1; version <= 100; version += 1) {
+    const suffix = version === 1 ? "" : `-${version}`;
+    const target = path.join(backupsDir, `${baseName}${suffix}.json`);
+    try {
+      await fs.writeFile(target, raw, { flag: "wx" });
+      return target;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
   }
-  return target;
+  throw new Error(`${filename} のバックアップ世代数が上限に達しました`);
 }
 
 export async function migrateDataFiles(dataDir) {
@@ -34,11 +44,15 @@ export async function migrateDataFiles(dataDir) {
   results.push(await migrateJson(dataDir, "lora-registry.json", REGISTRY_SCHEMA_VERSION, (data) => {
     data.entries = (Array.isArray(data.entries) ? data.entries : []).map((entry) => {
       const withUid = ensureEntryUid(entry);
-      return {
+      return structureCharacterTriggerPresets({
         ...withUid,
         subcategory: normalizeSubcategory(withUid.subcategory ?? withUid.category, "other"),
+        characterTriggerWords: typeof withUid.characterTriggerWords === "string"
+          ? withUid.characterTriggerWords
+          : String(withUid.triggerWords ?? ""),
+        outfitPresets: normalizeOutfitPresets(withUid.outfitPresets),
         manualFields: Array.isArray(withUid.manualFields) ? withUid.manualFields : []
-      };
+      });
     });
     return data;
   }));

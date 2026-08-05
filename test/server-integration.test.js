@@ -75,6 +75,7 @@ test("生成キューからReForge、履歴、👍集計までAPIが往復する
   });
   const queued = await postJson(`${baseUrl}/api/jobs`, {
     description: "テスト画像",
+    title: " 手動タイトル ",
     prompt: "masterpiece, 1girl, blue hair",
     negativePrompt: "low quality",
     loras: [],
@@ -86,11 +87,71 @@ test("生成キューからReForge、履歴、👍集計までAPIが往復する
   const completed = await waitForJob(baseUrl, queued.job.id);
 
   assert.equal(completed.status, "done");
+  assert.equal(completed.result.title, "手動タイトル");
   assert.equal(completed.result.images.length, 1);
   assert.match(completed.result.images[0].id, /^[a-z0-9-]+$/i);
   assert.equal(reforgeRequests.noiseSchedule, "Zero Terminal SNR", "生成前にNoise scheduleをoptionsへ送る");
 
   const image = completed.result.images[0];
+  assert.equal(image.thumbnailUrl, `/api/images/${image.id}/thumbnail`);
+  assert.equal(image.originalUrl, `/api/images/${image.id}/original`);
+  assert.equal(JSON.stringify(completed.result).includes("data:image"), false, "生成結果へdata URLを返さない");
+  assert.equal(JSON.stringify(completed.result).includes(ONE_PIXEL_PNG), false, "生成結果へbase64を返さない");
+
+  const historyPageResponse = await fetch(`${baseUrl}/api/history?limit=1`);
+  const historyPage = await historyPageResponse.json();
+  assert.equal(historyPage.generations.flatMap((item) => item.images).length, 1);
+  assert.equal(historyPage.limit, 1);
+  assert.equal(historyPage.total, 1);
+  assert.equal(historyPage.generations[0].title, "手動タイトル");
+  assert.equal(historyPage.hasMore, false);
+  assert.equal(JSON.stringify(historyPage).includes("base64"), false, "履歴APIへbase64を含めない");
+  assert.equal(historyPage.generations[0].images[0].thumbnailUrl, image.thumbnailUrl);
+
+  const thumbnailResponse = await fetch(`${baseUrl}${image.thumbnailUrl}`);
+  assert.equal(thumbnailResponse.status, 200);
+  assert.equal(thumbnailResponse.headers.get("content-type"), "image/webp");
+  assert.equal(thumbnailResponse.headers.get("cache-control"), "public, max-age=31536000, immutable");
+  assert.ok(Number(thumbnailResponse.headers.get("content-length")) > 0);
+
+  const generatedOutputFile = path.join(temporaryDir, "outputs", path.basename(image.imageUrl));
+  const generatedThumbnailFile = path.join(
+    temporaryDir, "outputs", "thumbnails", `${image.id}.webp`
+  );
+  const hiddenOutputFile = `${generatedOutputFile}.missing-test`;
+  await fs.rename(generatedOutputFile, hiddenOutputFile);
+  await fs.rm(generatedThumbnailFile, { force: true });
+  try {
+    const missingThumbnail = await fetch(`${baseUrl}${image.thumbnailUrl}`);
+    assert.equal(missingThumbnail.status, 404, "原画像がないオンデマンド生成は404を返す");
+    const missingBody = await missingThumbnail.json();
+    assert.equal(
+      missingBody.error,
+      "原画像が見つからないためサムネイルを生成できません",
+      "ローカルパスや内部例外をUIへ返さない"
+    );
+    assert.equal(JSON.stringify(missingBody).includes(temporaryDir), false);
+  } finally {
+    await fs.rename(hiddenOutputFile, generatedOutputFile);
+  }
+  const regeneratedThumbnail = await fetch(`${baseUrl}${image.thumbnailUrl}`);
+  assert.equal(regeneratedThumbnail.status, 200, "原画像を戻すとオンデマンドで再生成できる");
+  assert.equal(regeneratedThumbnail.headers.get("content-type"), "image/webp");
+
+  const originalResponse = await fetch(`${baseUrl}${image.originalUrl}`);
+  assert.equal(originalResponse.status, 200);
+  assert.equal(originalResponse.headers.get("content-type"), "image/png");
+  assert.equal(originalResponse.headers.get("cache-control"), "public, max-age=31536000, immutable");
+  const originalEtag = originalResponse.headers.get("etag");
+  assert.ok(originalEtag, "原寸画像にETagが付く");
+  const cachedOriginal = await fetch(`${baseUrl}${image.originalUrl}`, {
+    headers: { "If-None-Match": originalEtag }
+  });
+  assert.equal(cachedOriginal.status, 304, "同じ原寸画像は条件付きリクエストで再転送しない");
+
+  const traversal = await fetch(`${baseUrl}/api/images/${encodeURIComponent("../secret")}/original`);
+  assert.equal([404, 422].includes(traversal.status), true, "不正な画像IDを拒否する");
+
   const savedRecipe = await (await fetch(`${baseUrl}/api/history/${image.id}/recipe`)).json();
   assert.equal(savedRecipe.settings.checkpoint, "waiNSFWIllustrious_v170.safetensors", "Checkpoint名が履歴へ保存される");
   assert.equal(savedRecipe.settings.checkpointHash, "abc123def", "Checkpoint hashが履歴へ保存される");
@@ -98,9 +159,15 @@ test("生成キューからReForge、履歴、👍集計までAPIが往復する
   // 用途別プロンプトとLoRAトリガーワードが履歴へそのまま残る（復元用）。
   const structuredQueued = await postJson(`${baseUrl}/api/jobs`, {
     description: "構造化プロンプトのテスト",
+    titleMode: "character-outfit",
     prompt: "1girl, (character_name:1.2), classroom",
     negativePrompt: "low quality",
-    structuredPrompt: { character: "1girl", situation: "classroom", unknown: "無視される" },
+    structuredPrompt: {
+      character: "1girl, solo, character_name",
+      appearance: "sailor uniform",
+      situation: "classroom",
+      unknown: "無視される"
+    },
     rawPromptOverride: false,
     rawPrompt: "",
     appliedTriggerWords: [{
@@ -113,28 +180,61 @@ test("生成キューからReForge、履歴、👍集計までAPIが往復する
       enabled: true
     }],
     // 画面側でプロンプトへ組み込み済みなので、triggerWordsは空で送る。
-    loras: [{ name: "Characters/test", weight: 0.8, triggerWords: "" }],
+    loras: [
+      {
+        name: "Characters/test",
+        weight: 0.8,
+        enabled: true,
+        triggerWords: "",
+        characterTriggerWords: "character_name",
+        outfitChoiceId: "preset:dreaming",
+        outfitPresetName: "dreaming_high",
+        outfitTriggerWords: "dreaming_high, white_jacket"
+      },
+      {
+        name: "Characters/off",
+        weight: 0.7,
+        enabled: false,
+        triggerWords: "must_not_be_sent"
+      }
+    ],
     settings: { width: 512, height: 512, steps: 5, candidateCount: 1 }
   });
   const structuredCompleted = await waitForJob(baseUrl, structuredQueued.job.id);
   assert.equal(structuredCompleted.status, "done");
+  assert.equal(structuredCompleted.result.title, "character_name · sailor uniform");
   assert.deepEqual(structuredCompleted.result.structuredPrompt, {
-    character: "1girl", appearance: "", composition: "", situation: "classroom", style: "", extra: ""
+    character: "1girl, solo, character_name",
+    appearance: "sailor uniform",
+    composition: "",
+    situation: "classroom",
+    style: "",
+    extra: ""
   });
   assert.equal(structuredCompleted.result.appliedTriggerWords[0].weight, 1.2);
   // LoRA本体のWeightとトリガーワードのWeightは別管理。
   assert.equal(structuredCompleted.result.loras[0].weight, 0.8);
+  assert.equal(structuredCompleted.result.loras[0].enabled, true);
+  assert.equal(structuredCompleted.result.loras[0].characterTriggerWords, "character_name");
+  assert.equal(structuredCompleted.result.loras[0].outfitChoiceId, "preset:dreaming");
+  assert.equal(structuredCompleted.result.loras[0].outfitPresetName, "dreaming_high");
+  assert.equal(structuredCompleted.result.loras[0].outfitTriggerWords, "dreaming_high, white_jacket");
+  assert.equal(structuredCompleted.result.loras[1].enabled, false);
   assert.equal(
     structuredCompleted.result.effectivePrompt,
     "1girl, (character_name:1.2), classroom, <lora:Characters/test:0.8>",
     "組み込み済みのトリガーワードをサーバーが二重に追記しない"
   );
+  assert.equal(structuredCompleted.result.effectivePrompt.includes("Characters/off"), false);
+  assert.equal(structuredCompleted.result.effectivePrompt.includes("must_not_be_sent"), false);
   const structuredRecipe = await (await fetch(
     `${baseUrl}/api/history/${structuredCompleted.result.images[0].id}/recipe`
   )).json();
   assert.equal(structuredRecipe.structuredPrompt.situation, "classroom");
   assert.equal(structuredRecipe.rawPromptOverride, false);
   assert.equal(structuredRecipe.appliedTriggerWords[0].targetField, "character");
+  assert.equal(structuredRecipe.loras[0].outfitChoiceId, "preset:dreaming");
+  assert.equal(structuredRecipe.loras[1].enabled, false);
   await fetch(`${baseUrl}/api/history/${structuredCompleted.result.images[0].id}`, { method: "DELETE" });
 
   // プロンプト内のLoRAタグが実効Weightとして履歴へ残り、重複タグは1つにまとめられる。
@@ -216,7 +316,9 @@ test("生成キューからReForge、履歴、👍集計までAPIが往復する
   // 設定APIはWebhook URLを返さない。Discord以外のURLは拒否する。
   const discordSettings = await (await fetch(`${baseUrl}/api/discord/settings`)).json();
   assert.deepEqual(Object.keys(discordSettings.settings).sort(), [
-    "autoSend", "includeMetadata", "includePrompt", "storedWebhookConfigured",
+    "autoSend", "generationAttachmentMode", "generationAutoSend", "generationIncludeDuration",
+    "generationIncludeImage", "generationIncludeModel", "generationIncludeSeed", "generationIncludeTitle",
+    "includeMetadata", "includePrompt", "storedWebhookConfigured",
     "webhookConfigured", "webhookEditable", "webhookHint", "webhookSource"
   ]);
   assert.equal(discordSettings.settings.webhookConfigured, false);
@@ -255,6 +357,11 @@ test("生成キューからReForge、履歴、👍集計までAPIが往復する
   const deleteResult = await (await fetch(`${baseUrl}/api/history/${image.id}`, { method: "DELETE" })).json();
   assert.equal(deleteResult.ok, true);
   assert.equal(await fileExists(outputFile), false, "削除でoutputファイルも消える");
+  assert.equal(
+    await fileExists(path.join(temporaryDir, "outputs", "thumbnails", `${image.id}.webp`)),
+    false,
+    "削除でサムネイルも消える"
+  );
   assert.equal(await fileExists(favoritedFile), false, "削除でお気に入り複製も消える");
   const goneRecipe = await fetch(`${baseUrl}/api/history/${image.id}/recipe`);
   assert.equal(goneRecipe.status, 404, "削除後は履歴から引けない");

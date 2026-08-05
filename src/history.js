@@ -3,6 +3,7 @@ import path from "node:path";
 import { JsonStore } from "./json-store.js";
 import { normalizeContentSha256 } from "./content-hash.js";
 import { normalizeDiscordState } from "./discord.js";
+import { normalizeManualTitle } from "../public/history-title.js";
 
 export const UNTITLED_DESCRIPTION = "無題";
 
@@ -10,6 +11,15 @@ const IGNORED_TAGS = new Set([
   "masterpiece", "best quality", "amazing quality", "newest", "absurdres", "highres",
   "1girl", "solo", "detailed face", "detailed eyes", "anime coloring"
 ]);
+
+const DISCORD_STATE_KEYS = {
+  favorite: "discord",
+  generation: "discordGeneration"
+};
+
+function discordStateKey(channel) {
+  return DISCORD_STATE_KEYS[channel] ?? DISCORD_STATE_KEYS.favorite;
+}
 
 export function createHistoryService(dataDir, { limit = 500 } = {}) {
   const store = new JsonStore(path.join(dataDir, "history.json"), {
@@ -42,6 +52,51 @@ export function createHistoryService(dataDir, { limit = 500 } = {}) {
         .slice(0, maximum);
     },
 
+    async listPage({ favoritesOnly = false, limit: requestedLimit = 20, cursor = 0 } = {}) {
+      const data = await store.read();
+      const maximum = Math.max(1, Math.min(Number(requestedLimit) || 20, 100));
+      const entries = [];
+      for (const generation of data.generations) {
+        for (const image of generation.images) {
+          if (favoritesOnly && !image.favorite) continue;
+          entries.push({ generation, image });
+        }
+      }
+
+      const cursorId = parseCursor(cursor);
+      const cursorIndex = cursorId
+        ? entries.findIndex(({ image }) => image.id === cursorId)
+        : -1;
+      if (cursorId && cursorIndex < 0) throw new Error("履歴カーソルが見つかりません");
+      const offset = cursorIndex + 1;
+      const page = entries.slice(offset, offset + maximum);
+      const grouped = new Map();
+      for (const { generation, image } of page) {
+        if (!grouped.has(generation.id)) {
+          grouped.set(generation.id, { ...structuredClone(generation), images: [] });
+        }
+        grouped.get(generation.id).images.push(structuredClone(image));
+      }
+      const nextOffset = offset + page.length;
+      return {
+        generations: [...grouped.values()],
+        limit: maximum,
+        total: entries.length,
+        nextCursor: nextOffset < entries.length ? page.at(-1)?.image.id ?? null : null,
+        hasMore: nextOffset < entries.length
+      };
+    },
+
+    async getImage(imageId) {
+      const data = await store.read();
+      const found = findImage(data, imageId);
+      if (!found) throw new Error("指定された画像が履歴にありません");
+      return {
+        generationId: found.generation.id,
+        ...structuredClone(found.image)
+      };
+    },
+
     async setFavorite(imageId, favorite) {
       let matched = null;
       await store.update((data) => {
@@ -62,42 +117,44 @@ export function createHistoryService(dataDir, { limit = 500 } = {}) {
 
     // 「not_sent」または「failed」のときだけ「sending」を確保する。
     // 既に sending / sent なら null を返し、二重送信を防ぐ。
-    async beginDiscordSend(imageId) {
+    async beginDiscordSend(imageId, channel = "favorite") {
+      const stateKey = discordStateKey(channel);
       let claimed = null;
       await store.update((data) => {
         const found = findImage(data, imageId);
         if (!found) throw new Error("指定された画像が履歴にありません");
-        const state = normalizeDiscordState(found.image.discord);
+        const state = normalizeDiscordState(found.image[stateKey]);
         if (state.status === "sending" || state.status === "sent") return data;
-        found.image.discord = { ...state, status: "sending", error: "" };
+        found.image[stateKey] = { ...state, status: "sending", error: "" };
         claimed = { generationId: found.generation.id, ...structuredClone(found.image) };
         return data;
       });
       return claimed;
     },
 
-    async completeDiscordSend(imageId, { messageId = null } = {}) {
+    async completeDiscordSend(imageId, { messageId = null } = {}, channel = "favorite") {
       return updateDiscordState(store, imageId, () => ({
         status: "sent",
         messageId: typeof messageId === "string" && messageId ? messageId.slice(0, 40) : null,
         sentAt: new Date().toISOString(),
         error: ""
-      }));
+      }), channel);
     },
 
-    async failDiscordSend(imageId, message = "") {
+    async failDiscordSend(imageId, message = "", channel = "favorite") {
       return updateDiscordState(store, imageId, (state) => ({
         ...state,
         status: "failed",
         error: String(message ?? "").slice(0, 500)
-      }));
+      }), channel);
     },
 
-    async getDiscordState(imageId) {
+    async getDiscordState(imageId, channel = "favorite") {
+      const stateKey = discordStateKey(channel);
       const data = await store.read();
       const found = findImage(data, imageId);
       if (!found) throw new Error("指定された画像が履歴にありません");
-      return normalizeDiscordState(found.image.discord);
+      return normalizeDiscordState(found.image[stateKey]);
     },
 
     // サーバー再起動などで「sending」のまま残った画像を再送可能な状態へ戻す。
@@ -106,14 +163,16 @@ export function createHistoryService(dataDir, { limit = 500 } = {}) {
       await store.update((data) => {
         for (const generation of data.generations) {
           for (const image of generation.images) {
-            const state = normalizeDiscordState(image.discord);
-            if (state.status !== "sending") continue;
-            image.discord = {
-              ...state,
-              status: "failed",
-              error: "サーバー再起動により送信が中断されました"
-            };
-            recovered += 1;
+            for (const stateKey of Object.values(DISCORD_STATE_KEYS)) {
+              const state = normalizeDiscordState(image[stateKey]);
+              if (state.status !== "sending") continue;
+              image[stateKey] = {
+                ...state,
+                status: "failed",
+                error: "サーバー再起動により送信が中断されました"
+              };
+              recovered += 1;
+            }
           }
         }
         return data;
@@ -327,13 +386,21 @@ function findImage(data, imageId) {
   return null;
 }
 
-async function updateDiscordState(store, imageId, mutate) {
+function parseCursor(value) {
+  if (value === undefined || value === null || value === "" || value === 0) return null;
+  const cursor = String(value);
+  if (!/^[a-z0-9-]{8,80}$/i.test(cursor)) throw new Error("履歴カーソルが不正です");
+  return cursor;
+}
+
+async function updateDiscordState(store, imageId, mutate, channel = "favorite") {
+  const stateKey = discordStateKey(channel);
   let next = null;
   await store.update((data) => {
     const found = findImage(data, imageId);
     if (!found) throw new Error("指定された画像が履歴にありません");
-    next = normalizeDiscordState(mutate(normalizeDiscordState(found.image.discord)));
-    found.image.discord = next;
+    next = normalizeDiscordState(mutate(normalizeDiscordState(found.image[stateKey])));
+    found.image[stateKey] = next;
     return data;
   });
   return next;
@@ -396,7 +463,9 @@ function normalizeGeneration(input) {
     sourceImageId: input.sourceImageId ?? null,
     sourceImageUrl: input.sourceImageUrl ?? null,
     maskImageUrl: input.maskImageUrl ?? null,
-    // 日本語の説明文は任意。無い場合は履歴上の見出しとして「無題」で保存する。
+    // titleは生成時にサーバーで確定する。空でもdescriptionを削除せず旧履歴互換を保つ。
+    title: normalizeManualTitle(input.title),
+    // 日本語の説明文はPrompt生成・履歴復元用に残し、無い場合は従来どおり「無題」で保存する。
     description: String(input.description ?? "").trim().slice(0, 4000) || UNTITLED_DESCRIPTION,
     prompt: String(input.prompt ?? "").slice(0, 12000),
     negativePrompt: String(input.negativePrompt ?? "").slice(0, 12000),
@@ -426,7 +495,9 @@ function normalizeGeneration(input) {
       // 古い履歴やハッシュ計算に失敗した画像はnullのままで、後から補完する。
       contentSha256: normalizeContentSha256(image.contentSha256),
       // Discord送信状態（v2.15以降）。古い履歴は not_sent として読む。
-      discord: normalizeDiscordState(image.discord)
+      discord: normalizeDiscordState(image.discord),
+      // 生成完了通知はFavorite送信と別契機・別状態で管理する。
+      discordGeneration: normalizeDiscordState(image.discordGeneration)
     }))
   };
 }

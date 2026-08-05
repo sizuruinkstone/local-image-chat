@@ -4,8 +4,14 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createCivitaiService } from "../src/civitai.js";
-import { applyManualEdit, mergeRegistryEntry, normalizeEditableFields } from "../src/lora-registry.js";
-import { migrateDataFiles } from "../src/migrations.js";
+import {
+  applyManualEdit,
+  mergeRegistryEntry,
+  normalizeEditableFields,
+  normalizeOutfitPresets,
+  structureCharacterTriggerPresets
+} from "../src/lora-registry.js";
+import { backupDataFile, migrateDataFiles } from "../src/migrations.js";
 
 async function setup(t, entries = []) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "lic-meta-data-"));
@@ -144,12 +150,18 @@ test("registry登録名のパストラバーサルを拒否する", async (t) =>
   }
 });
 
-test("既存registryをschemaVersion 2へ移行しバックアップを残す", async (t) => {
+test("既存registryをschemaVersion 6へ移行しキャラクター特徴と衣装を分離する", async (t) => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "lic-migrate-"));
   t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
   await fs.writeFile(path.join(dataDir, "lora-registry.json"), JSON.stringify({
     schemaVersion: 1,
-    entries: [{ id: "1:2", relativeName: "Anime/A", category: "character" }]
+    entries: [{
+      id: "1:2",
+      relativeName: "Anime/A",
+      category: "character",
+      triggerWords: "character_a, blue coat, boots",
+      outfitPresets: [{ name: "ベース衣装", triggerWords: "blue coat, boots" }]
+    }]
   }));
   await fs.writeFile(path.join(dataDir, "history.json"), JSON.stringify({
     schemaVersion: 1,
@@ -159,9 +171,21 @@ test("既存registryをschemaVersion 2へ移行しバックアップを残す", 
   const results = await migrateDataFiles(dataDir);
   assert.equal(results.length, 2);
   const registry = JSON.parse(await fs.readFile(path.join(dataDir, "lora-registry.json"), "utf8"));
-  assert.equal(registry.schemaVersion, 2);
+  assert.equal(registry.schemaVersion, 6);
   assert.match(registry.entries[0].uid, /^[0-9a-f-]{36}$/);
   assert.equal(registry.entries[0].subcategory, "character");
+  assert.equal(
+    registry.entries[0].characterTriggerWords,
+    "character_a",
+    "キャラクター特徴だけを基本セットに残す"
+  );
+  assert.deepEqual(registry.entries[0].outfitPresets, [{
+    id: "outfit-1",
+    name: "ベース衣装",
+    triggerWords: "blue coat, boots"
+  }]);
+  assert.equal(registry.entries[0].triggerWords, "character_a");
+  assert.equal(registry.entries[0].presetStructureVersion, 1);
   const history = JSON.parse(await fs.readFile(path.join(dataDir, "history.json"), "utf8"));
   assert.equal(history.schemaVersion, 2);
   assert.equal(history.generations[0].experimentId, null);
@@ -170,6 +194,117 @@ test("既存registryをschemaVersion 2へ移行しバックアップを残す", 
 
   // 2回目の移行は何もしない
   assert.deepEqual(await migrateDataFiles(dataDir), []);
+});
+
+test("短い識別プリセットを基本セットにし衣装プリセットから除外する", () => {
+  const result = structureCharacterTriggerPresets({
+    category: "character",
+    triggerWords: "cureberry, berrycostume",
+    outfitPresets: [
+      { id: "identity", name: "cureberry", triggerWords: "cureberry" },
+      { id: "base", name: "berrycostume", triggerWords: "berrycostume, pink dress, boots" }
+    ],
+    manualFields: []
+  });
+  assert.equal(result.characterTriggerWords, "cureberry");
+  assert.deepEqual(result.outfitPresets, [{
+    id: "base",
+    name: "berrycostume",
+    triggerWords: "berrycostume, pink dress, boots"
+  }]);
+});
+
+test("複数衣装の共通特徴を基本セットへ分離する", () => {
+  const result = structureCharacterTriggerPresets({
+    subcategory: "character",
+    triggerWords: "ray, red hair, blue eyes, black coat, white dress",
+    outfitPresets: [
+      { id: "coat", name: "Coat", triggerWords: "ray, red hair, blue eyes, black coat" },
+      { id: "dress", name: "Dress", triggerWords: "ray, red hair, blue eyes, white dress" }
+    ],
+    manualFields: []
+  });
+  assert.equal(result.characterTriggerWords, "ray, red hair, blue eyes");
+  assert.deepEqual(result.outfitPresets.map((preset) => preset.triggerWords), [
+    "black coat",
+    "white dress"
+  ]);
+});
+
+test("衣装ごとに接尾辞が変わるキャラクター固有Triggerを基本セットへ残す", () => {
+  const result = structureCharacterTriggerPresets({
+    subcategory: "character",
+    triggerWords: "purple eyes, purple hair, rabbit ears",
+    outfitPresets: [
+      {
+        id: "base",
+        name: "base",
+        triggerWords: "ray_\\(arknights\\), ponytail, visor cap, black shirt"
+      },
+      {
+        id: "dream",
+        name: "dreaming high",
+        triggerWords: "ray_\\(dreaming_high\\), twintails, hairband, white_jacket"
+      }
+    ],
+    manualFields: []
+  });
+  assert.equal(
+    result.characterTriggerWords,
+    "ray_\\(arknights\\), purple eyes, purple hair, rabbit ears"
+  );
+  assert.deepEqual(result.outfitPresets.map((preset) => preset.triggerWords), [
+    "ponytail, visor cap, black shirt",
+    "ray_\\(dreaming_high\\), twintails, hairband, white_jacket"
+  ]);
+});
+
+test("手動整理済みのプリセット構造は自動移行で上書きしない", () => {
+  const entry = {
+    category: "character",
+    triggerWords: "legacy",
+    characterTriggerWords: "manual character",
+    outfitPresets: [{ id: "manual", name: "私服", triggerWords: "manual outfit" }],
+    manualFields: ["characterTriggerWords", "outfitPresets"]
+  };
+  assert.equal(structureCharacterTriggerPresets(entry), entry);
+});
+
+test("Civitai再解析後もキャラクター特徴と衣装の分離を維持する", () => {
+  const existing = {
+    uid: "11111111-1111-4111-8111-111111111111",
+    category: "character",
+    triggerWords: "ray, red hair",
+    characterTriggerWords: "ray, red hair",
+    outfitPresets: [{ id: "coat", name: "Coat", triggerWords: "black coat" }],
+    presetStructureVersion: 1,
+    manualFields: []
+  };
+  const refreshed = mergeRegistryEntry(existing, {
+    category: "character",
+    triggerWords: "ray, red hair, black coat, white dress",
+    outfitPresets: [
+      { id: "coat", name: "Coat", triggerWords: "ray, red hair, black coat" },
+      { id: "dress", name: "Dress", triggerWords: "ray, red hair, white dress" }
+    ]
+  });
+  assert.equal(refreshed.characterTriggerWords, "ray, red hair");
+  assert.deepEqual(refreshed.outfitPresets.map((preset) => preset.triggerWords), [
+    "black coat",
+    "white dress"
+  ]);
+});
+
+test("同日のバックアップを世代別に保存する", async (t) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "lic-backup-"));
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(dataDir, "lora-registry.json"), "{\"schemaVersion\":1}");
+  const first = await backupDataFile(dataDir, "lora-registry.json");
+  await fs.writeFile(path.join(dataDir, "lora-registry.json"), "{\"schemaVersion\":2}");
+  const second = await backupDataFile(dataDir, "lora-registry.json");
+  assert.notEqual(first, second);
+  assert.equal(await fs.readFile(first, "utf8"), "{\"schemaVersion\":1}");
+  assert.equal(await fs.readFile(second, "utf8"), "{\"schemaVersion\":2}");
 });
 
 test("編集フィールドの正規化と手動編集記録", () => {
@@ -192,4 +327,27 @@ test("編集フィールドの正規化と手動編集記録", () => {
   const merged = mergeRegistryEntry(edited, { triggerWords: "fromCivitai", modelName: "new" });
   assert.equal(merged.triggerWords, "a, b, script");
   assert.equal(merged.modelName, "new");
+});
+
+test("キャラクター基本セットと複数衣装プリセットを正規化して保存できる", () => {
+  const outfits = normalizeOutfitPresets([
+    { id: "base", name: "ベース衣装", triggerWords: " blue coat ,, boots " },
+    { id: "base", name: "Coat remove", prompt: "shirt, bare arms" },
+    { name: "dreaming_high", triggerWords: "dreaming_high, white dress" },
+    { name: "", triggerWords: "" }
+  ]);
+  assert.deepEqual(outfits, [
+    { id: "base", name: "ベース衣装", triggerWords: "blue coat, boots" },
+    { id: "outfit-2", name: "Coat remove", triggerWords: "shirt, bare arms" },
+    { id: "outfit-3", name: "dreaming_high", triggerWords: "dreaming_high, white dress" }
+  ]);
+
+  const patch = normalizeEditableFields({
+    characterTriggerWords: " character_a ,, blue eyes ",
+    outfitPresets: outfits
+  });
+  assert.equal(patch.characterTriggerWords, "character_a, blue eyes");
+  const edited = applyManualEdit({ uid: "x", triggerWords: "legacy" }, patch);
+  assert.ok(edited.manualFields.includes("characterTriggerWords"));
+  assert.ok(edited.manualFields.includes("outfitPresets"));
 });

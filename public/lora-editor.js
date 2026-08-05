@@ -39,7 +39,45 @@ export function openLoraEditor({
       fields.recommendedWeight = addInput(grid, "推奨weight", "number", entry?.recommendedWeight ?? "", { step: "0.05", min: "0.05", max: "2" });
       fields.recommendedWeightMin = addInput(grid, "推奨weight 最小", "number", entry?.recommendedWeightMin ?? "", { step: "0.05", min: "0.05", max: "2" });
       fields.recommendedWeightMax = addInput(grid, "推奨weight 最大", "number", entry?.recommendedWeightMax ?? "", { step: "0.05", min: "0.05", max: "2" });
-      fields.triggerWords = addTextarea(grid, "Trigger Words", entry?.triggerWords ?? "");
+      fields.characterTriggerWords = addTextarea(
+        grid,
+        "キャラクター特徴のみ",
+        typeof entry?.characterTriggerWords === "string"
+          ? entry.characterTriggerWords
+          : entry?.triggerWords ?? "",
+        { fullWidth: true }
+      );
+      fields.characterTriggerWords.placeholder = "例: character_name, hair color, eye color";
+      const triggerNote = document.createElement("p");
+      triggerNote.className = "uiFieldNote fullWidthField";
+      triggerNote.textContent = "LoRA適用時の基本セットです。衣装タグは下の衣装プリセットへ分けてください。";
+      grid.append(triggerNote);
+
+      const outfitEditor = document.createElement("section");
+      outfitEditor.className = "loraOutfitPresetEditor fullWidthField";
+      const outfitHeading = document.createElement("div");
+      outfitHeading.className = "loraOutfitPresetHeading";
+      const outfitTitle = document.createElement("div");
+      outfitTitle.innerHTML = "<strong>衣装プリセット</strong><small>生成画面では選択した衣装だけを追加します</small>";
+      const addOutfitButton = document.createElement("button");
+      addOutfitButton.type = "button";
+      addOutfitButton.className = "secondary smallButton";
+      addOutfitButton.textContent = "プリセット追加";
+      const outfitList = document.createElement("div");
+      outfitList.className = "loraOutfitPresetList";
+      fields.outfitPresets = [];
+      addOutfitButton.addEventListener("click", () => {
+        fields.outfitPresets.push(createOutfitPresetRow({}, fields.outfitPresets, outfitList));
+        renderOutfitPresetRows(fields.outfitPresets, outfitList);
+      });
+      outfitHeading.append(outfitTitle, addOutfitButton);
+      outfitEditor.append(outfitHeading, outfitList);
+      grid.append(outfitEditor);
+      for (const preset of entry?.outfitPresets ?? []) {
+        fields.outfitPresets.push(createOutfitPresetRow(preset, fields.outfitPresets, outfitList));
+      }
+      renderOutfitPresetRows(fields.outfitPresets, outfitList);
+
       fields.negativeWords = addTextarea(grid, "Negative Words", entry?.negativeWords ?? "");
       fields.checkpointFamilies = addInput(
         grid,
@@ -94,7 +132,11 @@ export function openLoraEditor({
             displayName: fields.displayName.value,
             subcategory: fields.subcategory.value,
             detailCategory: fields.detailCategory.value,
-            triggerWords: fields.triggerWords.value,
+            // triggerWordsは旧クライアント向けの互換ミラー。生成画面は
+            // characterTriggerWords + outfitPresets の構造を優先する。
+            triggerWords: fields.characterTriggerWords.value,
+            characterTriggerWords: fields.characterTriggerWords.value,
+            outfitPresets: collectOutfitPresets(fields.outfitPresets),
             negativeWords: fields.negativeWords.value,
             recommendedWeight: emptyToNull(fields.recommendedWeight.value),
             recommendedWeightMin: emptyToNull(fields.recommendedWeightMin.value),
@@ -191,4 +233,90 @@ function addSelect(grid, label, options, value) {
   wrap.append(text, select);
   grid.append(wrap);
   return select;
+}
+
+function createOutfitPresetRow(preset, rows, list) {
+  const row = {
+    id: String(preset?.id ?? ""),
+    element: document.createElement("div"),
+    name: document.createElement("input"),
+    triggerWords: document.createElement("textarea")
+  };
+  row.element.className = "loraOutfitPresetRow";
+
+  const nameField = document.createElement("label");
+  const nameLabel = document.createElement("span");
+  nameLabel.textContent = "プリセット名";
+  row.name.type = "text";
+  row.name.maxLength = 100;
+  row.name.placeholder = "例: ベース衣装";
+  row.name.value = preset?.name ?? "";
+  nameField.append(nameLabel, row.name);
+
+  const promptField = document.createElement("label");
+  promptField.className = "loraOutfitPresetPrompt";
+  const promptLabel = document.createElement("span");
+  promptLabel.textContent = "プリセット用プロンプト";
+  row.triggerWords.rows = 2;
+  row.triggerWords.placeholder = "例: coat, black dress, boots";
+  row.triggerWords.value = preset?.triggerWords ?? preset?.prompt ?? "";
+  promptField.append(promptLabel, row.triggerWords);
+
+  const actions = document.createElement("div");
+  actions.className = "loraOutfitPresetActions";
+  const up = presetActionButton("↑", "上へ移動", () => movePresetRow(rows, row, -1, list));
+  const down = presetActionButton("↓", "下へ移動", () => movePresetRow(rows, row, 1, list));
+  const remove = presetActionButton("削除", "この衣装プリセットを削除", () => {
+    const index = rows.indexOf(row);
+    if (index >= 0) rows.splice(index, 1);
+    renderOutfitPresetRows(rows, list);
+  });
+  remove.classList.add("dangerText");
+  actions.append(up, down, remove);
+  row.element.append(nameField, promptField, actions);
+  return row;
+}
+
+function presetActionButton(label, title, onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ghost smallButton";
+  button.textContent = label;
+  button.title = title;
+  button.setAttribute("aria-label", title);
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+function movePresetRow(rows, row, offset, list) {
+  const index = rows.indexOf(row);
+  const nextIndex = index + offset;
+  if (index < 0 || nextIndex < 0 || nextIndex >= rows.length) return;
+  [rows[index], rows[nextIndex]] = [rows[nextIndex], rows[index]];
+  renderOutfitPresetRows(rows, list);
+}
+
+function renderOutfitPresetRows(rows, list) {
+  list.replaceChildren(...rows.map((row, index) => {
+    row.element.dataset.presetIndex = String(index);
+    const buttons = row.element.querySelectorAll(".loraOutfitPresetActions button");
+    if (buttons[0]) buttons[0].disabled = index === 0;
+    if (buttons[1]) buttons[1].disabled = index === rows.length - 1;
+    return row.element;
+  }));
+  list.classList.toggle("empty", rows.length === 0);
+  if (!rows.length) {
+    const empty = document.createElement("p");
+    empty.className = "uiFieldNote loraOutfitPresetEmpty";
+    empty.textContent = "衣装プリセットは未登録です";
+    list.append(empty);
+  }
+}
+
+function collectOutfitPresets(rows) {
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name.value,
+    triggerWords: row.triggerWords.value
+  }));
 }

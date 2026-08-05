@@ -39,11 +39,18 @@ import { createDiscordService, normalizeDiscordState } from "./discord.js";
 import { hashOutputImage, sha256OfBuffer } from "./content-hash.js";
 import { createIntegrationsRouter, isUsableIntegrationKey } from "./integrations.js";
 import { createHistoryService } from "./history.js";
+import {
+  buildGenerationTitle,
+  normalizeManualTitle,
+  normalizeTitleMode,
+  normalizeTitleTemplate
+} from "../public/history-title.js";
 import { describeBinding, resolveServerBinding } from "./net-info.js";
 import { createPromptTemplateService } from "./prompt-template.js";
 import { createJobManager } from "./job-manager.js";
 import { createCivitaiService } from "./civitai.js";
 import { createUpdater } from "./updater.js";
+import { createThumbnailService } from "./thumbnails.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
@@ -61,12 +68,14 @@ const outputDir = process.env.LOCAL_IMAGE_CHAT_OUTPUT_DIR
 const favoritesDir = process.env.LOCAL_IMAGE_CHAT_FAVORITES_DIR
   ? path.resolve(process.env.LOCAL_IMAGE_CHAT_FAVORITES_DIR)
   : path.join(outputDir, "favorite");
+const thumbnailDir = path.join(outputDir, "thumbnails");
 const dataDir = process.env.LOCAL_IMAGE_CHAT_DATA_DIR
   ? path.resolve(process.env.LOCAL_IMAGE_CHAT_DATA_DIR)
   : path.join(rootDir, "data");
 await Promise.all([
   fs.mkdir(outputDir, { recursive: true }),
   fs.mkdir(favoritesDir, { recursive: true }),
+  fs.mkdir(thumbnailDir, { recursive: true }),
   fs.mkdir(dataDir, { recursive: true })
 ]);
 
@@ -76,6 +85,7 @@ await migrateDataFiles(dataDir);
 const history = createHistoryService(dataDir, {
   limit: config.storage?.historyLimit ?? 500
 });
+const thumbnails = createThumbnailService({ outputDir, thumbnailDir });
 const civitai = createCivitaiService({
   dataDir,
   loraConfig: config.lora,
@@ -105,8 +115,15 @@ const experiments = createExperimentService(dataDir, {
 const app = express();
 app.use(express.json({ limit: "50mb" }));
 app.use(express.static(path.join(rootDir, "public")));
-app.use("/outputs", express.static(outputDir));
-app.use("/favorites", express.static(favoritesDir));
+const immutableImageStaticOptions = {
+  etag: true,
+  lastModified: true,
+  maxAge: "1y",
+  immutable: true,
+  fallthrough: false
+};
+app.use("/outputs", express.static(outputDir, immutableImageStaticOptions));
+app.use("/favorites", express.static(favoritesDir, immutableImageStaticOptions));
 
 // stable-diffusion-manager からの Favorite 同期。
 // 連携キーが未設定なら 503 を返して無効のままにする。
@@ -352,13 +369,54 @@ app.post("/api/civitai/refresh-registrations", async (request, response) => {
 
 app.get("/api/history", async (request, response) => {
   try {
-    const generations = await history.list({
+    const page = await history.listPage({
       favoritesOnly: request.query.favorites === "1",
-      limit: request.query.limit
+      limit: request.query.limit,
+      cursor: request.query.cursor
     });
-    response.json({ generations });
+    response.json({
+      ...page,
+      generations: page.generations.map(serializeGeneration)
+    });
   } catch (error) {
-    response.status(500).json({ error: readableError(error) });
+    response.status(400).json({ error: readableError(error) });
+  }
+});
+
+app.get("/api/images/:imageId/thumbnail", async (request, response) => {
+  let image = null;
+  let imagePaths = null;
+  try {
+    image = await history.getImage(requireId(request.params.imageId));
+    imagePaths = thumbnails.pathsFor(image);
+    const { thumbnailPath } = await thumbnails.ensure(image);
+    await sendImmutableImage(request, response, thumbnailPath);
+  } catch (error) {
+    if (image) {
+      console.warn(
+        `[Thumbnail] action=serve imageId=${image.id}`
+        + ` originalPath=${imagePaths?.sourcePath ?? "(unresolved)"}`
+        + ` thumbnailPath=${imagePaths?.thumbnailPath ?? "(unresolved)"}`
+        + ` error=${readableError(error)}`
+      );
+    }
+    const missingOriginal = error?.code === "ENOENT";
+    response.status(missingOriginal ? 404 : 422).json({
+      error: missingOriginal
+        ? "原画像が見つからないためサムネイルを生成できません"
+        : "サムネイルを生成または取得できません"
+    });
+  }
+});
+
+app.get("/api/images/:imageId/original", async (request, response) => {
+  try {
+    const image = await history.getImage(requireId(request.params.imageId));
+    const originalPath = resolveOutputImagePath(image.filename);
+    await fs.access(originalPath);
+    await sendImmutableImage(request, response, originalPath);
+  } catch (error) {
+    response.status(404).json({ error: readableError(error) });
   }
 });
 
@@ -367,6 +425,15 @@ app.get("/api/history/preferences", async (_request, response) => {
     response.json(await history.getPreferences());
   } catch (error) {
     response.status(500).json({ error: readableError(error) });
+  }
+});
+
+app.get("/api/experiments/:experimentId/history", async (request, response) => {
+  try {
+    const generations = await history.listByExperiment(requireId(request.params.experimentId));
+    response.json({ generations: generations.map(serializeGeneration) });
+  } catch (error) {
+    response.status(404).json({ error: readableError(error) });
   }
 });
 
@@ -409,10 +476,27 @@ app.get("/api/history/:imageId/discord", async (request, response) => {
   }
 });
 
+app.get("/api/history/:imageId/discord/generation", async (request, response) => {
+  try {
+    response.json({ discord: await discord.getGenerationState(requireId(request.params.imageId)) });
+  } catch (error) {
+    response.status(404).json({ error: readableError(error) });
+  }
+});
+
 // 失敗した画像の手動再送。sent / sending は拒否する（二重投稿の防止）。
 app.post("/api/history/:imageId/discord/send", async (request, response) => {
   try {
     response.json({ discord: await discord.resend(requireId(request.params.imageId)) });
+  } catch (error) {
+    response.status(409).json({ error: readableError(error) });
+  }
+});
+
+// 失敗した生成完了通知の手動再送。Favorite送信とは別状態で扱う。
+app.post("/api/history/:imageId/discord/generation/send", async (request, response) => {
+  try {
+    response.json({ discord: await discord.resendGeneration(requireId(request.params.imageId)) });
   } catch (error) {
     response.status(409).json({ error: readableError(error) });
   }
@@ -513,6 +597,13 @@ app.patch("/api/discord/settings", async (request, response) => {
         autoSend: body.autoSend,
         includePrompt: body.includePrompt,
         includeMetadata: body.includeMetadata,
+        generationAutoSend: body.generationAutoSend,
+        generationIncludeImage: body.generationIncludeImage,
+        generationIncludeTitle: body.generationIncludeTitle,
+        generationIncludeModel: body.generationIncludeModel,
+        generationIncludeSeed: body.generationIncludeSeed,
+        generationIncludeDuration: body.generationIncludeDuration,
+        generationAttachmentMode: body.generationAttachmentMode,
         // 受け取ったWebhook URLはサーバー内に保存するだけで、返却も記録もしない。
         webhookUrl: typeof body.webhookUrl === "string" ? body.webhookUrl : undefined,
         clearWebhook: body.clearWebhook === true
@@ -523,10 +614,19 @@ app.patch("/api/discord/settings", async (request, response) => {
   }
 });
 
+app.post("/api/discord/test", async (_request, response) => {
+  try {
+    response.json({ ok: true, result: await discord.sendTestNotification() });
+  } catch (error) {
+    response.status(400).json({ error: readableError(error) });
+  }
+});
+
 app.delete("/api/history/:imageId", async (request, response) => {
   try {
     const removed = await history.deleteImage(requireId(request.params.imageId));
     await deleteOutputImage(removed.filename ?? removed.imageUrl);
+    await thumbnails.remove(removed).catch(() => {});
     await syncFavoriteFile(removed, false);
     response.json({ ok: true, preferences: await history.getPreferences() });
   } catch (error) {
@@ -822,6 +922,7 @@ async function generateWithRecovery(body, context) {
 }
 
 async function performGeneration(body, { signal, report }) {
+  const generationStartedAt = new Date().toISOString();
   // 説明文は任意。Promptが直接指定されていれば日本語の説明文なしでも生成できる。
   const description = passthroughText(body.description, 4000).trim();
   const hasPrompt = Boolean(body.prompt?.trim());
@@ -830,6 +931,9 @@ async function performGeneration(body, { signal, report }) {
   const settings = validateSettings(body.settings ?? {});
   const loras = validateLoras(body.loras);
   const promptBoosts = validatePromptBoosts(body.promptBoosts);
+  const manualTitle = normalizeManualTitle(body.title);
+  const titleMode = normalizeTitleMode(body.titleMode);
+  const titleTemplate = normalizeTitleTemplate(body.titleTemplate);
   // 用途別プロンプトとトリガーワードは履歴の復元用。生成に使うのは従来どおりbody.prompt。
   const structuredPrompt = validateStructuredPrompt(body.structuredPrompt);
   const appliedTriggerWords = validateAppliedTriggerWords(body.appliedTriggerWords);
@@ -911,7 +1015,8 @@ async function performGeneration(body, { signal, report }) {
     } catch (error) {
       console.warn(`[Favorite連携] ${filename} のハッシュ計算に失敗: ${error.message}`);
     }
-    return {
+    const saved = {
+      id: crypto.randomUUID(),
       imageUrl: `/outputs/${filename}`,
       filename,
       seed: image.seed,
@@ -919,12 +1024,29 @@ async function performGeneration(body, { signal, report }) {
       height: outputSize.height,
       contentSha256
     };
+    // サムネイル生成に失敗しても原画像と履歴の保存は成功させる。
+    await thumbnails.ensure(saved).catch((error) => {
+      console.warn(`[Thumbnail] ${filename} の生成に失敗: ${error.message}`);
+    });
+    return saved;
   }));
 
   const experiment = validateExperimentMeta(body.experiment);
   const derivation = validateDerivation(body.derivation);
   const retryInfo = validateRetryInfo(body.retryInfo);
+  const createdAt = new Date().toISOString();
+  const title = buildGenerationTitle({
+    title: manualTitle,
+    titleMode,
+    titleTemplate,
+    structuredPrompt,
+    settings,
+    images: savedImages,
+    createdAt
+  });
   const stored = await history.addGeneration({
+    createdAt,
+    title,
     kind: settings.hiresEnabled ? "hires" : "candidates",
     mode,
     parentImageId: body.parentImageId,
@@ -956,6 +1078,16 @@ async function performGeneration(body, { signal, report }) {
     images: savedImages
   });
 
+  // 生成・原画像・サムネイル試行・履歴保存が終わった後にだけ開始する。
+  // Discord送信の成否は生成ジョブの成否へ反映させず、完了を待たない。
+  const generationCompletedAt = new Date().toISOString();
+  void discord.sendForGeneration(stored, {
+    startedAt: generationStartedAt,
+    completedAt: generationCompletedAt
+  }).catch((error) => {
+    console.warn(`[Discord] 生成完了通知を開始できませんでした: ${error.message}`);
+  });
+
   if (experiment) {
     // retryInfoが付いていれば、自動リカバリで設定を下げて生成したrunだと分かるようにする。
     await experiments.recordRunCompleted(experiment.id, experiment.value, {
@@ -968,12 +1100,13 @@ async function performGeneration(body, { signal, report }) {
   report(99, "完了");
   return {
     generationId: stored.id,
+    title: stored.title,
     experimentId: stored.experimentId,
     mode,
     sourceImageId: stored.sourceImageId,
     sourceImageUrl: stored.sourceImageUrl,
     maskImageUrl: stored.maskImageUrl,
-    images: stored.images,
+    images: stored.images.map(serializeImage),
     prompt: promptWithBoosts,
     negativePrompt: generatedPrompt.negative_prompt,
     effectivePrompt,
@@ -1358,6 +1491,51 @@ function extensionFromFilename(filename) {
   return extension;
 }
 
+function serializeGeneration(generation) {
+  return {
+    ...generation,
+    images: (generation.images ?? []).map(serializeImage)
+  };
+}
+
+function serializeImage(image) {
+  const id = requireId(image.id);
+  return {
+    ...image,
+    thumbnailUrl: `/api/images/${encodeURIComponent(id)}/thumbnail`,
+    originalUrl: `/api/images/${encodeURIComponent(id)}/original`
+  };
+}
+
+function resolveOutputImagePath(filename) {
+  const safeFilename = String(filename ?? "");
+  if (!safeFilename || path.basename(safeFilename) !== safeFilename) {
+    throw new Error("原画像のファイル名が不正です");
+  }
+  extensionFromFilename(safeFilename);
+  const resolved = path.resolve(outputDir, safeFilename);
+  if (path.dirname(resolved) !== path.resolve(outputDir)) {
+    throw new Error("原画像の保存先が不正です");
+  }
+  return resolved;
+}
+
+async function sendImmutableImage(request, response, filePath) {
+  const stats = await fs.stat(filePath);
+  const etag = `W/"${stats.size.toString(16)}-${Math.trunc(stats.mtimeMs).toString(16)}"`;
+  response.set({
+    "Cache-Control": "public, max-age=31536000, immutable",
+    ETag: etag,
+    "Last-Modified": stats.mtime.toUTCString(),
+    "X-Content-Type-Options": "nosniff"
+  });
+  if (request.headers["if-none-match"] === etag) {
+    response.status(304).end();
+    return;
+  }
+  response.sendFile(filePath);
+}
+
 function outputDimensions(mode, settings) {
   if (!["img2img", "inpaint"].includes(mode) || !settings.hiresEnabled) {
     return {
@@ -1485,14 +1663,28 @@ function validateLoras(input) {
     if (!name || /[<>:\r\n]/.test(name)) continue;
     const key = name.toLowerCase().replaceAll("\\", "/");
     if (unique.has(key)) continue;
-    unique.set(key, {
+    const normalized = {
       name,
       weight: Number(boundedNumber(item.weight, fallbackWeight, 0.05, 2).toFixed(2)),
       triggerWords: sanitizeTriggerWords(item.triggerWords),
       negativeWords: sanitizeTriggerWords(item.negativeWords),
       // 選択元（UI操作 / プロンプト内タグ / 両方）。未指定は従来どおりUI扱い。
       source: ["ui", "prompt", "both"].includes(item.source) ? item.source : "ui"
-    });
+    };
+    if (typeof item.enabled === "boolean") normalized.enabled = item.enabled;
+    if (typeof item.characterTriggerWords === "string") {
+      normalized.characterTriggerWords = sanitizeTriggerWords(item.characterTriggerWords);
+    }
+    if (typeof item.outfitChoiceId === "string") {
+      normalized.outfitChoiceId = passthroughText(item.outfitChoiceId, 200);
+    }
+    if (typeof item.outfitPresetName === "string") {
+      normalized.outfitPresetName = passthroughText(item.outfitPresetName, 200);
+    }
+    if (typeof item.outfitTriggerWords === "string") {
+      normalized.outfitTriggerWords = sanitizeTriggerWords(item.outfitTriggerWords);
+    }
+    unique.set(key, normalized);
   }
 
   return [...unique.values()];
@@ -1584,23 +1776,27 @@ function validateAppliedTriggerWords(input) {
 }
 
 function appendLoras(prompt, loras) {
-  if (!loras.length) return prompt;
+  const enabledLoras = loras.filter((item) => item.enabled !== false);
+  if (!enabledLoras.length) return prompt;
   const normalizedPrompt = prompt.toLowerCase().replaceAll(/\s+/g, " ");
   const existing = new Set(
     [...prompt.matchAll(/<lora:([^:>]+)(?::[^>]*)?>/gi)]
       .map((match) => match[1].trim().toLowerCase().replaceAll("\\", "/"))
   );
-  const triggerWords = loras
+  const triggerWords = enabledLoras
     .map((item) => item.triggerWords)
     .filter((value) => value && !normalizedPrompt.includes(value.toLowerCase().replaceAll(/\s+/g, " ")));
-  const loraTags = loras
+  const loraTags = enabledLoras
     .filter((item) => !existing.has(item.name.toLowerCase().replaceAll("\\", "/")))
     .map((item) => `<lora:${item.name}:${item.weight}>`);
   return appendUniqueTags(prompt, [...triggerWords, ...loraTags]);
 }
 
 function appendLoraNegatives(negativePrompt, loras) {
-  return appendUniqueTags(negativePrompt, loras.flatMap((item) => splitTags(item.negativeWords)));
+  return appendUniqueTags(
+    negativePrompt,
+    loras.filter((item) => item.enabled !== false).flatMap((item) => splitTags(item.negativeWords))
+  );
 }
 
 function appendUniqueTags(prompt, additions) {
