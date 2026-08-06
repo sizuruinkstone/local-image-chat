@@ -424,6 +424,50 @@
                     </label>
                     <p class="hint">V-Pred系Checkpoint（NoobAI V-Pred、Obsession vPredなど）は「Zero Terminal SNR」を選びます。Checkpoint切替時の推奨設定自動反映でも切り替わります。VAE・Clip skip・ADetailer・ControlNetはReForge側の設定を使用します。</p>
                   </details>
+
+                  <details id="ipAdapterDetails" class="ipAdapterSection">
+                    <summary>
+                      <span>IP-Adapter参照</span>
+                      <span id="ipAdapterModel" class="ipAdapterModel" title="IP-Adapterモデル">確認中…</span>
+                    </summary>
+                    <div class="ipAdapterControls">
+                      <label class="autoSizeChoice">
+                        <input id="ipAdapterEnabled" type="checkbox" disabled />
+                        IP-Adapterを使う
+                      </label>
+                      <p id="ipAdapterStatus" class="hint ipAdapterStatus" aria-live="polite">利用可否を確認中…</p>
+                      <div id="ipAdapterDropZone" class="ipAdapterDropZone">
+                        <input id="ipAdapterInput" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+                        <button id="chooseIpAdapterButton" class="secondary smallButton" type="button" disabled>画像を選択</button>
+                        <button id="clearIpAdapterButton" class="ghost smallButton" type="button" disabled>参照を解除</button>
+                        <span>またはここへPNG・JPEG・WebPをドロップ</span>
+                      </div>
+                      <div class="ipAdapterPreviewWrap">
+                        <img id="ipAdapterPreview" class="ipAdapterPreview hidden" alt="IP-Adapter参照画像プレビュー" />
+                        <span id="ipAdapterEmpty" class="hint">参照画像が未選択です</span>
+                      </div>
+                      <div class="settingsGrid ipAdapterParameterGrid">
+                        <label>Weight
+                          <div class="rangeField">
+                            <input id="ipAdapterWeight" type="range" min="0" max="2" step="0.05" value="0.65" disabled />
+                            <output id="ipAdapterWeightValue">0.65</output>
+                          </div>
+                        </label>
+                        <label>Start
+                          <div class="rangeField">
+                            <input id="ipAdapterGuidanceStart" type="range" min="0" max="1" step="0.05" value="0" disabled />
+                            <output id="ipAdapterGuidanceStartValue">0.0</output>
+                          </div>
+                        </label>
+                        <label>End
+                          <div class="rangeField">
+                            <input id="ipAdapterGuidanceEnd" type="range" min="0" max="1" step="0.05" value="1" disabled />
+                            <output id="ipAdapterGuidanceEndValue">1.0</output>
+                          </div>
+                        </label>
+                      </div>
+                    </div>
+                  </details>
                 </details>
 
                 <details id="promptPartsDetails" open>
@@ -537,6 +581,14 @@
                     >☆</button>
                     <div class="studioMainActions">
                       <button id="studioMainCompareButton" class="secondary smallButton" type="button">比較に追加</button>
+                      <button
+                        id="studioMainIpAdapterButton"
+                        class="ghost smallButton"
+                        type="button"
+                        disabled
+                        title="この画像をIP-Adapter参照に使用"
+                        aria-label="この画像をIP-Adapter参照に使用"
+                      >IP参照</button>
                       <button id="studioMainMetadataButton" class="ghost smallButton" type="button">情報</button>
                       <button id="studioMainRegenerateButton" class="ghost smallButton" type="button">再生成</button>
                       <button id="lockCompositionButton" class="secondary smallButton" type="button" disabled>構図</button>
@@ -555,6 +607,14 @@
                         <span id="finalDiscordGenerationStatus" class="discordStatus hidden" aria-live="polite"></span>
                         <button id="regenerateFinalButton" class="secondary smallButton" type="button">再生成</button>
                         <button id="studioCompareButton" class="secondary smallButton" type="button">比較に追加</button>
+                        <button
+                          id="finalIpAdapterButton"
+                          class="ghost smallButton"
+                          type="button"
+                          disabled
+                          title="この画像をIP-Adapter参照に使用"
+                          aria-label="この画像をIP-Adapter参照に使用"
+                        >IP参照</button>
                         <button id="studioMetadataButton" class="ghost smallButton" type="button">メタデータ</button>
                         <button id="openInGalleryButton" class="secondary smallButton" type="button">ギャラリーで開く</button>
                         <button id="sendFinalToImg2ImgButton" class="secondary smallButton" type="button">img2imgへ</button>
@@ -885,6 +945,28 @@
 
                     <section id="settingsPanelGeneral" class="settingsCategoryPanel" role="tabpanel" data-settings-panel data-settings-category="general" aria-label="一般">
 
+              <details id="storageSettingsDetails" open>
+                <summary>画像の保存場所</summary>
+                <p class="hint">生成画像・参照画像・マスク・サムネイルの保存先を変更できます。変更は次回サーバー起動時にコピーして適用します。</p>
+                <div class="settingsGrid">
+                  <p class="hint"><strong>現在の保存先</strong><br /><span id="storageCurrentOutputDir" title=""></span></p>
+                  <p class="hint"><strong>設定元</strong><br /><span id="storageOutputSource"></span></p>
+                  <p class="hint"><strong>Favoriteの追従</strong><br /><span id="storageFavoritesFollow"></span></p>
+                  <p class="hint"><strong>移行予約</strong><br /><span id="storagePendingOutputDir" title=""></span></p>
+                </div>
+                <label>新しい絶対パス
+                  <input id="storageTargetOutputDir" type="text" inputmode="text" autocomplete="off" spellcheck="false" placeholder="D:\Local Image Chat\outputs" />
+                </label>
+                <div class="buttonRow compactButtons">
+                  <button id="storagePlanButton" class="secondary" type="button">変更内容を確認</button>
+                  <button id="storageReserveButton" class="primary" type="button" disabled>再起動時の移行を予約</button>
+                  <button id="storageCancelButton" class="ghost" type="button" disabled>予約を解除</button>
+                </div>
+                <p id="storagePlanSummary" class="hint" aria-live="polite"></p>
+                <p id="storageStatus" class="hint" aria-live="polite">保存先を確認中…</p>
+                <p id="storageLastMigration" class="hint" aria-live="polite"></p>
+              </details>
+
               <details id="appManagementDetails" open>
                 <summary>アプリ管理</summary>
                 <div class="buttonRow compactButtons">
@@ -1111,6 +1193,7 @@
                   <button id="checkUpdateButton" class="secondary" type="button">最新版を確認</button>
                   <button id="applyUpdateButton" class="primary" type="button" disabled>更新を適用</button>
                 </div>
+                <p id="versionContractStatus" class="hint" aria-live="polite">バージョンを確認中…</p>
                 <p id="updateStatus" class="hint" aria-live="polite"></p>
               </details>
                     </section>

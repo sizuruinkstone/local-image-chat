@@ -4,6 +4,7 @@ import { JsonStore } from "./json-store.js";
 import { normalizeContentSha256 } from "./content-hash.js";
 import { normalizeDiscordState } from "./discord.js";
 import { normalizeManualTitle } from "../public/history-title.js";
+import { normalizeIpAdapter } from "./ip-adapter.js";
 
 export const UNTITLED_DESCRIPTION = "無題";
 
@@ -42,12 +43,15 @@ export function createHistoryService(dataDir, { limit = 500 } = {}) {
       const data = await store.read();
       const maximum = Math.max(1, Math.min(Number(requestedLimit) || 80, 500));
       return data.generations
-        .map((generation) => ({
-          ...generation,
+        .map((generation) => {
+          const normalized = normalizeStoredGeneration(generation);
+          return {
+          ...normalized,
           images: favoritesOnly
-            ? generation.images.filter((image) => image.favorite)
-            : generation.images
-        }))
+            ? normalized.images.filter((image) => image.favorite)
+            : normalized.images
+          };
+        })
         .filter((generation) => generation.images.length)
         .slice(0, maximum);
     },
@@ -57,9 +61,10 @@ export function createHistoryService(dataDir, { limit = 500 } = {}) {
       const maximum = Math.max(1, Math.min(Number(requestedLimit) || 20, 100));
       const entries = [];
       for (const generation of data.generations) {
-        for (const image of generation.images) {
+        const normalized = normalizeStoredGeneration(generation);
+        for (const image of normalized.images) {
           if (favoritesOnly && !image.favorite) continue;
-          entries.push({ generation, image });
+          entries.push({ generation: normalized, image });
         }
       }
 
@@ -202,7 +207,9 @@ export function createHistoryService(dataDir, { limit = 500 } = {}) {
     // 実験IDに属する世代だけを取り出す（実験カード・比較画面用）。
     async listByExperiment(experimentId) {
       const data = await store.read();
-      return data.generations.filter((generation) => generation.experimentId === experimentId);
+      return data.generations
+        .map(normalizeStoredGeneration)
+        .filter((generation) => generation.experimentId === experimentId);
     },
 
     async deleteGeneration(generationId) {
@@ -238,7 +245,7 @@ export function createHistoryService(dataDir, { limit = 500 } = {}) {
       const data = await store.read();
       for (const generation of data.generations) {
         const image = generation.images.find((item) => item.id === imageId);
-        if (image) return { ...generation, selectedImage: image };
+        if (image) return { ...normalizeStoredGeneration(generation), selectedImage: image };
       }
       throw new Error("指定された画像が履歴にありません");
     },
@@ -258,7 +265,7 @@ export function createHistoryService(dataDir, { limit = 500 } = {}) {
       const data = await store.read();
       const found = findImageByContentSha256(data, key);
       if (!found) return null;
-      return { ...found.generation, selectedImage: structuredClone(found.image) };
+      return { ...normalizeStoredGeneration(found.generation), selectedImage: structuredClone(found.image) };
     },
 
     async getFavoriteStateByContentSha256(sha256) {
@@ -351,6 +358,15 @@ export function createHistoryService(dataDir, { limit = 500 } = {}) {
 
       return summary;
     }
+  };
+}
+
+function normalizeStoredGeneration(generation) {
+  if (!generation || typeof generation !== "object") return generation;
+  return {
+    ...generation,
+    ipAdapter: normalizeIpAdapter(generation.ipAdapter),
+    images: Array.isArray(generation.images) ? generation.images : []
   };
 }
 
@@ -463,6 +479,7 @@ function normalizeGeneration(input) {
     sourceImageId: input.sourceImageId ?? null,
     sourceImageUrl: input.sourceImageUrl ?? null,
     maskImageUrl: input.maskImageUrl ?? null,
+    ipAdapter: normalizeIpAdapter(input.ipAdapter),
     // titleは生成時にサーバーで確定する。空でもdescriptionを削除せず旧履歴互換を保つ。
     title: normalizeManualTitle(input.title),
     // 日本語の説明文はPrompt生成・履歴復元用に残し、無い場合は従来どおり「無題」で保存する。

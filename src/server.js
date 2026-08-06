@@ -25,6 +25,7 @@ import {
 import { checkOllama, createPrompt, unloadOllama } from "./ollama.js";
 import {
   checkReforge,
+  getIpAdapterOptions,
   generateImages,
   listCheckpoints,
   listLoras,
@@ -51,6 +52,9 @@ import { createJobManager } from "./job-manager.js";
 import { createCivitaiService } from "./civitai.js";
 import { createUpdater } from "./updater.js";
 import { createThumbnailService } from "./thumbnails.js";
+import { acquireInstanceLock, InstanceAlreadyRunningError } from "./instance-lock.js";
+import { createStorageSettingsService } from "./storage-settings.js";
+import { ipAdapterReferenceFilename, validateIpAdapter } from "./ip-adapter.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
@@ -62,16 +66,68 @@ const localConfigPath = process.env.LOCAL_IMAGE_CHAT_CONFIG
 const localConfig = await readOptionalJson(localConfigPath);
 const packageJson = JSON.parse(await fs.readFile(path.join(rootDir, "package.json"), "utf8"));
 const config = deepMerge(baseConfig, localConfig);
-const outputDir = process.env.LOCAL_IMAGE_CHAT_OUTPUT_DIR
-  ? path.resolve(process.env.LOCAL_IMAGE_CHAT_OUTPUT_DIR)
-  : path.join(rootDir, "outputs");
+const binding = resolveServerBinding({ env: process.env, config });
+const runtimeStartedAt = new Date().toISOString();
+let instanceLock;
+try {
+  instanceLock = await acquireInstanceLock({
+    rootDir,
+    port: binding.port,
+    version: packageJson.version
+  });
+} catch (error) {
+  if (error instanceof InstanceAlreadyRunningError || error?.code === "INSTANCE_ALREADY_RUNNING") {
+    console.error(error.message);
+    process.exitCode = 1;
+    process.exit(1);
+  }
+  throw error;
+}
+process.once("exit", () => instanceLock.releaseSync());
+
+let startupComplete = false;
+let startupFailureHandled = false;
+
+function clearStartupFailureHandlers() {
+  process.off("uncaughtException", handleStartupFailure);
+  process.off("unhandledRejection", handleStartupFailure);
+}
+
+function handleStartupFailure(error) {
+  if (startupComplete || startupFailureHandled) return;
+  startupFailureHandled = true;
+  clearStartupFailureHandlers();
+  console.error(`[Server] 起動に失敗しました: ${readableError(error)}`);
+  void instanceLock.release()
+    .catch((releaseError) => {
+      console.error(`[Server] インスタンスロックの解放に失敗しました: ${readableError(releaseError)}`);
+    })
+    .finally(() => {
+      process.exitCode = 1;
+      process.exit(1);
+    });
+}
+
+process.once("uncaughtException", handleStartupFailure);
+process.once("unhandledRejection", handleStartupFailure);
+
+const dataDir = process.env.LOCAL_IMAGE_CHAT_DATA_DIR
+  ? path.resolve(process.env.LOCAL_IMAGE_CHAT_DATA_DIR)
+  : path.join(rootDir, "data");
+const storageSettings = createStorageSettingsService({
+  rootDir,
+  dataDir,
+  env: process.env,
+  logger: console
+});
+// 設定済みの移行はinstance lock取得後、listen前に完了させる。
+// 失敗時はstorage-settings側が旧保存先を返すため、既存履歴をそのまま使って起動できる。
+const storageStartup = await storageSettings.prepareStartup();
+const outputDir = storageStartup.outputDir;
 const favoritesDir = process.env.LOCAL_IMAGE_CHAT_FAVORITES_DIR
   ? path.resolve(process.env.LOCAL_IMAGE_CHAT_FAVORITES_DIR)
   : path.join(outputDir, "favorite");
 const thumbnailDir = path.join(outputDir, "thumbnails");
-const dataDir = process.env.LOCAL_IMAGE_CHAT_DATA_DIR
-  ? path.resolve(process.env.LOCAL_IMAGE_CHAT_DATA_DIR)
-  : path.join(rootDir, "data");
 await Promise.all([
   fs.mkdir(outputDir, { recursive: true }),
   fs.mkdir(favoritesDir, { recursive: true }),
@@ -143,6 +199,16 @@ app.use(
 app.get("/api/config", (_request, response) => {
   response.json({
     version: packageJson.version,
+    runtime: {
+      pid: process.pid,
+      startedAt: runtimeStartedAt,
+      uptimeSeconds: Math.max(0, Math.floor(process.uptime())),
+      binding: {
+        host: binding.host,
+        port: binding.port,
+        exposed: binding.exposed
+      }
+    },
     defaults: config.defaults,
     ollamaModel: config.ollama.model,
     lora: {
@@ -155,6 +221,42 @@ app.get("/api/config", (_request, response) => {
       branch: config.github?.branch ?? "main"
     }
   });
+});
+
+app.get("/api/storage/settings", async (_request, response) => {
+  try {
+    response.json(await storageSettings.getSettings());
+  } catch (error) {
+    response.status(error?.statusCode ?? 500).json({ error: readableError(error) });
+  }
+});
+
+app.post("/api/storage/plan", async (request, response) => {
+  try {
+    const plan = await storageSettings.plan(request.body?.targetOutputDir);
+    if (!plan.valid) {
+      response.status(400).json({ error: plan.error, ...plan });
+      return;
+    }
+    response.json(plan);
+  } catch (error) {
+    response.status(error?.statusCode ?? 400).json({ error: readableError(error) });
+  }
+});
+
+app.patch("/api/storage/settings", async (request, response) => {
+  try {
+    const body = request.body ?? {};
+    if (body.cancelPending === true) {
+      response.json(await storageSettings.cancelPending());
+      return;
+    }
+    response.json(await storageSettings.reserve(body.targetOutputDir, {
+      confirmMigration: body.confirmMigration === true
+    }));
+  } catch (error) {
+    response.status(error?.statusCode ?? 400).json({ error: readableError(error) });
+  }
 });
 
 app.get("/api/health", async (_request, response) => {
@@ -196,6 +298,10 @@ app.get("/api/samplers", async (_request, response) => {
   } catch (error) {
     response.status(500).json({ error: readableError(error) });
   }
+});
+
+app.get("/api/reforge/ip-adapter/options", async (_request, response) => {
+  response.json(await getIpAdapterOptions(config.reforge));
 });
 
 app.get("/api/checkpoints", async (_request, response) => {
@@ -859,15 +965,55 @@ app.post("/api/generate", async (request, response) => {
 
 // 既定はPC内のみ（127.0.0.1）。スマホから使うときだけ 0.0.0.0 などへ広げる。
 // ReForge・Ollamaへの接続は従来どおりサーバー側から127.0.0.1へ行い、端末へは公開しない。
-const binding = resolveServerBinding({ env: process.env, config });
-app.listen(binding.port, binding.host, () => {
+const server = app.listen(binding.port, binding.host, () => {
+  startupComplete = true;
+  clearStartupFailureHandlers();
   console.log(`Local Image Chat v${packageJson.version}`);
   for (const line of describeBinding(binding)) console.log(`  ${line}`);
+  // 起動に成功した後だけ、既存データの補完処理を開始する。
+  void backfillFavorites();
+  void recoverStuckDiscordSends();
+  void backfillContentHashes();
 });
 
-backfillFavorites();
-recoverStuckDiscordSends();
-backfillContentHashes();
+server.once("error", (error) => {
+  if (startupComplete) {
+    console.error(`[Server] 待ち受け中にエラーが発生しました: ${readableError(error)}`);
+    return;
+  }
+  const startupError = error?.code === "EADDRINUSE"
+    ? new Error(`ポート ${binding.port} は既に使用されています。別のポートを指定してください。`)
+    : error;
+  handleStartupFailure(startupError);
+});
+
+let shutdownPromise;
+async function shutdownServer(signal) {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    clearStartupFailureHandlers();
+    console.log(`[Server] ${signal}を受信したため終了します。`);
+    try {
+      if (server.listening) {
+        await new Promise((resolve, reject) => {
+          server.close((error) => error ? reject(error) : resolve());
+        });
+      }
+    } finally {
+      await instanceLock.release();
+    }
+    process.exitCode = 0;
+    process.exit(0);
+  })().catch((error) => {
+    console.error(`[Server] 終了処理に失敗しました: ${readableError(error)}`);
+    process.exitCode = 1;
+    process.exit(1);
+  });
+  return shutdownPromise;
+}
+
+process.once("SIGINT", () => void shutdownServer("SIGINT"));
+process.once("SIGTERM", () => void shutdownServer("SIGTERM"));
 
 if (!integrationKey) {
   console.warn(
@@ -941,6 +1087,7 @@ async function performGeneration(body, { signal, report }) {
   const rawPrompt = rawPromptOverride ? passthroughText(body.rawPrompt, 12000) : "";
   const sourceImage = await resolveSourceImage(body, mode);
   const maskImage = resolveMaskImage(body, mode, settings);
+  const ipAdapter = await resolveIpAdapter(body);
 
   report(5, "プロンプトを準備中");
   const generatedPrompt = hasPrompt
@@ -986,6 +1133,7 @@ async function performGeneration(body, { signal, report }) {
     negativePrompt: effectiveNegativePrompt,
     initImageBase64: sourceImage?.base64,
     maskBase64: maskImage?.base64,
+    ipAdapter: ipAdapter?.request,
     ...settings
   }, {
     signal,
@@ -1001,6 +1149,13 @@ async function performGeneration(body, { signal, report }) {
   const maskImageUrl = maskImage
     ? await saveContentAddressedImage("inpaint-mask", maskImage)
     : null;
+  let ipAdapterHistory = ipAdapter?.metadata ?? null;
+  if (ipAdapter?.reference.uploaded) {
+    ipAdapterHistory = {
+      ...ipAdapterHistory,
+      referenceImageUrl: await saveContentAddressedImage("ip-adapter-reference", ipAdapter.reference)
+    };
+  }
   const outputSize = outputDimensions(mode, settings);
   const savedImages = await Promise.all(generated.images.map(async (image, index) => {
     const kind = settings.hiresEnabled ? "hires" : `candidate-${index + 1}`;
@@ -1063,6 +1218,7 @@ async function performGeneration(body, { signal, report }) {
     sourceImageId: sourceImage?.imageId,
     sourceImageUrl,
     maskImageUrl,
+    ipAdapter: ipAdapterHistory,
     description,
     prompt: promptWithBoosts,
     negativePrompt: generatedPrompt.negative_prompt,
@@ -1106,6 +1262,7 @@ async function performGeneration(body, { signal, report }) {
     sourceImageId: stored.sourceImageId,
     sourceImageUrl: stored.sourceImageUrl,
     maskImageUrl: stored.maskImageUrl,
+    ipAdapter: stored.ipAdapter,
     images: stored.images.map(serializeImage),
     prompt: promptWithBoosts,
     negativePrompt: generatedPrompt.negative_prompt,
@@ -1447,6 +1604,80 @@ async function resolveSourceImage(body, mode) {
   }
 
   throw new Error(`${mode === "inpaint" ? "部分修正" : "img2img"}の参照画像を選択してください`);
+}
+
+async function resolveIpAdapter(body) {
+  const normalized = validateIpAdapter(body.ipAdapter);
+  if (!normalized) return null;
+
+  const capability = await getIpAdapterOptions(config.reforge);
+  if (!capability.available) {
+    throw new Error(capability.message || "IP-Adapterを利用できないため生成できません");
+  }
+
+  const reference = await resolveIpAdapterReference(normalized);
+  const metadata = {
+    enabled: true,
+    family: capability.family,
+    module: capability.module,
+    model: capability.model,
+    weight: normalized.weight,
+    guidanceStart: normalized.guidanceStart,
+    guidanceEnd: normalized.guidanceEnd
+  };
+  if (reference.imageId) metadata.referenceImageId = reference.imageId;
+  if (reference.imageUrl) metadata.referenceImageUrl = reference.imageUrl;
+  return {
+    request: {
+      enabled: true,
+      referenceBase64: reference.base64,
+      module: capability.module,
+      model: capability.model,
+      weight: normalized.weight,
+      guidanceStart: normalized.guidanceStart,
+      guidanceEnd: normalized.guidanceEnd
+    },
+    metadata,
+    reference
+  };
+}
+
+async function resolveIpAdapterReference(input) {
+  if (input.referenceImageId) {
+    const imageId = requireId(input.referenceImageId);
+    const image = await history.getImage(imageId);
+    const filename = path.basename(String(image.filename ?? ""));
+    if (!filename || filename !== image.filename) throw new Error("IP-Adapter参照画像の保存先が不正です");
+    const buffer = await fs.readFile(resolveOutputImagePath(filename));
+    const extension = extensionFromFilename(filename);
+    validateImageBuffer(buffer, extension);
+    return {
+      base64: buffer.toString("base64"),
+      buffer,
+      extension,
+      imageId,
+      imageUrl: `/outputs/${filename}`,
+      uploaded: false
+    };
+  }
+
+  if (input.referenceImageUrl) {
+    const filename = ipAdapterReferenceFilename(input.referenceImageUrl);
+    const buffer = await fs.readFile(resolveOutputImagePath(filename));
+    const extension = extensionFromFilename(filename);
+    validateImageBuffer(buffer, extension);
+    return {
+      base64: buffer.toString("base64"),
+      buffer,
+      extension,
+      imageId: null,
+      imageUrl: `/outputs/${filename}`,
+      uploaded: false
+    };
+  }
+
+  const parsed = parseImageDataUrl(input.referenceImage);
+  return { ...parsed, imageId: null, imageUrl: null, uploaded: true };
 }
 
 function resolveMaskImage(body, mode, settings) {

@@ -47,6 +47,40 @@ test("URLハッシュと画面名が往復する", () => {
   assert.equal(hashForView("bad"), "#generate");
 });
 
+test("v3.0のバージョン契約は4箇所で一致する", async () => {
+  const packageJson = JSON.parse(await fs.readFile("package.json", "utf8"));
+  const packageLock = JSON.parse(await fs.readFile("package-lock.json", "utf8"));
+  const staticVersion = JSON.parse(await fs.readFile("public/version.json", "utf8"));
+  const versions = [
+    packageJson.version,
+    packageLock.version,
+    packageLock.packages[""].version,
+    staticVersion.version
+  ];
+
+  assert.deepEqual(versions, ["3.0.0", "3.0.0", "3.0.0", "3.0.0"]);
+});
+
+test("設定画面は静的版とサーバー版の不一致を再起動案内へ表示する", async () => {
+  const html = await fs.readFile("public/index.html", "utf8");
+  const app = await fs.readFile("public/app.js", "utf8");
+
+  assert.equal((html.match(/id="versionContractStatus"/g) ?? []).length, 1);
+  assert.match(html, /id="versionContractStatus"[^>]*aria-live="polite"/);
+  assert.match(app, /async function loadVersionContract\(serverVersion, runtime\)/);
+  assert.match(app, /loadVersionContract\(version, runtime\)/);
+  assert.match(app, /fetch\("\/version\.json",\s*\{\s*cache:\s*"no-cache"\s*\}\)/);
+  assert.match(app, /diskVersion === runtimeVersion/);
+  assert.match(app, /更新を反映するにはサーバーを再起動してください/);
+  assert.match(app, /function describeRuntime\(runtime\)/);
+  assert.match(app, /PID \$\{pid\}/);
+  assert.match(app, /起動 \$\{startedAt\}/);
+  assert.match(app, /runtime\.binding\?\.host/);
+  assert.match(app, /Number\.isFinite\(date\.getTime\(\)\)/);
+  assert.match(app, /if \(!runtime \|\| typeof runtime !== "object"\) return ""/);
+  assert.match(app, /catch \{[\s\S]*?画面バージョンを確認できません。/);
+});
+
 test("画像比較の導線は既存候補Stateと比較表示を再利用する", async () => {
   const html = await fs.readFile("public/index.html", "utf8");
   const app = await fs.readFile("public/app.js", "utf8");
@@ -81,6 +115,34 @@ test("画像比較の導線は既存候補Stateと比較表示を再利用する
   assert.match(card, /compare\.addEventListener\("click",[\s\S]*?toggleCompareSelection/);
   assert.match(css, /\.navBadge\s*\{/);
   assert.match(css, /\.compareTrayItems\s*\{[\s\S]*?grid-template-columns:\s*repeat\(4/);
+});
+
+test("一般カテゴリの画像保存場所はplan確認後だけ移行を予約できる", async () => {
+  const html = await fs.readFile("public/index.html", "utf8");
+  const app = await fs.readFile("public/app.js", "utf8");
+
+  assert.equal((html.match(/id="storageSettingsDetails"/g) ?? []).length, 1);
+  for (const id of [
+    "storageCurrentOutputDir", "storageOutputSource", "storageFavoritesFollow", "storagePendingOutputDir",
+    "storageTargetOutputDir", "storagePlanButton", "storageReserveButton", "storageCancelButton",
+    "storagePlanSummary", "storageStatus", "storageLastMigration"
+  ]) {
+    assert.match(html, new RegExp(`id="${id}"`), `${id} should exist`);
+  }
+  assert.match(html, /id="storageStatus"[^>]*aria-live="polite"/);
+  assert.match(html, /id="storagePlanSummary"[^>]*aria-live="polite"/);
+  assert.match(app, /async function loadStorageSettings\(\)/);
+  assert.match(app, /postJson\("\/api\/storage\/plan"/);
+  assert.match(app, /patchJson\("\/api\/storage\/settings"/);
+  assert.match(app, /confirmModal\(\s*"次回サーバー起動時に/);
+  assert.match(app, /storageMigrationPlan = null/);
+  assert.match(app, /入力を変更しました。もう一度「変更内容を確認」してください。/);
+  assert.match(app, /!storageMigrationPlan\?\.valid/);
+  assert.match(app, /settings\.source === "env"/);
+  assert.match(app, /LOCAL_IMAGE_CHAT_OUTPUT_DIRを変更して再起動してください/);
+  assert.match(app, /保存先設定の取得失敗で、他の設定画面の初期化を止めない/);
+  assert.match(app, /loadShareState\(\), loadSamplerOptions\(\), loadStorageSettings\(\)/);
+  assert.match(app, /旧保存先は削除せず残します/);
 });
 
 const SAMPLERS = ["DPM++ 2M SDE", "DPM++ 2M", "Euler a", "DDIM", "UniPC"];

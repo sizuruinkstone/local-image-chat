@@ -1,3 +1,9 @@
+import {
+  mergeIpAdapterPayload,
+  selectIpAdapterCapability,
+  unavailableIpAdapterCapability
+} from "./ip-adapter.js";
+
 export async function checkReforge(config) {
   const response = await fetch(`${config.url}/sdapi/v1/options`, {
     signal: AbortSignal.timeout(5000)
@@ -69,6 +75,52 @@ export async function listCheckpoints(config) {
       .sort((left, right) => left.title.localeCompare(right.title, "ja", { numeric: true })),
     activeCheckpoint: String(options.sd_model_checkpoint ?? "")
   };
+}
+
+export async function getIpAdapterOptions(config) {
+  try {
+    const [moduleResponse, modelResponse, optionsResponse] = await Promise.all([
+      fetch(`${config.url}/controlnet/module_list?alias_names=true`, {
+        signal: AbortSignal.timeout(5000)
+      }),
+      fetch(`${config.url}/controlnet/model_list?update=false`, {
+        signal: AbortSignal.timeout(5000)
+      }),
+      fetch(`${config.url}/sdapi/v1/options`, {
+        signal: AbortSignal.timeout(5000)
+      })
+    ]);
+    if (!moduleResponse.ok || !modelResponse.ok || !optionsResponse.ok) {
+      return unavailableIpAdapterCapability("ReForgeへ接続できないためIP-Adapterを利用できません");
+    }
+
+    const [moduleBody, modelBody, optionsBody] = await Promise.all([
+      moduleResponse.json(),
+      modelResponse.json(),
+      optionsResponse.json()
+    ]);
+    if (!optionsBody || typeof optionsBody !== "object" || Array.isArray(optionsBody)) {
+      return unavailableIpAdapterCapability("ReForgeの設定を確認できないためIP-Adapterを利用できません");
+    }
+    const moduleNames = readNameList(moduleBody, "module_list");
+    const modelNames = readNameList(modelBody, "model_list");
+    return selectIpAdapterCapability({
+      moduleNames,
+      modelNames,
+      checkpoint: optionsBody.sd_model_checkpoint
+    });
+  } catch {
+    return unavailableIpAdapterCapability("ReForgeへ接続できないためIP-Adapterを利用できません");
+  }
+}
+
+function readNameList(body, key) {
+  const list = Array.isArray(body) ? body : body?.[key];
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((item) => (typeof item === "string" ? item : item?.name ?? item?.label))
+    .filter((value) => typeof value === "string" && value.trim())
+    .map((value) => value.trim());
 }
 
 export async function switchCheckpoint(config, checkpoint) {
@@ -199,6 +251,43 @@ async function applyNoiseSchedule(config, noiseSchedule) {
   const value = typeof noiseSchedule === "string" ? noiseSchedule.trim() : "";
   if (!value) return;
   const key = config.noiseScheduleOptionKey || NOISE_SCHEDULE_OPTION_KEY;
+
+  let optionsResponse;
+  try {
+    optionsResponse = await fetch(`${config.url}/sdapi/v1/options`, {
+      signal: AbortSignal.timeout(15000)
+    });
+  } catch (error) {
+    // 対応キーを確認できない場合は、未対応キーをPOSTせず生成を継続する。
+    console.warn(`[ReForge] Noise schedule対応キーの確認をスキップ: ${error.message}`);
+    return;
+  }
+
+  if (!optionsResponse.ok) {
+    console.warn(
+      `[ReForge] Noise schedule対応キーの確認に失敗 HTTP ${optionsResponse.status}。POSTをスキップします`
+    );
+    return;
+  }
+
+  let options;
+  try {
+    options = await optionsResponse.json();
+  } catch {
+    console.warn("[ReForge] Noise schedule対応キーの確認に失敗: JSONが不正なためPOSTをスキップします");
+    return;
+  }
+
+  if (!options || typeof options !== "object" || Array.isArray(options)) {
+    console.warn("[ReForge] Noise schedule対応キーの確認に失敗: optionsがobjectではないためPOSTをスキップします");
+    return;
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(options, key)) {
+    console.warn(`[ReForge] Noise scheduleキー ${key} は未対応のためPOSTをスキップします`);
+    return;
+  }
+
   try {
     const response = await fetch(`${config.url}/sdapi/v1/options`, {
       method: "POST",
@@ -245,7 +334,7 @@ async function generateOne(config, request, seed, { signal, onProgress } = {}) {
   const refinedSize = request.hiresEnabled && isImg2Img
     ? img2imgRefineDimensions(request.width, request.height, request.hiresScale)
     : { width: request.width, height: request.height };
-  const payload = {
+  let payload = {
     prompt: request.prompt,
     negative_prompt: request.negativePrompt,
     seed,
@@ -293,6 +382,8 @@ async function generateOne(config, request, seed, { signal, onProgress } = {}) {
       });
     }
   }
+
+  payload = mergeIpAdapterPayload(payload, request.ipAdapter);
 
   const stopProgressPolling = startProgressPolling(config, signal, onProgress);
   let response;

@@ -139,7 +139,7 @@ const TITLE_STORAGE_KEYS = {
 };
 
 const SETTINGS_CATEGORIES = Object.freeze([
-  { id: "general", label: "一般", description: "接続確認、共有、日常のアプリ操作をまとめます。" },
+  { id: "general", label: "一般", description: "接続確認、保存先、共有、日常のアプリ操作をまとめます。" },
   { id: "prompt", label: "プロンプト", description: "プロンプト部品と生成補助の既存設定をまとめます。" },
   { id: "model", label: "モデル", description: "Checkpointプロフィール、既定値、自動適用、LoRAセットを管理します。" },
   { id: "lora", label: "LoRA", description: "LoRAの検索・選択・編集とCivitai登録を管理します。" },
@@ -162,6 +162,12 @@ const SETTINGS_SEARCH_INDEX = Object.freeze([
     label: "アプリ管理",
     targetId: "appManagementDetails",
     keywords: "アプリ 接続確認 Ollama ReForge 最新版 Grok AI共有 CSV"
+  },
+  {
+    categoryId: "general",
+    label: "画像の保存場所",
+    targetId: "storageSettingsDetails",
+    keywords: "画像 保存先 outputs 出力 移行 再起動 Favorite サムネイル"
   },
   {
     categoryId: "model",
@@ -215,6 +221,9 @@ const SETTINGS_SEARCH_INDEX = Object.freeze([
 
 const DEFAULT_SETTINGS_CATEGORY = "general";
 let activeSettingsCategory = DEFAULT_SETTINGS_CATEGORY;
+let storageSettingsState = null;
+let storageMigrationPlan = null;
+let storageMigrationBusy = false;
 
 const elements = Object.fromEntries(
   [
@@ -249,7 +258,7 @@ const elements = Object.fromEntries(
     "civitaiToken", "inspectCivitaiButton", "installCivitaiButton",
     "refreshCivitaiRegistrationsButton",
     "civitaiPreview", "civitaiStatus", "updateStatusButton", "updateDetails",
-    "githubToken", "checkUpdateButton", "applyUpdateButton", "updateStatus",
+    "githubToken", "checkUpdateButton", "applyUpdateButton", "versionContractStatus", "updateStatus",
     "refreshHistoryButton", "historyLoadMoreButton", "preferenceSummary", "historyGrid",
     "gallerySort", "galleryFilterButton", "galleryFilterDialog", "galleryFilterCloseButton",
     "galleryAllButton", "galleryFavoriteButton", "galleryTagSearch", "galleryTagOptions", "gallerySelectedTags",
@@ -268,7 +277,7 @@ const elements = Object.fromEntries(
     "maskUndoButton", "maskRedoButton", "maskClearButton", "maskBrushSize",
     "maskBrushSizeValue", "inpaintDenoising", "inpaintDenoisingValue", "maskBlur",
     "inpaintFill", "inpaintFullRes", "inpaintFullResPadding",
-    "sendFinalToImg2ImgButton", "sendFinalToInpaintButton", "finalEyebrow", "finalTitle",
+    "sendFinalToImg2ImgButton", "sendFinalToInpaintButton", "finalEyebrow", "finalTitle", "finalIpAdapterButton",
     "queueIndicator", "queueIndicatorText", "clearPromptButton", "clearNegativePromptButton",
     "clearPromptsButton", "clearSeedButton", "clearCivitaiUrlButton",
     "promptDetails", "structuredPromptTabButton", "rawPromptTabButton",
@@ -290,6 +299,9 @@ const elements = Object.fromEntries(
     "settingsSearch", "settingsSearchResults", "settingsCategoryNav", "settingsCategorySelect",
     "settingsContent", "settingsCategoryTitle", "settingsCategoryDescription",
     "settingsReforgeStatus", "settingsDiscordStatus", "settingsUpdateStatus",
+    "storageCurrentOutputDir", "storageOutputSource", "storageFavoritesFollow", "storagePendingOutputDir",
+    "storageTargetOutputDir", "storagePlanButton", "storageReserveButton", "storageCancelButton",
+    "storagePlanSummary", "storageStatus", "storageLastMigration",
     "generateActions", "generateProgress", "generateProgressText", "cancelGenerateButton",
     "showCombinedPromptButton", "compareShortcutDetails", "compareShortcutParameter",
     "compareShortcutValues", "compareShortcutButton",
@@ -313,7 +325,12 @@ const elements = Object.fromEntries(
     "studioCopyPromptButton", "studioCopyNegativeButton", "studioCopyMetadataButton",
     "studioOpenDetailButton", "studioLoadRecipeButton", "studioCompareButton", "studioMetadataButton",
     "studioMainPreview", "studioMainImage", "studioMainFavoriteButton",
-    "studioMainCompareButton", "studioMainMetadataButton", "studioMainRegenerateButton",
+    "studioMainCompareButton", "studioMainIpAdapterButton", "studioMainMetadataButton", "studioMainRegenerateButton",
+    "ipAdapterDetails", "ipAdapterEnabled", "ipAdapterInput", "ipAdapterDropZone",
+    "chooseIpAdapterButton", "clearIpAdapterButton", "ipAdapterPreview", "ipAdapterEmpty",
+    "ipAdapterStatus", "ipAdapterModel", "ipAdapterWeight", "ipAdapterGuidanceStart",
+    "ipAdapterGuidanceEnd", "ipAdapterWeightValue", "ipAdapterGuidanceStartValue",
+    "ipAdapterGuidanceEndValue",
     "mobileAccessDetails", "mobileAccessStatus", "studioGenerationSettingsMount", "promptPartsDetails",
     "promptTemplateDetails", "grokInstructions", "grokSetupDoc", "grokLoraCsv",
     "copyGrokTemplateButton", "saveGrokTemplateButton", "generateLoraCsvButton",
@@ -467,6 +484,26 @@ let clearedPromptSnapshot = null;
 let syncSeedClearButton = () => {};
 let generationMode = "txt2img";
 let initImageReference = null;
+let ipAdapterOptions = {
+  available: false,
+  family: null,
+  module: null,
+  model: null,
+  message: "利用可否を確認中…"
+};
+let ipAdapterState = {
+  enabled: false,
+  weight: 0.65,
+  guidanceStart: 0,
+  guidanceEnd: 1,
+  referenceImageId: null,
+  referenceImageUrl: null,
+  referenceImage: null,
+  previewUrl: "",
+  label: ""
+};
+let ipAdapterObjectUrl = null;
+let generationBusy = false;
 let defaultInpaintFullRes = true;
 let maskDrawing = false;
 let maskLastPoint = null;
@@ -509,17 +546,22 @@ syncRawPromptFromSections();
 await Promise.all([
   checkHealth(), loadCheckpoints(), loadLoras(), loadHistory(), loadCivitaiFolders(), loadLoraRoot(),
   loadExperiments(), loadCheckpointSets(), loadDiscordSettings(), loadPromptTemplate(),
-  loadShareState(), loadSamplerOptions()
+  loadShareState(), loadSamplerOptions(), loadStorageSettings(), loadIpAdapterOptions()
 ]);
 markSettingsApplied();
 setGenerationMode("txt2img");
 updateGenerateButton();
 syncStudioOutputStats();
 setupClearableFields();
+syncIpAdapterUi();
 // 再読み込み後も、サーバー側で走っているジョブを拾って右上へ表示する。
   startQueuePolling();
 
 elements.healthButton.addEventListener("click", checkHealth);
+elements.storageTargetOutputDir.addEventListener("input", invalidateStoragePlan);
+elements.storagePlanButton.addEventListener("click", planStorageMigration);
+elements.storageReserveButton.addEventListener("click", reserveStorageMigration);
+elements.storageCancelButton.addEventListener("click", cancelStorageMigration);
 elements.titleGenerationMode.addEventListener("change", saveTitleSettings);
 elements.titleTemplate.addEventListener("input", saveTitleSettings);
 elements.generateButton.addEventListener("click", generateCandidates);
@@ -581,6 +623,11 @@ elements.studioHistoryFavoriteButton.addEventListener("click", () => {
 });
 elements.studioMainImage.addEventListener("click", openStudioInspectionImage);
 elements.studioMainImage.addEventListener("keydown", handleStudioMainImageKey);
+elements.studioMainIpAdapterButton.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  setCurrentImageAsIpAdapterReference(studioInspection?.image, { focus: true });
+});
 elements.studioMainCompareButton.addEventListener("click", () => {
   if (!studioInspection) return;
   const { generation, image } = studioInspection;
@@ -630,6 +677,32 @@ elements.initImageInput.addEventListener("change", () => {
   if (file) void loadInitImageFile(file);
 });
 elements.clearInitImageButton.addEventListener("click", clearInitImageReference);
+elements.chooseIpAdapterButton.addEventListener("click", () => elements.ipAdapterInput.click());
+elements.ipAdapterInput.addEventListener("change", () => {
+  const [file] = elements.ipAdapterInput.files ?? [];
+  if (file) void loadIpAdapterFile(file);
+});
+for (const eventName of ["dragenter", "dragover"]) {
+  elements.ipAdapterDropZone.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    elements.ipAdapterDropZone.classList.add("dragging");
+  });
+}
+for (const eventName of ["dragleave", "drop"]) {
+  elements.ipAdapterDropZone.addEventListener(eventName, (event) => {
+    event.preventDefault();
+    elements.ipAdapterDropZone.classList.remove("dragging");
+  });
+}
+elements.ipAdapterDropZone.addEventListener("drop", (event) => {
+  const [file] = event.dataTransfer?.files ?? [];
+  if (file) void loadIpAdapterFile(file);
+});
+elements.clearIpAdapterButton.addEventListener("click", () => clearIpAdapterReference());
+elements.ipAdapterEnabled.addEventListener("change", toggleIpAdapterEnabled);
+elements.ipAdapterWeight.addEventListener("input", syncIpAdapterNumbers);
+elements.ipAdapterGuidanceStart.addEventListener("input", syncIpAdapterNumbers);
+elements.ipAdapterGuidanceEnd.addEventListener("input", syncIpAdapterNumbers);
 elements.img2imgPreset.addEventListener("change", handleImg2ImgPresetChange);
 elements.img2imgDenoising.addEventListener("input", handleImg2ImgDenoisingInput);
 elements.img2imgResizeMode.addEventListener("change", saveImg2ImgPreferences);
@@ -678,6 +751,11 @@ elements.reuseFinalButton.addEventListener("click", () => {
 });
 elements.favoriteFinalButton.addEventListener("click", () => {
   if (finalImage) void toggleFavorite(finalImage, elements.favoriteFinalButton);
+});
+elements.finalIpAdapterButton.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  setCurrentImageAsIpAdapterReference(finalImage, { focus: true });
 });
 elements.sendFinalToImg2ImgButton.addEventListener("click", () => {
   if (finalImage) useImageForImg2Img(finalImage);
@@ -846,7 +924,8 @@ elements.loraCategories.addEventListener("click", (event) => {
 
 async function loadConfig() {
   const response = await fetch("/api/config");
-  const { defaults, lora, version } = await response.json();
+  const { defaults, lora, version, runtime } = await response.json();
+  void loadVersionContract(version, runtime);
   loraConfig = { ...loraConfig, ...lora };
   for (const [key, value] of Object.entries(defaults)) {
     if (!elements[key]) continue;
@@ -864,6 +943,78 @@ async function loadConfig() {
     localStorage.setItem("localImageChat.autoRetry", String(elements.autoRetryOnFailure.checked));
   });
   syncSamplerLabels();
+}
+
+async function loadVersionContract(serverVersion, runtime) {
+  if (!elements.versionContractStatus) return;
+  try {
+    const response = await fetch("/version.json", { cache: "no-cache" });
+    if (!response.ok) throw new Error(`version.json: ${response.status}`);
+    const { version: staticVersion } = await response.json();
+    const diskVersion = String(staticVersion ?? "").trim();
+    const runtimeVersion = String(serverVersion ?? "").trim();
+    if (!diskVersion || !runtimeVersion) {
+      renderVersionContractStatus("バージョン情報を確認できません。", runtime);
+      return;
+    }
+    renderVersionContractStatus(
+      diskVersion === runtimeVersion
+        ? `Version ${diskVersion}　最新ファイルを使用中`
+        : `画面 ${diskVersion} / サーバー ${runtimeVersion}　更新を反映するにはサーバーを再起動してください`,
+      runtime
+    );
+  } catch {
+    // バージョン確認の失敗は、生成・ギャラリー・設定の初期化を妨げない。
+    renderVersionContractStatus("画面バージョンを確認できません。", runtime);
+  }
+}
+
+function renderVersionContractStatus(message, runtime) {
+  const status = elements.versionContractStatus;
+  status.replaceChildren(document.createTextNode(message));
+  const runtimeSummary = describeRuntime(runtime);
+  if (!runtimeSummary) return;
+  status.append(document.createElement("br"), document.createTextNode(runtimeSummary));
+}
+
+function describeRuntime(runtime) {
+  if (!runtime || typeof runtime !== "object") return "";
+  const parts = [];
+  const pid = Number(runtime.pid);
+  if (Number.isInteger(pid) && pid > 0) parts.push(`PID ${pid}`);
+
+  const startedAt = formatRuntimeDate(runtime.startedAt);
+  if (startedAt) parts.push(`起動 ${startedAt}`);
+
+  const host = typeof runtime.binding?.host === "string" ? runtime.binding.host.trim() : "";
+  const port = Number(runtime.binding?.port);
+  const validPort = Number.isInteger(port) && port > 0 && port <= 65535;
+  if (host && validPort) {
+    const displayHost = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+    parts.push(`${displayHost}:${port}`);
+  } else if (host) {
+    parts.push(host);
+  } else if (validPort) {
+    parts.push(`Port ${port}`);
+  }
+  return parts.join(" · ");
+}
+
+function formatRuntimeDate(value) {
+  if (typeof value !== "string" || !value.trim()) return "";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit"
+    }).format(date);
+  } catch {
+    return date.toLocaleString();
+  }
 }
 
 function loadTitleSettings() {
@@ -1068,6 +1219,185 @@ function syncSettingsConnectionSummary() {
   elements.settingsReforgeStatus.textContent = reforgeStatus;
   elements.settingsDiscordStatus.textContent = discordStatus;
   elements.settingsUpdateStatus.textContent = updateStatus;
+}
+
+async function loadStorageSettings() {
+  try {
+    storageSettingsState = await getJson("/api/storage/settings");
+    const pending = storageSettingsState.pendingOutputDir ?? "";
+    if (!elements.storageTargetOutputDir.value || storageSettingsState.pendingStatus === "pending") {
+      elements.storageTargetOutputDir.value = pending;
+    }
+    renderStorageSettings();
+    if (storageSettingsState.source !== "env") {
+      setStorageStatus(storageSettingsState.pendingStatus === "pending"
+        ? "移行を予約しています。サーバーを通常終了して再起動するとコピーが始まります。"
+        : storageSettingsState.pendingStatus === "failed"
+          ? "前回の移行に失敗しました。内容を確認して再予約するか、予約を解除してください。"
+          : "保存先を確認しました。");
+    }
+  } catch (error) {
+    // 保存先設定の取得失敗で、他の設定画面の初期化を止めない。
+    setStorageStatus(`保存先設定を取得できません: ${error.message}`);
+    elements.storageTargetOutputDir.disabled = true;
+    elements.storagePlanButton.disabled = true;
+    elements.storageReserveButton.disabled = true;
+    elements.storageCancelButton.disabled = true;
+  }
+}
+
+function renderStorageSettings() {
+  const settings = storageSettingsState;
+  if (!settings) return;
+  setStoragePathText(elements.storageCurrentOutputDir, settings.currentOutputDir, "未確認");
+  setStoragePathText(elements.storagePendingOutputDir, settings.pendingOutputDir, settings.pendingStatus
+    ? settings.pendingStatus === "failed" ? "前回予約（失敗）" : "次回起動時に適用"
+    : "なし");
+  elements.storageOutputSource.textContent = settings.source === "env"
+    ? "環境変数 LOCAL_IMAGE_CHAT_OUTPUT_DIR"
+    : settings.source === "stored" ? "この画面で保存した設定" : "既定の outputs/";
+  elements.storageFavoritesFollow.textContent = settings.favorites?.followsOutputDir
+    ? "追従する（output/favorite）"
+    : "追従しない（LOCAL_IMAGE_CHAT_FAVORITES_DIR）";
+  if (settings.source === "env") {
+    elements.storageTargetOutputDir.disabled = true;
+    elements.storageTargetOutputDir.title = "LOCAL_IMAGE_CHAT_OUTPUT_DIRを変更して再起動してください";
+    setStorageStatus("環境変数で固定されています。LOCAL_IMAGE_CHAT_OUTPUT_DIRを変更して再起動してください。");
+  }
+  if (settings.lastMigration) {
+    const last = settings.lastMigration;
+    elements.storageLastMigration.textContent = last.status === "completed"
+      ? `前回の移行: 完了（${Number(last.copiedFiles ?? 0).toLocaleString("ja-JP")}ファイル / ${formatStorageBytes(last.copiedBytes)}）。旧保存先は手動確認まで残っています。`
+      : `前回の移行: 失敗（${last.reason ?? "原因を確認できませんでした"}）。部分コピーは自動削除していません。`;
+  } else {
+    elements.storageLastMigration.textContent = "前回の移行結果: なし";
+  }
+  updateStorageButtons();
+}
+
+function setStoragePathText(element, value, fallback) {
+  if (!element) return;
+  const text = value || fallback;
+  element.textContent = text;
+  element.title = value || "";
+}
+
+function setStorageStatus(message) {
+  if (elements.storageStatus) elements.storageStatus.textContent = String(message ?? "");
+}
+
+function updateStorageButtons() {
+  if (!elements.storageTargetOutputDir || !elements.storagePlanButton) return;
+  const editable = storageSettingsState?.editable === true;
+  const pending = storageSettingsState?.pendingStatus;
+  const hasTarget = Boolean(elements.storageTargetOutputDir.value.trim());
+  elements.storageTargetOutputDir.disabled = !editable || storageMigrationBusy || pending === "pending";
+  elements.storagePlanButton.disabled = !editable || storageMigrationBusy || pending === "pending" || !hasTarget;
+  elements.storageReserveButton.disabled = !editable
+    || storageMigrationBusy
+    || !storageMigrationPlan?.valid
+    || !storageMigrationPlan?.restartRequired;
+  elements.storageCancelButton.disabled = !editable || storageMigrationBusy || !pending;
+}
+
+function invalidateStoragePlan() {
+  storageMigrationPlan = null;
+  if (elements.storagePlanSummary) elements.storagePlanSummary.textContent = "入力を変更しました。もう一度「変更内容を確認」してください。";
+  updateStorageButtons();
+}
+
+async function planStorageMigration() {
+  if (storageMigrationBusy || !storageSettingsState?.editable) return;
+  const targetOutputDir = elements.storageTargetOutputDir.value.trim();
+  if (!targetOutputDir) return;
+  storageMigrationBusy = true;
+  storageMigrationPlan = null;
+  updateStorageButtons();
+  setStorageStatus("保存先の安全性・件数・容量・空き容量を確認中…");
+  try {
+    const plan = await postJson("/api/storage/plan", { targetOutputDir });
+    storageMigrationPlan = plan;
+    elements.storagePlanSummary.textContent = describeStoragePlan(plan);
+    setStorageStatus("内容を確認しました。予約する場合は、次回起動時にコピーが行われます。");
+  } catch (error) {
+    elements.storagePlanSummary.textContent = "この保存先は利用できません。空のフォルダまたは専用marker付きフォルダを指定してください。";
+    setStorageStatus(error.message);
+  } finally {
+    storageMigrationBusy = false;
+    updateStorageButtons();
+  }
+}
+
+function describeStoragePlan(plan) {
+  if (!plan?.valid) return plan?.error ?? "保存先を確認できませんでした。";
+  const freeSpace = plan.availableBytesKnown && plan.availableBytes !== null
+    ? `空き容量 ${formatStorageBytes(plan.availableBytes)}`
+    : "空き容量は確認できませんでした";
+  const targetFiles = plan.existingTargetFiles > 0
+    ? `移行先の既存ファイル ${Number(plan.existingTargetFiles).toLocaleString("ja-JP")}件`
+    : "移行先は空です";
+  if (!plan.restartRequired) return "現在と同じ保存先です。変更はありません。";
+  return `コピー対象 ${Number(plan.sourceFiles).toLocaleString("ja-JP")}ファイル / ${formatStorageBytes(plan.sourceBytes)}。${freeSpace}。${targetFiles}。旧保存先は削除せず残します。次回サーバー起動時に適用します。`;
+}
+
+async function reserveStorageMigration() {
+  if (storageMigrationBusy || !storageMigrationPlan?.valid || !storageSettingsState?.editable) return;
+  const confirmed = await confirmModal(
+    "次回サーバー起動時に、既存の保存先から新しい保存先へコピーします。",
+    {
+      title: "画像の保存先を変更",
+      confirmText: "移行を予約する",
+      detail: `${describeStoragePlan(storageMigrationPlan)} 起動完了まで時間がかかる場合があります。自動で旧保存先を削除することはありません。`
+    }
+  );
+  if (!confirmed) return;
+  storageMigrationBusy = true;
+  updateStorageButtons();
+  try {
+    await patchJson("/api/storage/settings", {
+      targetOutputDir: storageMigrationPlan.targetOutputDir,
+      confirmMigration: true
+    });
+    storageMigrationPlan = null;
+    await loadStorageSettings();
+    setStorageStatus("移行を予約しました。生成中でないことを確認し、サーバーを終了して再起動してください。");
+  } catch (error) {
+    setStorageStatus(error.message);
+  } finally {
+    storageMigrationBusy = false;
+    updateStorageButtons();
+  }
+}
+
+async function cancelStorageMigration() {
+  if (storageMigrationBusy || !storageSettingsState?.editable || !storageSettingsState.pendingOutputDir) return;
+  const confirmed = await confirmModal("次回起動時の画像保存先移行の予約を解除しますか？", {
+    title: "移行予約を解除",
+    confirmText: "解除する"
+  });
+  if (!confirmed) return;
+  storageMigrationBusy = true;
+  updateStorageButtons();
+  try {
+    await patchJson("/api/storage/settings", { cancelPending: true });
+    storageMigrationPlan = null;
+    await loadStorageSettings();
+    setStorageStatus("移行予約を解除しました。現在の保存先は変更していません。");
+  } catch (error) {
+    setStorageStatus(error.message);
+  } finally {
+    storageMigrationBusy = false;
+    updateStorageButtons();
+  }
+}
+
+function formatStorageBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return "容量不明";
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${Math.round(bytes)} B`;
 }
 
 function loadInitialView() {
@@ -1575,6 +1905,7 @@ async function switchSelectedCheckpoint() {
     // 自動適用ONのLoRAセットがあれば読み込む（編集中なら確認する）。
     await applyAutoCheckpointSet();
     void checkHealth();
+    void loadIpAdapterOptions();
   } catch (error) {
     activeCheckpoint = previous;
     elements.checkpointSelect.value = previous?.title ?? "";
@@ -2922,6 +3253,284 @@ async function checkHealth() {
   }
 }
 
+async function loadIpAdapterFile(file) {
+  clearError();
+  if (!ipAdapterOptions.available) return showError(ipAdapterOptions.message);
+  const mimeType = inferImageMimeType(file);
+  if (!mimeType) return showError("IP-Adapter参照画像はPNG・JPEG・WebPを選択してください");
+  if (file.size > MAX_INIT_IMAGE_BYTES) return showError("参照画像は20MB以下にしてください");
+
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const loadedDataUrl = await fileToDataUrl(file);
+    const dataUrl = loadedDataUrl.replace(/^data:[^;]*;/, `data:${mimeType};`);
+    setIpAdapterReference({
+      dataUrl,
+      previewUrl: objectUrl,
+      objectUrl,
+      label: file.name
+    }, { focus: true });
+  } catch (error) {
+    revokeIpAdapterObjectUrl(objectUrl);
+    showError(`IP-Adapter参照画像を読み込めませんでした: ${error.message}`);
+  }
+}
+
+async function loadIpAdapterOptions() {
+  ipAdapterOptions = {
+    available: false,
+    family: null,
+    module: null,
+    model: null,
+    message: "IP-Adapterの利用可否を確認中…"
+  };
+  syncIpAdapterUi();
+  try {
+    const data = await getJson("/api/reforge/ip-adapter/options");
+    ipAdapterOptions = {
+      available: data.available === true,
+      family: typeof data.family === "string" ? data.family : null,
+      module: typeof data.module === "string" ? data.module : null,
+      model: typeof data.model === "string" ? data.model : null,
+      message: String(data.message ?? "IP-Adapterを利用できません")
+    };
+  } catch (error) {
+    ipAdapterOptions = {
+      available: false,
+      family: null,
+      module: null,
+      model: null,
+      message: `IP-Adapterを利用できません: ${error.message}`
+    };
+  }
+  if (!ipAdapterOptions.available) ipAdapterState.enabled = false;
+  syncIpAdapterUi();
+}
+
+function setIpAdapterReference(reference, { focus = false, silent = false } = {}) {
+  if (!ipAdapterOptions.available) {
+    if (!silent) showError(ipAdapterOptions.message);
+    return false;
+  }
+  const imageId = reference?.imageId ? String(reference.imageId) : null;
+  const referenceImageId = reference?.referenceImageId ? String(reference.referenceImageId) : imageId;
+  const imageUrl = reference?.imageUrl ? String(reference.imageUrl) : null;
+  const dataUrl = reference?.dataUrl ? String(reference.dataUrl) : null;
+  if (!referenceImageId && !imageUrl && !dataUrl) {
+    if (!silent) showError("IP-Adapter参照画像を選択してください");
+    return false;
+  }
+
+  const sameReference = referenceImageId === ipAdapterState.referenceImageId
+    && imageUrl === ipAdapterState.referenceImageUrl
+    && dataUrl === ipAdapterState.referenceImage;
+  let previewUrl = String(reference.previewUrl ?? imageUrl ?? dataUrl ?? "");
+  if (!sameReference) revokeIpAdapterObjectUrl();
+  if (reference.objectUrl) {
+    if (sameReference && ipAdapterObjectUrl && ipAdapterObjectUrl !== reference.objectUrl) {
+      revokeIpAdapterObjectUrl(reference.objectUrl);
+      previewUrl = ipAdapterState.previewUrl;
+    } else {
+      ipAdapterObjectUrl = reference.objectUrl;
+    }
+  }
+  ipAdapterState = {
+    ...ipAdapterState,
+    enabled: true,
+    referenceImageId,
+    referenceImageUrl: imageUrl,
+    referenceImage: dataUrl,
+    previewUrl,
+    label: String(reference.label ?? referenceImageId ?? imageUrl ?? "参照画像")
+  };
+  // 同じ画像を再指定してもWeight / Start / Endは読み直さない。
+  if (sameReference) {
+    ipAdapterState.weight = Number(elements.ipAdapterWeight.value);
+    ipAdapterState.guidanceStart = Number(elements.ipAdapterGuidanceStart.value);
+    ipAdapterState.guidanceEnd = Number(elements.ipAdapterGuidanceEnd.value);
+  }
+  syncIpAdapterUi();
+  if (focus) openIpAdapterSettings();
+  return true;
+}
+
+function setCurrentImageAsIpAdapterReference(image, { focus = false } = {}) {
+  if (!image?.id) {
+    showError("この画像はIP-Adapter参照に使用できません");
+    return false;
+  }
+  if (!ipAdapterOptions.available) {
+    showError(ipAdapterOptions.message);
+    return false;
+  }
+  return setIpAdapterReference({
+    referenceImageId: image.id,
+    previewUrl: image.thumbnailUrl || originalImageUrl(image),
+    label: image.filename || image.id
+  }, { focus });
+}
+
+function clearIpAdapterReference({ silent = false } = {}) {
+  revokeIpAdapterObjectUrl();
+  ipAdapterState = {
+    ...ipAdapterState,
+    enabled: false,
+    referenceImageId: null,
+    referenceImageUrl: null,
+    referenceImage: null,
+    previewUrl: "",
+    label: ""
+  };
+  elements.ipAdapterInput.value = "";
+  syncIpAdapterUi();
+  if (!silent) toast.info("IP-Adapter参照を解除しました");
+}
+
+function toggleIpAdapterEnabled() {
+  if (!elements.ipAdapterEnabled.checked) {
+    ipAdapterState.enabled = false;
+    syncIpAdapterUi();
+    return;
+  }
+  if (!ipAdapterOptions.available || !hasIpAdapterReference()) {
+    elements.ipAdapterEnabled.checked = false;
+    ipAdapterState.enabled = false;
+    showError(ipAdapterOptions.available
+      ? "IP-Adapter参照画像を選択してください"
+      : ipAdapterOptions.message);
+    syncIpAdapterUi();
+    return;
+  }
+  ipAdapterState.enabled = true;
+  syncIpAdapterUi();
+}
+
+function syncIpAdapterNumbers() {
+  ipAdapterState.weight = Number(elements.ipAdapterWeight.value);
+  ipAdapterState.guidanceStart = Number(elements.ipAdapterGuidanceStart.value);
+  ipAdapterState.guidanceEnd = Number(elements.ipAdapterGuidanceEnd.value);
+  syncIpAdapterValueLabels();
+}
+
+function hasIpAdapterReference() {
+  return Boolean(
+    ipAdapterState.referenceImageId
+    || ipAdapterState.referenceImageUrl
+    || ipAdapterState.referenceImage
+  );
+}
+
+function syncIpAdapterUi() {
+  const hasReference = hasIpAdapterReference();
+  const available = ipAdapterOptions.available === true;
+  const disabled = generationBusy || !available;
+  elements.ipAdapterModel.textContent = available
+    ? shorten(ipAdapterOptions.model || ipAdapterOptions.module || "利用可能", 28)
+    : "利用不可";
+  elements.ipAdapterModel.title = available ? ipAdapterOptions.model || "" : ipAdapterOptions.message;
+  elements.ipAdapterEnabled.checked = Boolean(ipAdapterState.enabled && hasReference && available);
+  elements.ipAdapterEnabled.disabled = disabled || !hasReference;
+  elements.chooseIpAdapterButton.disabled = disabled;
+  elements.ipAdapterInput.disabled = disabled;
+  elements.clearIpAdapterButton.disabled = generationBusy || !hasReference;
+  for (const control of [
+    elements.ipAdapterWeight,
+    elements.ipAdapterGuidanceStart,
+    elements.ipAdapterGuidanceEnd
+  ]) control.disabled = disabled || !hasReference;
+
+  elements.ipAdapterWeight.value = String(ipAdapterState.weight);
+  elements.ipAdapterGuidanceStart.value = String(ipAdapterState.guidanceStart);
+  elements.ipAdapterGuidanceEnd.value = String(ipAdapterState.guidanceEnd);
+  syncIpAdapterValueLabels();
+  if (ipAdapterState.previewUrl) {
+    if (elements.ipAdapterPreview.getAttribute("src") !== ipAdapterState.previewUrl) {
+      elements.ipAdapterPreview.src = ipAdapterState.previewUrl;
+    }
+    elements.ipAdapterPreview.classList.remove("hidden");
+    elements.ipAdapterEmpty.classList.add("hidden");
+  } else {
+    elements.ipAdapterPreview.removeAttribute("src");
+    elements.ipAdapterPreview.classList.add("hidden");
+    elements.ipAdapterEmpty.classList.remove("hidden");
+  }
+  elements.ipAdapterStatus.textContent = !available
+    ? ipAdapterOptions.message
+    : generationBusy
+      ? "生成中はIP-Adapterを変更できません"
+      : ipAdapterState.enabled && hasReference
+        ? `この画像を参照中: ${shorten(ipAdapterState.label, 42)}`
+        : hasReference
+          ? `参照画像を設定済み（OFF）: ${shorten(ipAdapterState.label, 42)}`
+          : "参照画像を選択してください";
+  elements.studioMainIpAdapterButton.disabled = generationBusy
+    || !available
+    || !studioInspection?.image?.id;
+  elements.studioMainIpAdapterButton.classList.toggle("hidden", !studioInspection?.image?.id);
+  elements.finalIpAdapterButton.disabled = generationBusy || !available || !finalImage?.id;
+  elements.finalIpAdapterButton.classList.toggle("hidden", !finalImage?.id);
+}
+
+function openIpAdapterSettings() {
+  elements.generationSettingsDetails.open = true;
+  elements.ipAdapterDetails.open = true;
+  requestAnimationFrame(() => {
+    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+    elements.ipAdapterDetails.scrollIntoView({
+      behavior: reducedMotion ? "auto" : "smooth",
+      block: "nearest"
+    });
+  });
+}
+
+function syncIpAdapterValueLabels() {
+  elements.ipAdapterWeightValue.textContent = Number(elements.ipAdapterWeight.value).toFixed(2);
+  elements.ipAdapterGuidanceStartValue.textContent = Number(elements.ipAdapterGuidanceStart.value).toFixed(2);
+  elements.ipAdapterGuidanceEndValue.textContent = Number(elements.ipAdapterGuidanceEnd.value).toFixed(2);
+}
+
+function revokeIpAdapterObjectUrl(url = ipAdapterObjectUrl) {
+  if (!url) return;
+  URL.revokeObjectURL(url);
+  if (url === ipAdapterObjectUrl) ipAdapterObjectUrl = null;
+}
+
+function applyIpAdapterMetadata(value) {
+  revokeIpAdapterObjectUrl();
+  const imageId = value?.enabled && value.referenceImageId ? String(value.referenceImageId) : null;
+  const imageUrl = value?.enabled && value.referenceImageUrl ? String(value.referenceImageUrl) : null;
+  if (!imageId && !imageUrl) {
+    clearIpAdapterReference({ silent: true });
+    return;
+  }
+  ipAdapterState = {
+    ...ipAdapterState,
+    enabled: ipAdapterOptions.available === true,
+    weight: Number(value.weight ?? ipAdapterState.weight),
+    guidanceStart: Number(value.guidanceStart ?? ipAdapterState.guidanceStart),
+    guidanceEnd: Number(value.guidanceEnd ?? ipAdapterState.guidanceEnd),
+    referenceImageId: imageId,
+    referenceImageUrl: imageUrl,
+    referenceImage: null,
+    previewUrl: imageId
+      ? `/api/images/${encodeURIComponent(imageId)}/thumbnail`
+      : imageUrl,
+    label: imageId || imageUrl
+  };
+  syncIpAdapterUi();
+}
+
+function restoreIpAdapterFromRecipe(recipe) {
+  const value = recipe?.ipAdapter;
+  if (!value?.enabled || (!value.referenceImageId && !value.referenceImageUrl)) {
+    clearIpAdapterReference({ silent: true });
+    return;
+  }
+  applyIpAdapterMetadata(value);
+}
+
+window.addEventListener("beforeunload", () => revokeIpAdapterObjectUrl());
+
 async function buildPrompt() {
   clearError();
   const description = promptDescription;
@@ -2962,6 +3571,7 @@ async function generateCandidates() {
   finalImage = null;
   finalGeneration = null;
   selectedCandidate = null;
+  studioInspection = null;
   elements.studioMainPreview.classList.add("hidden");
   elements.studioMainImage.removeAttribute("src");
   const count = Number(elements.candidateCount.value);
@@ -2988,6 +3598,7 @@ async function generateCandidates() {
       promptBoosts: readPromptBoosts(),
       ...readInitImagePayload(),
       ...readInpaintPayload(),
+      ...readIpAdapterPayload(),
       ...readDerivationPayload(),
       settings: readSettings({ candidateCount: count, hiresEnabled: false })
     });
@@ -2997,6 +3608,7 @@ async function generateCandidates() {
       sourceImageId: data.sourceImageId,
       sourceImageUrl: data.sourceImageUrl,
       maskImageUrl: data.maskImageUrl,
+      ipAdapter: data.ipAdapter ?? null,
       title: data.title ?? "",
       description,
       prompt: data.prompt,
@@ -3009,6 +3621,7 @@ async function generateCandidates() {
       loras: data.loras,
       images: data.images
     };
+    applyIpAdapterMetadata(data.ipAdapter);
     applyGeneratedPromptResult(data, description);
     elements.explanation.textContent = data.explanation;
     renderCandidates(data.images);
@@ -3046,6 +3659,7 @@ async function finishSelected() {
       promptBoosts: [],
       parentImageId: selectedCandidate.id,
       ...(usesSource ? { initImageId: selectedCandidate.id } : {}),
+      ...readIpAdapterPayload(),
       settings: {
         ...lastGeneration.settings,
         candidateCount: 1,
@@ -3093,6 +3707,7 @@ function presentHiresResult(data, description, eyebrow, title) {
     sourceImageId: data.sourceImageId,
     sourceImageUrl: data.sourceImageUrl,
     maskImageUrl: data.maskImageUrl,
+    ipAdapter: data.ipAdapter ?? null,
     title: data.title ?? "",
     description,
     prompt: data.prompt,
@@ -3105,6 +3720,7 @@ function presentHiresResult(data, description, eyebrow, title) {
     loras: data.loras,
     images: data.images
   };
+  applyIpAdapterMetadata(data.ipAdapter);
   elements.finalEyebrow.textContent = eyebrow;
   elements.finalTitle.textContent = title;
   configureThumbnailImage(elements.resultImage, finished, { eager: true });
@@ -3163,6 +3779,7 @@ async function hiresFromGallery(generation, image) {
       promptBoosts: [],
       parentImageId: image.id,
       initImageId: image.id,
+      ipAdapter: generation.ipAdapter ?? null,
       settings: {
         ...settings,
         candidateCount: 1,
@@ -3317,6 +3934,7 @@ async function runExperiment() {
         promptBoosts: readPromptBoosts(),
         ...readInitImagePayload(),
         ...readInpaintPayload(),
+        ...readIpAdapterPayload(),
         settings: readSettings({ candidateCount: 1, hiresEnabled: false })
       };
       const { experiment } = await postJson("/api/experiments", {
@@ -4821,6 +5439,7 @@ function loadRecipeFields(recipe, image) {
   promptDescription = recipe.description ?? "";
   elements.generationTitle.value = normalizeManualTitle(recipe.title);
   restorePromptFieldsFromRecipe(recipe);
+  restoreIpAdapterFromRecipe(recipe);
   const settings = recipe.settings ?? {};
   for (const key of [
     "width", "height", "steps", "cfgScale", "samplerName", "scheduler", "noiseSchedule",
@@ -5674,6 +6293,7 @@ function setStudioInspection(generation, image, { showOnCanvas = false } = {}) {
     elements.studioMainPreview.classList.remove("hidden");
     syncStudioOutputStats(generation, image);
   }
+  syncIpAdapterUi();
 }
 
 // ---- ギャラリーの絞り込み ----
@@ -8150,6 +8770,21 @@ function readInitImagePayload() {
     : { initImage: initImageReference.dataUrl };
 }
 
+function readIpAdapterPayload() {
+  if (!ipAdapterState.enabled || !hasIpAdapterReference()) return {};
+  const ipAdapter = {
+    enabled: true,
+    weight: Number(ipAdapterState.weight),
+    guidanceStart: Number(ipAdapterState.guidanceStart),
+    guidanceEnd: Number(ipAdapterState.guidanceEnd)
+  };
+  if (ipAdapterState.referenceImageId) ipAdapter.referenceImageId = ipAdapterState.referenceImageId;
+  else if (ipAdapterState.referenceImageUrl) ipAdapter.referenceImageUrl = ipAdapterState.referenceImageUrl;
+  else if (ipAdapterState.referenceImage) ipAdapter.referenceImage = ipAdapterState.referenceImage;
+  else return {};
+  return { ipAdapter };
+}
+
 function readInpaintPayload() {
   if (generationMode !== "inpaint" || !elements.inpaintMaskCanvas.width) return {};
   return { maskImage: elements.inpaintMaskCanvas.toDataURL("image/png") };
@@ -8333,6 +8968,7 @@ async function deleteJson(url) {
 }
 
 function setBusy(busy, message = "") {
+  generationBusy = busy;
   elements.generateButton.disabled = busy;
   elements.healthButton.disabled = busy;
   elements.refreshLorasButton.disabled = busy;
@@ -8364,6 +9000,7 @@ function setBusy(busy, message = "") {
   }
   elements.finishButton.disabled = busy || !selectedCandidate;
   elements.lockCompositionButton.disabled = busy || !selectedCandidate;
+  syncIpAdapterUi();
   elements.loading.classList.toggle("hidden", !busy);
   if (message) elements.loadingText.textContent = message;
   updateStudioGenerationState(busy, message);

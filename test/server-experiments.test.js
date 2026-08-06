@@ -5,6 +5,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { getInstanceLockPath } from "../src/instance-lock.js";
 
 const ONE_PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
@@ -61,9 +62,19 @@ test("比較実験は同時に1本だけ開始でき、実行中に削除する�
     stdio: ["ignore", "pipe", "pipe"]
   });
   t.after(async () => {
-    child.kill();
-    await Promise.all([ollama.close(), reforge.close()]);
-    await fs.rm(temporaryDir, { recursive: true, force: true });
+    let cleanupError;
+    try {
+      await stopTestServer(child, appPort);
+    } catch (error) {
+      cleanupError ??= error;
+    }
+    try {
+      await Promise.all([ollama.close(), reforge.close()]);
+    } catch (error) {
+      cleanupError ??= error;
+    }
+    if (!cleanupError) await fs.rm(temporaryDir, { recursive: true, force: true });
+    if (cleanupError) throw cleanupError;
   });
 
   const baseUrl = `http://127.0.0.1:${appPort}`;
@@ -223,4 +234,37 @@ async function postJson(url, body) {
 
 async function deleteJson(url) {
   return (await fetch(url, { method: "DELETE" })).json();
+}
+
+async function stopTestServer(child, port) {
+  let exited = child.exitCode !== null || child.signalCode !== null;
+  if (!exited) {
+    const gracefulExit = waitForChildExit(child, 5000);
+    try { child.kill("SIGTERM"); } catch {}
+    exited = await gracefulExit;
+  }
+  if (!exited) {
+    const forcedExit = waitForChildExit(child, 5000);
+    try { child.kill(); } catch {}
+    exited = await forcedExit;
+  }
+  if (!exited) throw new Error(`test server did not exit on port ${port}`);
+  const lockPath = getInstanceLockPath(path.resolve("."), port);
+  await fs.rm(lockPath, { force: true });
+  await assert.rejects(fs.access(lockPath), { code: "ENOENT" });
+}
+
+function waitForChildExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const onClose = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    const timer = setTimeout(() => {
+      child.removeListener("close", onClose);
+      resolve(false);
+    }, timeoutMs);
+    child.once("close", onClose);
+  });
 }
