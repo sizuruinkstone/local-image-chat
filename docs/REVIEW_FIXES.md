@@ -1,3 +1,345 @@
+# Task 10 IP-Adapter レビュー追加修正
+
+更新日: 2026-08-07
+状態: **最終承認・実機smoke test完了**
+
+## 最終実機確認（2026-08-07）
+
+ReForgeおよびLocal Image Chatの通常再起動後、Task 10の実機smoke testが完了しました。報告値を実環境のAPI、プロセス、outputs、履歴ハッシュと再照合し、Task 10を最終承認します。
+
+```text
+ReForge listener: PID 52624 / 127.0.0.1:7860
+ReForge wrapper: PID 79328
+Local Image Chat: PID 58984 / 127.0.0.1:3030
+Local Image Chat active jobs: 0
+
+module: CLIP-ViT-H (IPAdapter)
+model: ip-adapter-plus_sdxl_vit-h [bc449f62]
+/api/reforge/ip-adapter/options: available=true / family=sdxl
+
+IP-Adapterあり直接生成: HTTP 200 / 画像1枚 / ControlNet適用情報あり
+IP-Adapterなし直接生成: HTTP 200 / 画像1枚 / ControlNet情報なし
+
+outputs: 2665 files / 2,589,002,581 bytes
+history.json: 5,174,602 bytes
+history SHA-256: C8EAAA5EC0951D01706264D4AA801E56A9DEAE578411D0672CBE7C6FFA222EB6
+```
+
+直接ReForge smoke testは保存OFFで行われ、Local Image Chatのoutputs・履歴に新しい画像やbase64を残していません。Hires結果からの実クリックだけは、保存禁止条件と衝突するため新規生成せず、DOM属性、表示条件、共通setter、イベント伝播停止、既存自動テストで確認しました。これはTask 10の完了を妨げる未対応事項とは扱いません。
+
+## 再レビュー結果（2026-08-07）
+
+前回指摘した2件は、実際の差分とテストで修正を確認しました。Task 10のコード変更は承認します。
+
+- `validateIpAdapter({ enabled: false })`は`null`へ正規化され、能力確認・参照画像解決・ControlNet unit追加を行わず通常生成へ進む。
+- Hires完了表示の`finalResult`にも`IP参照`操作が追加され、通常候補と同じ`setCurrentImageAsIpAdapterReference(image)`を利用する。
+- Hires完了画像は`finalImage.id`を参照IDにし、プレビューは`thumbnailUrl`、なければ既存の`originalImageUrl(image)`を使う。クリック処理内で原寸fetch、FileReader、base64再変換を行わない。
+- 両ボタンは生成中・画像なし・IP-Adapter利用不可時の状態を既存`syncIpAdapterUi()`で同期する。
+- 追加したOFF時の統合テストとUI契約テストを含め、関連39件・全379件が成功した。
+
+検証結果:
+
+```text
+npm run check: 成功
+node --test test/server-integration.test.js test/ui-shell.test.js: 39 passed / 0 failed
+npm test: 379 passed / 0 failed
+git diff --check: 成功（改行コード警告のみ）
+3030: PID 6732のまま
+7860: PID 5696のまま
+/controlnet/model_list: Noneのみ（再起動前キャッシュ）
+```
+
+残作業は、ユーザーの明示許可後に行うReForge再起動、モデル認識確認、IP-Adapterあり／なしの実機smoke test、および必要なら3030番再起動後のUI経路確認です。コード追加修正は現時点で要求しません。
+
+## 初回レビュー判定（解消済み・履歴）
+
+初回レビューでは、モデル2ファイルの配置、SHA-256、8ファイルの実装範囲、mock統合、履歴のbase64排除を確認しましたが、無効設定のサーバー処理とHires完了表示の導線に2件の修正を要求しました。両方とも上記の再レビューで解消済みです。
+
+ReForgeがモデルをまだ列挙しない理由は配置ミスではありません。インストール済みReForgeの`/controlnet/model_list`はquery parameterを参照せず、起動時に構築されたメモリ上の一覧を返します。そのため`?update=true`では再走査されません。コード修正後、ジョブ停止とユーザー許可を確認してReForgeを再起動し、実機smoke testを行う必要があります。
+
+## [P1] `enabled:false`を完全な無効設定として終了する
+
+対象:
+
+- `src/ip-adapter.js`の`validateIpAdapter()`
+- `src/server.js`の`resolveIpAdapter()`
+- `test/server-integration.test.js`
+
+現状:
+
+```js
+if (input.enabled !== true) return { enabled: false };
+```
+
+一方、サーバーは次の判定です。
+
+```js
+const normalized = validateIpAdapter(body.ipAdapter);
+if (!normalized) return null;
+```
+
+`{ enabled: false }`はtruthyなので、能力確認へ進み、モデルがあれば参照画像解決、モデルがなければ利用不可エラーになります。無効設定なのに通常生成として扱われません。
+
+修正:
+
+- `validateIpAdapter({ enabled: false })`を`null`へ正規化するか、`resolveIpAdapter()`で`if (!normalized?.enabled) return null;`とする。
+- 判定を2箇所で食い違わせず、無効時のcanonical表現を1つに決める。推奨は`null`。
+- 無効時はmodule/model能力API、参照画像解決、ControlNet unit構築を行わない。
+- 無効時のReForge生成payloadは従来どおりで、`alwayson_scripts.ControlNet`を新規追加しない。
+
+必須テスト:
+
+- `validateIpAdapter({ enabled: false })`の期待値。
+- module/modelを利用不可にしたmockで、`ipAdapter: { enabled: false }`の通常生成が成功する。
+- 無効時は参照画像がなくてもエラーにならない。
+- 無効時はControlNet unitが増えない。
+- 無効時にIP-Adapter能力確認を生成条件として要求しない。
+
+## [P2] Hires完了画像にも中央`IP参照`操作を提供する
+
+対象:
+
+- `public/index.html`
+- `public/app.js`
+- 必要なら既存`public/style.css`の同じ補助操作スタイル
+- `test/server-integration.test.js`
+
+現状:
+
+- `studioMainPreview`には`studioMainIpAdapterButton`がある。
+- `presentHiresResult()`は`studioMainPreview`を隠し、別DOMの`finalResult`を表示する。
+- `finalResult`の操作列にはFavorite、再生成、比較、メタデータ等はあるがIP参照がない。
+- このため、現在中央に表示されている画像がHires完了画像の場合、その画像をIP-Adapter参照へ設定できない。
+
+修正:
+
+- `finalResult`の既存`resultActions`へ、同じ補助スタイル・title・aria-labelの`IP参照`操作を追加する。
+- 候補用とHires結果用で参照設定処理を複製せず、`setCurrentImageAsIpAdapterReference(image)`相当へ共通化する。
+- Hires完了画像では`finalImage.id`を`referenceImageId`として使い、thumbnail URLをpreviewへ使う。
+- 原寸fetch、FileReader、base64再変換を行わない。
+- クリックで拡大、再生成、比較、img2img mode切替を発火させない。
+- 選択画像なし、生成中、能力利用不可ではdisabledまたは非表示にする。
+- 既存の中央アクション列を新しい大きな行へ分離しない。
+
+必須テスト:
+
+- `finalResult`にもIP参照buttonが存在し、title / aria-labelがある。
+- Hires完了後のbuttonが`finalImage.id`を共通setterへ渡す。
+- 候補とHiresの両方が同じsetterを使う。
+- Hires画像指定でも原寸fetch / FileReader / base64変換をしない。
+
+## 実機モデル認識とsmoke test（修正後・再起動許可待ち）
+
+確認済み:
+
+```text
+IP-Adapter model:
+  847,517,512 bytes
+  SHA-256 3f5062b8400c94b7159665b21ba5c62acdcd7682262743d7f2aefedef00e6581
+
+CLIP ViT-H encoder:
+  2,528,373,448 bytes
+  SHA-256 6ca9667da1ca9e0b0f75e46bb030f7e011f44f86cbfb8d5a36590fcd7507b030
+
+配置先:
+  ReForge models/ControlNet直下およびmodels/ControlNetPreprocessor直下
+```
+
+インストール済みReForgeの実装:
+
+```text
+/controlnet/model_list
+→ get_all_controlnet_names()を返すだけ
+→ query parameter `update`を受け取らない
+→ update_controlnet_filenames()は起動時またはGradio UIのrefresh操作で呼ばれる
+```
+
+したがって、`model_list?update=true`が`None`のままなのは現在プロセスのcacheが理由です。モデルを別名・別場所へ推測移動しないでください。
+
+コード修正後の手順:
+
+1. 3030 / 7860の生成・比較ジョブが0件であることを確認する。
+2. ユーザーまたは監督から明示許可を得る。
+3. ReForgeを通常の管理手段で1回だけ再起動する。強制killを第一選択にしない。
+4. PIDが新しくなり、`/sdapi/v1/options`が応答するまで待つ。
+5. `/controlnet/model_list`で`ip-adapter-plus_sdxl_vit-h [hash]`を確認する。
+6. `/controlnet/control_types`のIP-Adapter系でもmodule/modelの組合せを確認する。
+7. 指示済みの512×512・4 steps・保存OFFの直接ReForge smoke testを1回だけ行う。
+8. HTTP 200、画像1枚、IPAdapter適用ログ、エラーなしを報告する。
+9. Local Image Chatの実outputs・履歴へsmoke画像を保存しない。
+
+3030番は現在も修正前コードのPID 6732です。Task 10の実機UI確認には、Task 10がレビュー承認された後、別途3030番も通常再起動が必要です。今回のLuna修正作業では、まだ3030 / 7860を再起動しないでください。
+
+## 再レビュー時の検証
+
+```powershell
+npm run check
+node --test test/server-integration.test.js test/ui-shell.test.js
+npm test
+git diff --check
+```
+
+報告:
+
+- 上記2件の修正差分
+- `{ enabled:false }`のmock生成結果
+- Hires完了画像から共通setterへ渡した画像ID
+- Task 10の8ファイル上限を維持していること
+- 3030 PID 6732 / 7860 PID 5696をまだ変更していないこと
+- モデルファイルを再download・移動・改名していないこと
+
+## 今回のレビュー検証結果
+
+```text
+npm run check: 成功
+関連テスト: 39 passed / 0 failed
+npm test: 379 passed / 0 failed
+git diff --check: 成功
+モデル2ファイル: bytes / SHA-256一致
+3030: PID 6732
+7860: PID 5696
+```
+
+レビュー中に実outputsの件数・容量が増加しましたが、3030番が継続稼働しており、テストは一時workspaceを使っています。ユーザー側の生成と並行した変化と判断し、Task 10テストによる実データ変更とは扱いません。
+
+---
+
+# Task 09 レビュー追加修正（優先度保留）
+
+更新日: 2026-08-07
+状態: **修正完了・最終承認**
+
+## Task 09 再レビュー結果（2026-08-07）
+
+前回指摘した2件は解消されました。新たな修正指示はありません。
+
+- 非既定のstored active pathは、`requireManagedMarker`により実在・通常ディレクトリ・linkなし・正規markerを起動時に再検証する。
+- markerなしの空／非空フォルダ、不正marker、不存在、通常ファイル、禁止パス、symlink/junctionは採用せず、既定outputsへフォールバックする。
+- 不正stored pathを作成・変更せず、markerも自動付与しない。pending/lastMigrationと環境変数優先仕様を維持する。
+- 隔離した一時workspace・一時port・mock Ollama/ReForgeで実`node src/server.js`を起動し、plan、予約、キャンセル、再予約、通常終了、listen前移行、同一画像URL、Favorite、thumbnail、削除、旧source保持をHTTPで確認した。
+- 同名異内容の競合ではactiveを切り替えず、旧保存先で起動して旧URLを維持することを確認した。
+- 実3030/7860、実outputs、実履歴、実storage-settingsは変更されていない。
+
+監督再検証:
+
+```text
+npm run check: 成功
+関連テスト: 55 passed / 0 failed
+npm test: 386 passed / 0 failed
+git diff --check: 成功（改行コード警告のみ）
+隔離子プロセス残留: なし
+
+Local Image Chat: PID 58984のまま
+ReForge: PID 52624のまま
+outputs: 2665 files / 2,589,002,581 bytes
+history.json: 5,174,602 bytes
+history SHA-256: C8EAAA5EC0951D01706264D4AA801E56A9DEAE578411D0672CBE7C6FFA222EB6
+data/storage-settings.json: 不存在のまま
+```
+
+## 判定
+
+Task 09は構文チェック、関連テスト、全テストに成功し、実`outputs/`および3030番の稼働プロセスを変更していません。ただし、保存済み設定を信頼する起動経路にセキュリティ上の欠陥があり、仕様で必須とした実サーバー統合テストも不足しているため未承認です。
+
+## [P1] 保存済みactiveOutputDirでも専用markerと実在を再検証する
+
+対象:
+
+- `src/storage-settings.js` の `resolveStoredOutputDir()` とパス検証
+- `test/storage-settings.test.js`
+
+現状:
+
+```js
+await validatePathSafety(candidate, {
+  rootDir: resolvedRootDir,
+  allowDefaultOutput: true,
+  allowExistingActive: true,
+  skipContentScan: true
+});
+```
+
+`allowExistingActive: true` と `skipContentScan: true` の組み合わせにより、`data/storage-settings.json` の `activeOutputDir` を書き換えると、専用markerがない任意の既存フォルダでも起動時の保存先として採用されます。その結果、意図しないローカルフォルダが `/outputs` 静的配信のルートになる可能性があります。
+
+レビュー再現結果:
+
+```text
+markerなし・無関係なsecret.txtを含む一時フォルダをactiveOutputDirへ直接記録
+→ prepareStartup().source = "stored"
+→ prepareStartup().outputDir = 当該フォルダ
+→ acceptedUnmanaged = true
+```
+
+修正要件:
+
+- UI/APIから一度承認済みという理由だけで、保存済み絶対パスを無条件に信用しない。
+- `default outputs/` 以外のstored active pathは、起動のたびに次を確認する。
+  - 対象ディレクトリが実在する。
+  - 対象自体および既存祖先にsymlink/junctionがない。
+  - Local Image Chat専用markerが存在し、内容が正しい。
+  - 禁止ディレクトリ、repository root、現在パスの不正な親子関係ではない。
+- 実在しないstored active pathを起動時に空フォルダとして再作成しない。旧履歴が突然消えたように見えるため、安全な既定`outputs/`へフォールバックし、公開状態へ理由を残す。
+- marker不正、markerなし、パス不在の場合はstored pathを採用せず、既定`outputs/`へフォールバックする。
+- `LOCAL_IMAGE_CHAT_OUTPUT_DIR` の既存優先仕様はこの修正で変更しない。
+- エラー文やAPIレスポンスへ不要な内部ファイル一覧を出さない。
+
+必須テスト:
+
+- marker付きstored active pathは採用する。
+- markerなしでファイルを含むstored active pathは拒否し、既定へフォールバックする。
+- 不正marker付きstored active pathは拒否する。
+- 保存後に削除されたstored active pathは再作成せず、既定へフォールバックする。
+- symlink/junctionを含むstored active pathは拒否する。
+- 改ざんした設定がrepository外の既存フォルダを `/outputs` として公開しない。
+
+## [P1] 実サーバー経由の保存先API統合テストを追加する
+
+対象:
+
+- `test/storage-settings.test.js`、または既存の実サーバーテストへ最小限の追加
+
+現状の`test/storage-settings.test.js`はサービス関数の単体テストだけで、Task 09の指示にあった「一時workspaceでサーバーをspawnし、HTTP APIと画像URL契約を往復する統合テスト」がありません。
+
+最低限、隔離した一時workspace・一時port・小さいfixtureで次を実証してください。
+
+- `GET /api/storage/settings`
+- `POST /api/storage/plan`
+- `PATCH /api/storage/settings` の予約とキャンセル
+- 予約前は現在の`/outputs/...`、`/favorites/...`、`/api/images/:id/original`が読める。
+- テスト用サーバーを通常終了し再起動すると、listen前移行後に同じURL契約で旧履歴画像、thumbnail、Favoriteが読める。
+- 削除APIが移行後のファイルだけを安全に削除し、旧sourceは残すという今回のロールバック方針と矛盾しないことを明示する。
+- 競合またはコピー失敗時は旧保存先で起動し、HTTP経由の履歴表示が維持される。
+- 実`outputs/`、実3030番、実`data/storage-settings.json`には触れない。
+
+## 再レビュー時の検証
+
+```powershell
+npm run check
+node --test test/storage-settings.test.js test/ui-shell.test.js
+npm test
+git diff --check
+```
+
+追加で、実装担当はテスト前後に次が不変であることを報告してください。
+
+- 実`outputs/`のファイル数と合計バイト数
+- 3030番LISTEN PID
+- 実`data/storage-settings.json`が新規作成・変更されていないこと
+
+## 今回のレビュー結果
+
+```text
+npm run check: 成功
+関連テスト: 43 passed / 0 failed
+npm test: 376 passed / 0 failed
+git diff --check: 成功
+実outputs: 2,619 files / 2,554,991,941 bytes（前後不変）
+3030番: PID 6732（前後不変）
+実data/storage-settings.json: 存在せず
+```
+
+---
+
 # 最終レビュー結果
 
 更新日: 2026-08-05
@@ -434,3 +776,213 @@ npm test
 ```
 
 ブラウザ確認は1280×720相当で実施しました。フィルター、タグAND絞り込み、三点メニュー、詳細、比較モード、20件追加読込を確認しています。1366×768、1920×1080、125%ズーム、モバイルSafari実機は今回実施していません。
+
+---
+
+# Task 08B レビュー修正指示
+
+更新日: 2026-08-07
+状態: レビュー承認済み
+
+## 判定
+
+Task 08Bは、ロック取得ロジック、runtime API、旧サーバー互換UI、単体テストの基本方針は適切です。ただし、全テスト終了後に終了済みテストサーバーのロックファイルが残留することと、実サーバーを2プロセス起動した統合テストがないことを確認しました。
+
+現時点では完了条件7、8、12、20を統合レベルで確認できないため、承認保留です。プロダクションコードを全面的に書き直さず、終了テストとテスト後クリーンアップを補ってください。
+
+## [P1] 実サーバー2プロセスで二重起動拒否を検証する
+
+対象:
+
+- `test/server-integration.test.js`
+- 必要な場合のみ既存テストヘルパー
+- `src/server.js`は、テストで実際の不具合が判明した場合だけ修正
+
+現在の`test/instance-lock.test.js`は、同一テストプロセス内で`acquireInstanceLock()`を2回呼ぶ単体テストです。次は未検証です。
+
+- `src/server.js`がロックを実際に取得してからlistenすること
+- 同じroot・同じportで起動した2個目のNodeプロセスが非0終了すること
+- 2個目の標準エラーに既起動のPIDとPortが表示されること
+- 1個目のサーバーが2個目の失敗後も`/api/config`へ応答すること
+- 2個目でbackfill処理が開始されないこと
+- 1個目の終了後に同じroot・portで再起動できること
+
+テスト専用の一時config、data、outputs、空きポートを使い、3030番と現在稼働中のPID `7040` / `43312`には触れないでください。
+
+最低限の統合テスト手順:
+
+1. テスト専用ポートで1個目の`src/server.js`を起動する。
+2. `/api/config`の応答を待つ。
+3. 完全に同じroot・portで2個目を起動する。
+4. 2個目が一定時間内に非0終了することを待つ。
+5. stderrへ「既に起動」「PID」「Port」が含まれることを確認する。
+6. 1個目の`/api/config`が引き続き200を返すことを確認する。
+7. 1個目を終了させ、終了完了まで待つ。
+8. 同じroot・portで3個目を起動できることを確認する。
+9. 3個目も終了完了まで待つ。
+
+子プロセス終了は`child.kill()`を呼ぶだけで終えず、`exit`または`close`イベントを必ず待ってください。タイムアウトを設け、失敗時も全子プロセスを回収してください。
+
+## [P1] Windowsのテスト終了後にstale lockを残さない
+
+対象:
+
+- `test/server-integration.test.js`
+- `test/server-recovery.test.js`
+- `test/server-experiments.test.js`
+- `test/server-workspace.test.js`
+- 必要ならテスト専用の小さな共通ヘルパー
+
+レビュー時に`npm test`を実行した直後、次の5ファイルが`%TEMP%\local-image-chat`へ残りました。
+
+```text
+<root-hash>-60236.lock  PID 73660  dead
+<root-hash>-60239.lock  PID 24752  dead
+<root-hash>-60242.lock  PID 80336  dead
+<root-hash>-60246.lock  PID 71928  dead
+<root-hash>-60340.lock  PID 37216  dead
+```
+
+各ファイルのPIDは既に存在しません。既存サーバーテストのcleanupが概ね次の形で、Windowsでは子プロセスの終了完了とgraceful shutdownを保証していないことが原因です。
+
+```js
+t.after(async () => {
+  child.kill();
+  // childのexitを待っていない
+});
+```
+
+修正要件:
+
+1. テストの子プロセス終了を共通化し、終了イベントを待つ。
+2. gracefulな終了を試みたあと、一定時間で終わらない場合だけ強制終了へフォールバックする。
+3. Windowsで強制終了となり`exit`ハンドラーを実行できない場合、テストが所有するroot・portのロックだけを明示的に除去する。
+4. 削除対象は必ず`getInstanceLockPath(rootDir, testPort)`で厳密に算出する。
+5. `%TEMP%\local-image-chat`全体を再帰削除しない。
+6. 他テスト・実アプリ・別ポートのロックを削除しない。
+7. 子プロセスの終了確認前に一時config/data/outputを削除しない。
+8. cleanupはテスト失敗時にも必ず動く。
+
+テスト後、今回使用した各portのロックが存在しないことをassertしてください。stale lockの自動回収機能は維持しますが、「次回起動時に回収されるからテスト終了時に残ってよい」とはしないでください。ランダムポートのテストでは次回取得が発生せず、実行ごとにファイルが増え続けます。
+
+## [P2] SIGINT / SIGTERM解放の実証を追加する
+
+対象:
+
+- `test/server-integration.test.js`または上記の共通終了ヘルパー
+
+OS差を考慮しつつ、少なくともテスト環境で利用可能なgraceful終了経路について次を確認してください。
+
+- 終了後にロックファイルがない
+- 終了コードまたはsignalが期待どおり
+- 同じroot・portを直後に再取得できる
+
+Windowsの`child.kill()`がNodeの`SIGTERM`ハンドラーを通らない場合は、その事実をテスト名またはコメントで明示し、テスト専用cleanupで補ってください。プロダクションへテスト専用shutdown APIを追加しないでください。
+
+## 維持する実装
+
+次はレビューで問題を確認していないため、必要なく変更しないでください。
+
+- rootの正規化SHA-256＋portによるロックキー
+- hostをロックキーへ含めない仕様
+- `fs.open(lockPath, "wx")`による排他取得
+- live PIDの拒否
+- stale/corrupt lockの回収
+- `instanceId`による所有者確認
+- 別rootまたは別portの同時利用
+- `/api/config.runtime`の後方互換な追加
+- runtimeから絶対パス・秘密情報・instanceIdを除外
+- Task 08Aの画面版・サーバー版比較
+- runtimeがない旧サーバーでのUIフォールバック
+- listen成功後だけbackfillを開始する構造
+- 現在稼働中3030プロセスを停止・再起動しない方針
+
+## 修正後の検証
+
+修正前に、今回レビューで残った`.lock`だけをPIDがdeadであることを再確認してから個別に削除して構いません。ディレクトリ全体の削除は禁止します。
+
+```powershell
+git diff --check
+npm run check
+node --test test/instance-lock.test.js test/server-integration.test.js test/server-recovery.test.js test/server-experiments.test.js test/server-workspace.test.js test/ui-shell.test.js
+npm test
+```
+
+検証後:
+
+```powershell
+$lockDir = Join-Path ([IO.Path]::GetTempPath()) 'local-image-chat'
+Get-ChildItem $lockDir -Filter '*.lock'
+```
+
+少なくとも修正後のテストが使用したportについて、新しいdead PIDのロックが増えていないことを確認してください。別作業が所有するlive PIDのロックは削除しないでください。
+
+3030番のread-only確認:
+
+```powershell
+Get-NetTCPConnection -LocalPort 3030 -State Listen
+```
+
+PID `7040`と`43312`を停止・再起動しないでください。
+
+## レビュー時の検証結果
+
+```text
+npm run check
+  成功
+
+node --test test/instance-lock.test.js test/ui-shell.test.js test/net-info.test.js
+  47 passed / 0 failed
+
+npm test
+  367 passed / 0 failed
+```
+
+テスト結果自体は全件成功していますが、`npm test`後にdead PIDのロックが5件増えたため、完了とは判定しません。
+
+3030番の既存プロセスはレビュー前後で変化していません。
+
+```text
+127.0.0.1:3030  PID 7040
+0.0.0.0:3030    PID 43312
+```
+
+## 修正後レビュー
+
+更新日: 2026-08-07
+
+指摘した修正は完了しています。
+
+- 実サーバー1個目・重複2個目・再取得3個目を使う統合テストを追加
+- 2個目が終了コード1となり、stderrへ既起動・PID・Portを出すことを確認
+- 重複拒否後も1個目の`/api/config`が200を返すことを確認
+- 1個目終了後、同じroot・portを別PIDで再取得できることを確認
+- 全サーバーテストで子プロセスの終了完了を待つcleanupへ変更
+- Windowsでgraceful handlerを通らない場合も、テスト所有のroot・portだけを明示清掃
+- 関連テスト後・全テスト後とも、テスト由来のdead PIDロックは0件
+- 稼働中PID `6732`の3030 live lockは削除せず維持
+
+検証結果:
+
+```text
+npm run check
+  成功
+
+node --test test/instance-lock.test.js test/server-integration.test.js test/server-recovery.test.js test/server-experiments.test.js test/server-workspace.test.js test/ui-shell.test.js
+  46 passed / 0 failed
+
+npm test
+  367 passed / 0 failed
+
+git diff --check
+  成功
+```
+
+実ブラウザーでは次を確認しました。
+
+```text
+Version 3.0.0　最新ファイルを使用中
+PID 6732 · 起動 2026/08/07 02:25 · 0.0.0.0:3030
+```
+
+`#versionContractStatus`は1個、`aria-live="polite"`を維持しています。Task 08Bは承認済みです。
