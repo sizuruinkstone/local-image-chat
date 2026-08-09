@@ -1044,6 +1044,27 @@ test("生成キューからReForge、履歴、👍集計までAPIが往復する
   assert.equal(inpaintRefineRequest.body.width, 768);
   assert.equal(inpaintRefineRequest.body.height, 768);
 
+  const v1Capabilities = await requestJsonWithStatus(`${baseUrl}/api/v1/capabilities`);
+  assert.equal(v1Capabilities.status, 200);
+  assert.equal(v1Capabilities.body.checkpoints[0].id, "mock.safetensors");
+  assert.equal("filename" in v1Capabilities.body.checkpoints[0], false);
+  const v1Accepted = await requestJsonWithStatus(`${baseUrl}/api/v1/generations`, {
+    method: "POST",
+    body: {
+      mode: "txt2img",
+      prompt: { rawOverride: "1girl, blue hair", negative: "low quality" },
+      settings: { width: 512, height: 512, steps: 5, cfgScale: 5, candidateCount: 1 },
+      metadata: { client: "integration-test" }
+    }
+  });
+  assert.equal(v1Accepted.status, 202);
+  assert.equal(v1Accepted.body.status, "queued");
+  const v1Completed = await waitForV1Job(baseUrl, v1Accepted.body.id);
+  assert.equal(v1Completed.status, "done");
+  assert.equal(v1Completed.progress, 1);
+  assert.equal(v1Completed.result.images.length, 1);
+  assert.equal("filename" in v1Completed.result.images[0], false);
+
   // 実サーバーを同じroot+portで2個起動し、2個目だけが拒否されることを確認する。
   const duplicate = spawn(process.execPath, ["src/server.js"], {
     cwd: path.resolve("."),
@@ -1193,6 +1214,17 @@ async function waitForJob(baseUrl, id) {
     await new Promise((resolve) => setTimeout(resolve, 30));
   }
   throw new Error("job timeout");
+}
+
+async function waitForV1Job(baseUrl, id) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 5000) {
+    const response = await fetch(`${baseUrl}/api/v1/generations/${id}`);
+    const body = await response.json();
+    if (["done", "failed", "cancelled"].includes(body.status)) return body;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  }
+  throw new Error("v1 job timeout");
 }
 
 async function fileExists(filePath) {

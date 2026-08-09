@@ -1,3 +1,163 @@
+# Task 11 API基盤 レビュー追加修正
+
+更新日: 2026-08-09
+状態: **最終承認（指摘2点の修正・回帰テスト完了）**
+
+## 再レビュー結果
+
+前回指摘した2点は解消されました。Task 11の追加修正はありません。
+
+- 生成Runtimeは`validateLoras(body.loras, config)`を呼び、既存の`config.lora.maxSelected`と`config.lora.defaultWeight`を維持する。
+- 非標準設定`maxSelected: 2`、`defaultWeight: 0.85`を使用した旧Job経路のテストで、3件目が除外され、Weight未指定の2件が0.85になることを確認した。
+- 非アクティブCheckpointを指定したJob Bは、先行Job Aの実行中は`queued`のままで、Checkpoint切替呼び出しは0回だった。
+- Job A完了後、Job Bの実行開始時にだけ`checkpoint-y`へ1回切り替わり、ReForge生成payloadと履歴settingsへ同じ公開identifierが保存された。
+- v1 API契約、旧API、UI、Job status、progress、History DTO、txt2img限定方針は変更されていない。
+
+監督再検証:
+
+```text
+npm run check
+  成功
+
+node --test test/api-v1.test.js test/server-integration.test.js
+  13 passed / 0 failed
+
+npm test
+  393 passed / 0 failed
+
+git diff --check
+  成功（CRLF warningのみ、whitespace errorなし）
+```
+
+## 最終判定
+
+Task 11「Local Image Chat API基盤」を承認します。以下は解消済みのレビュー履歴として残し、Lunaが再実装する必要はありません。
+
+## 総合判定
+
+API基盤の主要構造は `docs/CURRENT_TASK.md` に沿っています。
+
+- `POST /api/jobs`、`POST /api/generate`、`POST /api/v1/generations` は、`createGenerationRuntime()` の同じ生成実装へ合流している。
+- 新しいqueue、ReForge通信、画像保存、History保存を別系統で作っていない。
+- v1の5 endpoint、Prompt Service、allowlist DTO、統一エラー、txt2img限定、旧API互換が実装されている。
+- v1 responseへ絶対パス、画像base64、stack traceを返していない。
+- Checkpointの公開identifierはCapabilitiesの`id`とGeneration requestで共通の`title`を使用している。
+- 実3030／7860、実outputs、実historyを使わず、隔離mockテストで検証している。
+- `npm run check`、関連テスト、全391テスト、`git diff --check`は成功した。
+
+ただし、Runtime抽出による旧APIの設定回帰が1件あります。また、Checkpoint切替タイミングはコード上正しいものの、この設計上重要な条件を固定する回帰テストがありません。以下の2点だけを修正してください。API契約やファイル構成の再設計は不要です。
+
+## [P1] 旧生成RuntimeのLoRA検証へ既存configを渡す
+
+対象:
+
+- `src/services/generation-service.js`
+- `test/api-v1.test.js`、または既存の生成Runtime単体テスト
+
+現状:
+
+```js
+const loras = validateLoras(body.loras);
+```
+
+抽出後の関数は次のように`config`を受け取れる形へ変更されています。
+
+```js
+function validateLoras(input, config = null) {
+  const maximum = boundedInt(config?.lora?.maxSelected, 4, 1, 8);
+  const fallbackWeight = boundedNumber(config?.lora?.defaultWeight, 0.7, 0.05, 2);
+}
+```
+
+しかし呼び出し側が`config`を渡していないため、`config.local.json`等で設定した次の値が旧API・新v1とも生成実行時に無視されます。
+
+- `config.lora.maxSelected`
+- `config.lora.defaultWeight`
+
+抽出前の`validateLoras()`は`src/server.js`のclosureから同じ`config`を参照していたため、これは既存挙動の回帰です。現在の標準値が4件・0.7なので既存テストでは偶然検出されません。
+
+最小修正:
+
+```js
+const loras = validateLoras(body.loras, config);
+```
+
+必須テスト:
+
+1. Runtimeへ標準値と異なる設定、例 `maxSelected: 2`、`defaultWeight: 0.85` を渡す。
+2. Weight未指定のLoRAを3件以上含む既存形式payloadをRuntimeへ渡す。
+3. ReForge mockへ渡るLoRAが2件までで、未指定Weightが0.85になることを確認する。
+4. 同じ確認を少なくとも旧`/api/jobs`相当のRuntime経路で行い、v1 DTO正規化だけのテストで済ませない。
+5. txt2img/img2img/inpaint、Hires、IP-Adapter、履歴形式、LoRA構文の既存処理は変更しない。
+
+## [P2] Checkpoint切替がqueue実行時だけに行われることをテストで固定する
+
+対象:
+
+- `test/api-v1.test.js`
+- プロダクションコードは、テストで実際の問題が判明した場合だけ修正
+
+コード上は現在、受付時の`createV1Job()`ではCheckpoint一覧からidentifierを検証するだけで、実際の`switchCheckpointFn()`は`performGeneration()`内の`prepareApiCheckpoint()`で呼ばれています。この方針は正しいです。
+
+しかし現テストは、受付時に非アクティブCheckpointを指定したケースでも、切替がqueue開始前に起きないことを検証していません。Task 11の競合防止条件を回帰テストとして固定してください。
+
+必須テスト:
+
+1. 先行Job Aを実行中のまま保持する。
+2. 非アクティブCheckpoint Yを指定したv1 Job Bをqueueへ追加する。
+3. Bが`queued`の間は`switchCheckpointFn()`が一度もYへ切り替えていないことを確認する。
+4. Aを完了させ、Bが`running`へ進んだ後にだけYへ切り替えることを確認する。
+5. BのReForge生成payloadと履歴settingsに、Capabilitiesで公開した同じCheckpoint identifierが残ることを確認する。
+6. request受付時の一覧照会・identifier検証自体は許可する。禁止対象はqueue外での実Checkpoint切替である。
+
+## 変更禁止
+
+- `/api/v1`のrequest / response契約変更
+- 既存status名やprogress仕様の変更
+- `src/server.js`へ生成処理を戻すこと
+- 新しいqueue、ReForge adapter、History形式の追加
+- UI変更、依存追加、package-lock更新
+- img2img/inpaintのv1対応追加
+- 実3030／7860の停止・再起動
+- 実outputs、実history、実configへの書き込み
+
+## 再レビュー時の検証
+
+```powershell
+npm run check
+node --test test/api-v1.test.js test/server-integration.test.js
+npm test
+git diff --check
+```
+
+報告すること:
+
+- `validateLoras()`へconfigを渡した差分
+- 非既定`maxSelected`・`defaultWeight`の回帰テスト結果
+- Job Bがqueued中のCheckpoint switch呼び出し回数
+- Job B実行開始後のCheckpoint switch対象
+- 関連テスト件数、全テスト件数
+- 変更ファイル一覧
+- 実3030／7860、実outputs、実historyを変更していないこと
+
+## 今回の監督検証結果
+
+```text
+npm run check
+  成功
+
+node --test test/api-v1.test.js test/server-integration.test.js
+  11 passed / 0 failed
+
+npm test
+  391 passed / 0 failed
+
+git diff --check
+  成功（CRLF warningのみ、whitespace errorなし）
+```
+
+---
+
 # Task 10 IP-Adapter レビュー追加修正
 
 更新日: 2026-08-07

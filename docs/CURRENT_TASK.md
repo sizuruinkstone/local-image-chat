@@ -1,937 +1,1338 @@
-# 現在の実装対象：Luna Task 09レビュー修正「保存先の起動時再検証と実サーバー統合テスト」
+# 現在の実装対象：Task 11「Local Image Chat Backend API v1基盤」
 
-更新日: 2026-08-07
-状態: **実装・再レビュー完了（最終承認）**
+更新日: 2026-08-09
+状態: **実装待ち**
 担当: Luna
-優先度: 最優先（Task 10完了後）
+設計・レビュー: Codex
+優先度: 高
 
 ## 1. 目的
 
-Task 09「output保存場所変更」の既存実装を維持したまま、レビューで判明した2件だけを修正してください。
+既存のLocal Image Chatへ、人間向けWeb UI・将来のMCP・CLIが同じ生成処理を利用できるBackend API基盤を追加してください。
 
-1. `data/storage-settings.json`の`activeOutputDir`を起動時に無条件で信用しない。
-2. 保存先APIと再起動移行後の画像URL契約を、隔離した実サーバーで検証する。
-
-新機能追加、UI変更、移行方式の作り直しは行いません。Task 10 IP-Adapterは最終承認済みなので、関連コード・モデル・ReForge連携へ触れないでください。
-
-## 2. 現在の実環境を保護する
-
-現在の実環境:
+目標構造:
 
 ```text
-Local Image Chat: PID 58984 / 127.0.0.1:3030
-ReForge: PID 52624 / 127.0.0.1:7860
-active jobs: 0
-outputs: 2665 files / 2,589,002,581 bytes
-history.json: 5,174,602 bytes
-history SHA-256: C8EAAA5EC0951D01706264D4AA801E56A9DEAE578411D0672CBE7C6FFA222EB6
+Web UI ─┐
+        ├─> Local Image Chat Backend API
+MCP ────┘               │
+                        ▼
+               Application Service
+                        │
+            ┌───────────┼───────────┐
+            ▼           ▼           ▼
+         ReForge    JobManager    History
 ```
 
-必須保護条件:
+今回MCP Server本体は作りません。将来のMCPは`/api/v1`を呼ぶ薄いラッパーとし、GUI・DOM・ブラウザ自動操作・ReForge直接操作を行わせません。
 
-- PID 58984とPID 52624を停止・再起動しない。
-- 実3030番、実7860番をテストに使わない。
-- 実`outputs/`、`data/history.json`、`data/storage-settings.json`、Favorite、LoRA registryを変更しない。
-- 実保存先設定APIへPATCH/POSTしない。
-- テストはOS一時ディレクトリ、一時ポート、mock Ollama/ReForgeだけで行う。
-- reset、restore、checkout、stashで既存のdirty worktreeを消さない。
-- Task 08A/08B、ReForge options hotfix、Task 10の差分を維持する。
+最重要成果はエンドポイント数ではなく、**既存Web UIと新APIが同じGeneration Service／同じJobManager／同じReForge・History処理を通ること**です。
 
-## 3. 変更対象
+## 2. 作業開始時の保護条件
 
-原則として次の3ファイル以内です。
-
-1. `src/storage-settings.js`
-2. `test/storage-settings.test.js`
-3. `test/server-integration.test.js`または`test/server-workspace.test.js`のどちらか一方（実サーバー統合テストを既存ヘルパーへ置く場合のみ）
-
-推奨は、単体テストを`test/storage-settings.test.js`へ追加し、実サーバー統合テストを既存のspawn/一時port/終了ヘルパーを再利用できるテストファイルへ最小追加する構成です。
-
-次は変更しないでください。
-
-- `public/index.html`
-- `public/app.js`
-- `public/style.css`
-- `src/server.js`（既存API契約で検証できるため原則変更不要）
-- `src/ip-adapter.js`
-- `src/reforge.js`
-- `src/history.js`
-- `package.json`
-- `package-lock.json`
-- ReForge本体・モデルファイル
-
-3ファイルを超える、または`src/server.js`変更が必要と判断した場合は、実装を止めて具体的な理由を報告してください。
-
-## 4. 修正1：保存済みactiveOutputDirの起動時再検証
-
-対象は`src/storage-settings.js`の`resolveStoredOutputDir()`と、必要最小限の共通検証処理です。
-
-現状の問題:
-
-```js
-await validatePathSafety(candidate, {
-  rootDir: resolvedRootDir,
-  allowDefaultOutput: true,
-  allowExistingActive: true,
-  skipContentScan: true
-});
-```
-
-`allowExistingActive: true`と`skipContentScan: true`により、設定JSONを改ざんすると、markerのない任意の既存ディレクトリをstored outputとして採用できます。そこが`/outputs`の静的配信ルートになるため、セキュリティ上許容できません。
-
-### 4.1 正しい採用条件
-
-`default outputs/`以外のstored active pathは、起動または`getSettings()`で解決するたびに最低限次を確認してください。
-
-- 絶対パスとして正規化できる。
-- 対象ディレクトリが実在する。
-- 通常のディレクトリである。
-- 対象および既存祖先にsymlink/junctionがない。
-- Local Image Chat専用markerが存在する。
-- marker JSONの`type`と`schemaVersion`が既存仕様に一致する。
-- リポジトリルート、ファイルシステムルート、`public`、`src`、`data`、`.git`、`.updates`、`node_modules`ではない。
-- 禁止ディレクトリ配下ではない。
-- 現在の安全規則で禁止している不正な親子関係を許可しない。
-
-stored active pathの中身を全件hashする必要はありません。markerとパス安全性を確認するために必要な範囲に留め、巨大な保存先の起動を不必要に遅くしないでください。ただし`skipContentScan`を理由にmarker確認まで省略してはいけません。
-
-### 4.2 不正時の挙動
-
-次の場合、stored pathを採用しないでください。
-
-- パスが存在しない。
-- markerがない。
-- markerが壊れている。
-- marker内容が不正。
-- 対象がファイル。
-- symlink/junctionを含む。
-- 禁止パスまたは不正な親子関係。
-
-挙動:
-
-- 安全な既定`<repository>/outputs`へフォールバックする。
-- 存在しないstored pathを自動作成しない。
-- unmanaged stored pathへmarkerを自動作成しない。
-- 改ざんされたstored path内のファイルを読まない・配信しない・削除しない。
-- `source`は`default`として返す。
-- サーバーログには安全条件を満たさずフォールバックしたことを簡潔に残す。
-- UI/APIへディレクトリ内ファイル一覧や内部例外全文を返さない。
-- 設定JSONの`activeOutputDir`を勝手に別値へ書き換える必要はない。ランタイム解決だけ安全側へ倒す。
-- `pendingMigration`と`lastMigration`を破壊しない。
-
-### 4.3 維持する仕様
-
-- `LOCAL_IMAGE_CHAT_OUTPUT_DIR`が設定されている場合の既存優先順位を変更しない。
-- リポジトリ既定の`outputs/`は従来どおり使用できる。
-- 正規の移行完了時に作成されたmarker付き保存先は採用する。
-- 保存先の予約、キャンセル、listen前移行、旧source保持、Favorite追従を変更しない。
-- 空の任意フォルダを「新規移行先候補」としてplanする既存仕様と、起動済みstored pathの採用条件を混同しない。
-- active stored pathではmarker必須、pending targetでは既存の予約検証規則を維持する。
-
-## 5. 修正1の必須単体テスト
-
-`test/storage-settings.test.js`へ、少なくとも次を追加・更新してください。
-
-1. 正しいmarker付きstored active pathを採用し、`source === "stored"`になる。
-2. markerなしで無関係なファイルを含むstored pathを拒否し、既定outputsへフォールバックする。
-3. markerなしの空stored pathもactive pathとしては拒否する。
-4. JSON破損、type不一致、schemaVersion不一致のmarkerを拒否する。
-5. 保存後に削除されたstored pathを再作成せず、既定へフォールバックする。
-6. stored pathが通常ファイルの場合に拒否する。
-7. symlink/junction自身または祖先を含むstored pathを拒否する。OS権限上作成できない場合だけ、既存テスト方針に合わせて明示的にskipする。
-8. repository rootおよび禁止ディレクトリを拒否する。
-9. 改ざんした設定がrepository外のmarkerなし既存フォルダを採用しない。
-10. `LOCAL_IMAGE_CHAT_OUTPUT_DIR`の優先仕様を維持する。
-11. 不正stored pathへのフォールバックで`pendingMigration`と`lastMigration`を消さない。
-
-テストでは「返り値がdefaultになった」だけでなく、拒否対象ディレクトリが作成・変更されていないことも確認してください。
-
-## 6. 修正2：隔離した実サーバーAPI統合テスト
-
-サービス関数を直接呼ぶだけでは不十分です。`node src/server.js`を子プロセスとして実際に起動し、HTTP API、listen前移行、静的配信、履歴画像APIを往復してください。
-
-### 6.1 隔離方式
-
-保存先予約を検証するため、`LOCAL_IMAGE_CHAT_OUTPUT_DIR`で固定してはいけません。固定すると`PATCH /api/storage/settings`が仕様どおり拒否され、Task 09の主要経路を検証できません。
-
-推奨方式:
-
-1. OS一時ディレクトリへテスト用ワークスペースを作る。
-2. 実行に必要な`src/`、`public/`、`package.json`、`config.json`等を一時ワークスペースへコピーする。
-3. 依存解決は既存`node_modules`へのテスト専用junction/symlink、または既存テストで採用済みの安全な方法を使う。実リポジトリは変更しない。
-4. 一時ワークスペース内の`src/server.js`を、一時cwd・一時port・mock Ollama/ReForgeでspawnする。
-5. 一時ワークスペースの既定`outputs/`と`data/`だけを使う。
-6. 現在の3030番とは異なる予約済み一時portを使う。
-7. テスト終了時は子プロセスを通常終了し、instance lockと一時ディレクトリを確実に片付ける。
-
-テスト専用のために本番用`LOCAL_IMAGE_CHAT_ROOT_DIR`のような新しい環境変数を追加しないでください。サーバー全体をapp factoryへ大規模分解することも禁止します。
-
-### 6.2 成功経路
-
-小さい有効PNG fixtureと、それを参照する最小履歴を用意するか、mock ReForge経由で1枚だけ生成してください。以下をHTTPで確認します。
-
-移行予約前:
-
-- `GET /api/storage/settings`がHTTP 200。
-- `currentOutputDir`が一時ワークスペースの既定outputs。
-- `POST /api/storage/plan`が対象、一時ファイル数・容量、`restartRequired`を返す。
-- `PATCH /api/storage/settings`で`confirmMigration: true`を伴う予約が成功する。
-- 必要なら既存API形式に従い、キャンセル後に同じ対象を再予約できることも確認する。
-- `/outputs/<filename>`が読める。
-- `/favorites/<filename>`が読める。
-- `/api/images/<id>/original`が読める。
-- `/api/images/<id>/thumbnail`が有効なWebPを返す。
-
-再起動:
-
-- 1個目のテストサーバーを通常終了する。
-- 同じ一時ワークスペース・同じdata・空いた一時portで再起動する。
-- listen開始前に予約移行が完了する。
-- `GET /api/storage/settings`が新保存先と`source: "stored"`を返す。
-- 新保存先に専用markerがある。
-- pendingが解除され、`lastMigration.status === "completed"`になる。
-
-移行後:
-
-- 移行前と同じ`/outputs/<filename>`で画像を読める。
-- 移行前と同じ`/favorites/<filename>`でFavorite画像を読める。
-- 同じ`/api/images/<id>/original`で原寸を読める。
-- 同じ`/api/images/<id>/thumbnail`でサムネイルを読める。
-- Content-Typeが正しい。
-- 旧sourceの原寸、thumbnail、Favoriteが残っている。
-- URLへローカル絶対パスが露出しない。
-
-削除契約:
-
-- 移行後にテスト画像の既存削除APIを呼ぶ。
-- activeな新保存先の対象ファイルだけが削除される。
-- 旧source側コピーはロールバック用として残る。
-- 他のfixture、marker、保存先外ファイルを削除しない。
-
-### 6.3 失敗フォールバック経路
-
-別の隔離ケースで、予約後・再起動前に意図的な同名異内容競合など既存仕様で検出できるコピー失敗を作ってください。
-
-再起動後:
-
-- サーバー自体は旧保存先で起動する。
-- `GET /api/storage/settings`は旧保存先を返す。
-- `lastMigration.status === "failed"`または既存公開契約の失敗状態を返す。
-- 旧`/outputs/<filename>`、原寸API、thumbnail、Favoriteが読める。
-- 旧sourceを削除・上書きしていない。
-- 部分コピーを完成済みactive保存先として採用しない。
-- 実3030番や実outputsには影響しない。
-
-## 7. API契約
-
-既存API形式を変更しないでください。
+作業開始時点の実環境:
 
 ```text
-GET   /api/storage/settings
-POST  /api/storage/plan
-PATCH /api/storage/settings
+Local Image Chat: 0.0.0.0:3030 / PID 30076
+ReForge:          127.0.0.1:7860 / PID 52624
+active jobs:      0
+active output:    D:\AI\local-image-chat\outputs
 ```
-
-既存の予約・キャンセルrequest body、status code、公開レスポンスをそのままテストしてください。テストを通すためだけの専用API、テスト用query、任意ローカルパス配信APIを追加しないでください。
-
-## 8. 禁止事項
-
-- UI変更
-- 保存形式変更
-- DB導入
-- 新規依存
-- package更新
-- Task 10変更
-- IP-Adapterモデル再配置・再ダウンロード
-- ReForge API変更
-- 実outputsをテストfixtureにする
-- 実history/storage-settingsを書き換える
-- stored path不正時に自動marker付与
-- stored path不在時の自動再作成
-- markerなし任意フォルダの静的公開
-- 旧sourceの自動削除
-- copy失敗時のactive切替
-- 全面リファクタリング
-- 現在の3030/7860再起動
-
-## 9. 完了条件
-
-1. 正規marker付きstored pathだけを起動時に採用する。
-2. markerなし・不正marker・不存在・ファイル・link・禁止パスを拒否する。
-3. 不正stored pathで既定outputsへ安全にフォールバックする。
-4. 不存在stored pathを再作成しない。
-5. 任意フォルダを`/outputs`として公開しない。
-6. 環境変数優先仕様を維持する。
-7. 予約・キャンセル・listen前移行を維持する。
-8. 成功時だけactiveを新保存先へ切り替える。
-9. 失敗時は旧保存先で起動し、画像URL契約を維持する。
-10. 移行後も原寸、thumbnail、Favoriteを同じURLで読める。
-11. 削除APIはactive側だけを削除し、旧sourceを残す。
-12. 実サーバー統合テストが一時ワークスペース・一時portで成功する。
-13. 実3030、実7860、実outputs、実履歴を変更しない。
-14. Task 10と既存生成・ギャラリー・Favoriteを壊さない。
-15. check、関連テスト、全テスト、diff checkが成功する。
-
-## 10. 検証コマンド
-
-```powershell
-npm run check
-node --test test/storage-settings.test.js
-node --test test/storage-settings.test.js test/server-integration.test.js test/server-workspace.test.js test/ui-shell.test.js
-npm test
-git diff --check
-```
-
-統合テストを追加しなかった既存テストファイルは、関連テストコマンドから省略して構いません。ただし`npm test`は必須です。
-
-テスト前後に次を読み取り比較してください。
-
-```text
-3030/7860のPID
-active job件数
-実outputsのファイル数・合計bytes
-実history.jsonのsize・SHA-256
-実data/storage-settings.jsonの有無・size・SHA-256（存在する場合）
-```
-
-## 11. Lunaの報告項目
-
-- 変更ファイル一覧
-- `resolveStoredOutputDir()`の修正内容
-- stored pathのmarker検証方法
-- 不存在・不正・link時のフォールバック
-- 環境変数優先仕様を維持した根拠
-- 追加した単体テスト一覧
-- 実サーバー統合テストの隔離方法
-- 成功移行前後のHTTP URL確認結果
-- 失敗フォールバックの確認結果
-- 削除時に旧sourceを残した確認結果
-- テスト前後の実データfingerprint
-- 3030/7860 PIDを変更していないこと
-- 実行した検証コマンドと件数
-- 残っている制約
-
----
-
-# コードレビュー合格：Luna Hotfix「ReForge optionsの未対応キー送信を止める」
-
-更新日: 2026-08-07
-状態: 実装・自動テスト・コードレビュー完了（実ReForge確認のみ未実施）
-担当: Luna
-変更種別: 生成前API互換性の最小修正
-
-## 1. このHotfixの扱い
-
-このHotfixは実装済みで、追加コード修正はありません。下にある「Luna Task 10：IP-Adapter（SDXL）至急導入」を現在の実装対象とします。Hotfix差分を削除・再実装せず、`src/reforge.js`で変更箇所が近接する場合も挙動を維持してください。
-
-現在のdirty worktreeにはTask 08A / 08B / 09などの未コミット差分があります。
-
-- reset、restore、checkout、stash、既存差分の削除は禁止。
-- 今回の対象外ファイルを整形・整理・リファクタリングしない。
-- ReForge本体、設定ファイル、実outputs、履歴、3030/7860のプロセスを変更しない。
-- package.json / package-lock.jsonを変更せず、依存を追加・更新しない。
-
-## 2. 症状と確定した原因
-
-画像生成のたびにReForgeで次のエラーが発生します。
-
-```text
-POST /sdapi/v1/options
-KeyError: 'sd_noise_schedule_sampling'
-```
-
-送信元は`src/reforge.js`です。
-
-- `generateImages()`が画像生成開始時、候補画像ループと`txt2img` / `img2img` POSTより前に、毎回`applyNoiseSchedule(config, request.noiseSchedule)`をawaitしています。
-- `applyNoiseSchedule()`は既定キーを`sd_noise_schedule_sampling`とし、`POST /sdapi/v1/options`へ`{ [key]: value }`を無条件に送っています。
-- `config.json`の`defaults.noiseSchedule`は`Automatic`です。`src/server.js`の`validateSettings()`が生成要求ごとに空でない値へ正規化し、`performGeneration()`が`...settings`として`generateImages()`へ渡すため、ユーザーが明示操作しなくても毎回呼ばれます。
-- 現在稼働中の`GET http://127.0.0.1:7860/sdapi/v1/options`はHTTP応答し、537キーを返しましたが、`sd_noise_schedule_sampling`は存在しませんでした。
-- 同レスポンスには`sd_noise_schedule`があります。ただし今回の調査だけでは両キーの意味・値仕様が完全に同一とは確定できないため、自動的な別名置換は今回の範囲外です。
-- 現コードはoptions POSTの失敗を警告して生成を続けますが、ReForgeはPOSTを受け取った時点でKeyErrorを記録します。したがってcatchや警告抑制では解決せず、未対応キーを含むPOST自体を止める必要があります。
-
-導入経緯はcommit `042b787`（`Add Noise schedule for sampling setting (v2.8.0) (#7)`）です。
-
-## 3. 確定要求
-
-- `POST /sdapi/v1/options`の前に`GET /sdapi/v1/options`を行う。
-- GETレスポンス自身のプロパティとして、送信予定のoptionキーが存在するときだけ、その1キーをPOSTする。
-- キーが存在しなければ、options POSTを一切行わず、従来どおり画像生成を続ける。
-- `config.reforge.noiseScheduleOptionKey`相当の既存上書き仕様を維持する。上書きキーもGETレスポンスに存在するときだけ送る。
-- GET失敗、非2xx、JSON不正、object以外のレスポンスの場合も、存在確認ができないためoptions POSTを行わない。画像生成は従来どおり続け、原因が分かる簡潔なwarningだけを残す。
-- 対応キーが存在するA1111系・旧ReForge等では、従来どおりNoise schedule値をPOSTする。
-- `txt2img` / `img2img`の生成payload、候補画像ループ、進捗監視、保存、履歴、状態管理は変更しない。
-
-## 4. 実装方針
-
-変更の中心は`src/reforge.js`の`applyNoiseSchedule()`だけに限定します。
-
-1. 現在と同じ方法で`value`と送信予定`key`を決定する。
-2. `GET ${config.url}/sdapi/v1/options`をタイムアウト付きで実行する。
-3. GETが非2xxなら、POSTせず、既存の「optional設定失敗でも生成継続」という境界内でwarningを出してreturnする。
-4. JSONを読み、null、配列、primitiveを除くobjectであることを確認する。
-5. `Object.prototype.hasOwnProperty.call(options, key)`など、prototypeの影響を受けないown-property判定を使う。
-6. own propertyがなければ、未対応であることが分かるwarningを出し、POSTせずreturnする。
-7. own propertyがある場合に限り、現在と同じ`POST /sdapi/v1/options`、body `{ [key]: value }`を行う。
-8. POST自体の非2xx・例外時に生成を継続する既存仕様は維持する。
-
-GET結果をグローバル状態やサーバーstateへ保存する必要はありません。生成1回ごとの能力確認に留め、API層や状態管理を作り替えないでください。
-
-## 5. 変更対象
 
 必須:
 
-- `src/reforge.js`
-- `test/server-integration.test.js`
+- PIDは開始時に再確認する。
+- 実3030・実7860を停止、再起動、置換しない。
+- 実ReForgeへ生成POSTを送らない。
+- 実`D:\AI\local-image-chat\outputs`、`data/history.json`、Favorite、LoRA registry、storage settingsをテストで変更しない。
+- API生成テストはOS一時workspace、一時port、mock Ollama／mock ReForgeを使用する。
+- worktreeがdirtyなら既存差分を保持し、`reset`、`restore`、`checkout`、`stash`で消さない。
+- 新規依存を追加しない。
+- `package-lock.json`は依存変更がない限り変更しない。
 
-必要性を実証できる場合だけ追加可:
+## 3. 現状調査で確定した構成
 
-- ReForge呼び出しだけを分離検証する既存テストファイル（既存がなければ、新規テストファイルを増やすより統合テストへの最小追加を優先）
+### 3.1 現在の生成経路
 
-変更禁止:
-
-- `src/server.js`
-- `public/app.js`
-- `public/index.html`
-- `config.json`
-- `package.json`
-- `package-lock.json`
-- ReForge側のコード・設定
-
-## 6. テスト要件
-
-`test/server-integration.test.js`のmock ReForgeを、options GETの対応キー有無を表現できるよう最小限拡張してください。
-
-最低限、次を自動テストで証明します。
-
-1. GETレスポンスに`sd_noise_schedule_sampling`が存在するバックエンドでは、GETの後に従来どおりそのキーと値をPOSTし、その後に生成endpointを呼ぶ。
-2. GETレスポンスに同キーが存在しないバックエンドでは、`sd_noise_schedule_sampling`を含むoptions POSTが0回である。
-3. 未対応時も`txt2img`または`img2img`の生成endpointは呼ばれ、生成ジョブは成功する。
-4. options GETより前にoptions POSTされていないことを、mockの記録順または未対応キー拒否で証明する。
-5. checkpoint切替の`{ sd_model_checkpoint: ... }` POSTは今回の対象ではなく、壊さない。
-
-可能なら同じ統合テスト内で、最初の対応ケース後にmockの対応キーを無効化し、その後の既存生成ケースを未対応ケースとして利用してください。大規模なfixture再編は不要です。
-
-## 7. 禁止事項と互換性条件
-
-- catch追加だけ、HTTPエラー無視だけ、ログ非表示だけで済ませない。
-- GETに存在しないキーを試しにPOSTしない。
-- `sd_noise_schedule_sampling`を無条件に`sd_noise_schedule`へ置換しない。
-- GETで見つけた名前の似たキーへ推測で値を送らない。
-- options全体をPOSTし返さない。
-- Noise schedule UI、recipe、checkpoint profile、既定値を削除・変更しない。
-- 生成API payloadへNoise scheduleを移動しない。
-- options能力のための新しい永続state、キャッシュ、endpointを作らない。
-- 無関係なリファクタリング、依存更新、新機能追加を行わない。
-
-## 8. 完了条件
-
-1. 現在のReForgeのようにGET optionsへキーがない場合、`sd_noise_schedule_sampling`を含むPOSTが送られない。
-2. 対応バックエンドでは従来のoptions POSTが維持される。
-3. options能力確認に失敗しても、生成処理本体の挙動を変えず生成を続ける。
-4. 対応・未対応の両ケースが自動テストで通る。
-5. 既存のcheckpoint options POSTが通る。
-6. 関連テスト、`npm run check`、全テスト、`git diff --check`が成功する。
-7. 差分が`src/reforge.js`と必要最小限のテスト変更に限定される。
-8. 実ReForge確認では、生成1回の前後ログに`KeyError: 'sd_noise_schedule_sampling'`が新規発生しない。
-
-## 9. 検証手順
-
-まずmockだけで確認してください。
-
-```powershell
-npm run check
-node --test test/server-integration.test.js
-npm test
-git diff --check
-```
-
-実機確認は自動テスト成功後に1回だけ行います。3030/7860を勝手に停止・再起動せず、生成中ジョブがないことを確認してください。現在動作中の3030が修正前コードのままなら、勝手に再起動せず「実機未確認」と報告し、レビュー担当の指示を待ってください。
-
-実機確認を実施できる場合:
-
-- 修正後コードを読み込んだLocal Image Chatから通常生成を1回だけ行う。
-- ReForge側で生成直前から完了後までのログを確認する。
-- `POST /sdapi/v1/options`に`sd_noise_schedule_sampling`が送られていないことを確認する。
-- `KeyError: 'sd_noise_schedule_sampling'`が新規発生しないことを確認する。
-- 通常の生成endpointが成功し、画像が返ることを確認する。
-
-## 10. Lunaの報告項目
-
-- 変更ファイルと各変更内容
-- GETレスポンスのキー判定方法
-- 対応キーあり・なし・GET失敗時の挙動
-- options GET / POST / 生成endpointの呼び出し順
-- 実行したコマンドと結果
-- mockで未対応キーPOSTが0回だった証拠
-- 実機確認の実施有無
-- 実施した場合、KeyErrorが消えた証拠と生成成功結果
-- 未実施の場合、その理由
-- `git diff --stat`
-
-## 11. 監督レビュー結果（2026-08-07）
-
-判定: **コードレビュー合格。実機確認のみ保留。**
-
-- `src/reforge.js`: GET成功・object・own property確認後だけ既存POSTへ進む。キーなし、通信失敗、非2xx、JSON不正、object以外ではPOSTせず生成を継続する。
-- `test/server-integration.test.js`: 対応時は`GET options → POST options → POST txt2img`、未対応時は`GET options → POST txt2img`を検証。未対応キーを含むoptions POST 0回と生成成功を確認した。
-- `npm run check`: 成功。
-- `node --test test/server-integration.test.js`: 1件成功、失敗0。
-- `npm test`: 376件成功、失敗0。
-- `git diff --check`: 成功（改行コード警告のみ）。
-- 3030番のNodeプロセス開始は2026-08-07 02:24:59、`src/reforge.js`更新は03:57:15であり、稼働中3030は修正前コード。指示に従って停止・再起動・実生成は行っていない。
-- したがって、mockではKeyError原因となるPOST停止を実証済みだが、実ReForgeログで`KeyError: 'sd_noise_schedule_sampling'`が消えたことは未確認。次回、修正後コードを読み込む通常再起動後の生成1回で確認する。
-- 追加修正指示はないため、`docs/REVIEW_FIXES.md`への追記なし。
-
----
-
-# 現在の実装対象：Luna Task 10「IP-Adapter（SDXL）至急導入」
-
-更新日: 2026-08-07
-状態: **実装・レビュー・実機smoke test完了**
-担当: Luna
-優先度: 最優先
-
-## 1. 優先順位と既存差分
-
-他の未着手タスクは保留し、本タスクだけを進めてください。Task 09はレビューで要修正ですが、今回は修正しません。指摘は`docs/REVIEW_FIXES.md`冒頭にあります。
-
-現在のdirty worktreeにはTask 08A / 08B / 09の未コミット差分があります。
-
-- reset、restore、checkout、stash、既存差分の削除は禁止。
-- Task 09の保存先処理・API・UIを便乗修正しない。
-- `data/`、実`outputs/`、履歴JSON、LoRA registryを直接変更しない。
-- 実装・自動テスト中に3030番と7860番を停止・再起動しない。
-- レビュー前に3030番を勝手に再起動しない。
-
-## 2. 目的と範囲
-
-生成画面から1枚の参照画像をIP-Adapterへ渡せるようにします。今回は現在のIllustrious系Checkpointと互換性がある**SDXL IP-Adapter Plus（ViT-H）1ユニット**に限定します。
-
-対応:
-
-- txt2img / img2img / inpaint
-- 参照画像の選択・解除・preview
-- 中央の選択画像をワンクリックでIP-Adapter参照に設定
-- Weight、適用開始、適用終了
-- 履歴保存・復元・再生成・Hires.fix
-
-対象外:
-
-- FaceID / InstantID
-- SD1.5
-- 複数参照画像、複数ControlNet unit
-- 領域mask、advanced block weighting
-- ControlNet全般を扱う汎用UI
-
-## 3. 作業前に読むもの
-
-- `DESIGN.md`
-- `docs/REVIEW_FIXES.md`冒頭
-- `src/reforge.js`
-- `src/server.js`の`performGeneration()`、`validateSettings()`、`resolveSourceImage()`、`saveContentAddressedImage()`
-- `public/index.html`の生成設定・img2img参照UI
-- `public/app.js`の生成payload、履歴復元、自動保存、busy制御、drop処理
-- `public/style.css`
-- `test/server-integration.test.js`
-- `test/ui-shell.test.js`
-
-ReForge側は読むだけで編集しません。
-
-- `C:\AI\StabilityMatrix-win-x64\Data\Packages\reforge\extensions-builtin\sd_forge_controlnet\tests\web_api\template.py`
-- `...\tests\web_api\ipadapter_advanced_weighting.py`
-- `C:\AI\StabilityMatrix-win-x64\Data\Packages\reforge\extensions-builtin\sd_forge_ipadapter\scripts\forge_ipadapter.py`
-
-## 4. 実機で確認済みの前提
+Web UIは次の経路を使用しています。
 
 ```text
-Local Image Chat: 127.0.0.1:3030 / PID 6732
-ReForge:          127.0.0.1:7860 / PID 5696 / --api
-Checkpoint:       sd\obsessionIllustrious_vPredV20.safetensors
-
-/sdapi/v1/scripts:
-  txt2img / img2img ともに controlnet あり
-
-/controlnet/module_list:
-  CLIP-ViT-H (IPAdapter) あり
-
-/controlnet/model_list:
-  Noneのみ（IP-Adapter本体は未配置）
+public/app.js submitGeneration()
+  → POST /api/jobs
+  → jobs.create(body, meta)
+  → createJobManager(generateWithRecovery)
+  → generateWithRecovery()
+  → performGeneration()
+  → generateImages() in src/reforge.js
+  → 原画像・thumbnail保存
+  → history.addGeneration()
+  → Job result
+  → GET /api/jobs/:jobId のpolling
 ```
 
-今回の正しい組合せ:
+同期互換API`POST /api/generate`も、現在は同じ`performGeneration()`を直接呼びます。
+
+したがって、ReForge呼び出しを新API用に再実装してはいけません。現在`src/server.js`内にある生成固有処理を**移動して共通化**し、旧APIと新APIから利用してください。
+
+### 3.2 Job Manager
+
+`src/job-manager.js`の`createJobManager(execute)`を使用します。
+
+既存status:
 
 ```text
-model:  ip-adapter-plus_sdxl_vit-h.safetensors
-module: CLIP-ViT-H (IPAdapter)
+queued
+running
+done
+failed
+cancelled
 ```
 
-`CLIP-ViT-bigG (IPAdapter)`へ置換しないでください。Forge公式の対応表でもPlus SDXL ViT-HモデルはViT-H encoderを使います。
+既存機能:
 
-## 5. 公式モデルの安全な配置
+- 直列queue
+- `create(payload, meta)`
+- `get(id)`
+- `list()`
+- `cancel(id)`
+- AbortController
+- progress 0〜100
+- terminal後payload解放
+- retention cleanup
 
-新しいnpm/Python依存は追加せず、ReForge本体・builtin extensionのコードも変更しません。
+新しいqueueや別のMapを作らないでください。
 
-### IP-Adapter本体
+### 3.3 Prompt
+
+`public/structured-prompt.js`はDOM非依存の純粋モジュールです。次が既にあります。
+
+- `PROMPT_FIELDS`
+- `normalizeSections()`
+- `joinPromptSections()`
+- `buildFinalPrompt()`
+- Trigger Words関連処理
+
+結合順は既に次で固定されています。
 
 ```text
-URL:
-https://huggingface.co/h94/IP-Adapter/resolve/main/sdxl_models/ip-adapter-plus_sdxl_vit-h.safetensors
-
-配置先:
-C:\AI\StabilityMatrix-win-x64\Data\Packages\reforge\models\ControlNet\ip-adapter-plus_sdxl_vit-h.safetensors
-
-bytes:   847,517,512
-SHA-256: 3f5062b8400c94b7159665b21ba5c62acdcd7682262743d7f2aefedef00e6581
+character
+appearance
+composition
+situation
+style
+extra
 ```
 
-### CLIP ViT-H画像エンコーダ
+`joinPromptSections()`は前後の空白・端のカンマだけを処理し、内部のタグ順・重複・構文を変更しません。Prompt Serviceはこれを再利用してください。
 
-初回生成時の自動download待ちを避けるため、こちらも事前配置します。
+現在Web UIは最終Positiveを`body.prompt`として送信し、履歴復元用に以下も送ります。
+
+- `structuredPrompt`
+- `rawPromptOverride` boolean
+- `rawPrompt`
+- `appliedTriggerWords`
+- `negativePrompt`
+
+### 3.4 Settings
+
+既存defaultは`config.json`の`config.defaults`です。`src/server.js`の既存`validateSettings()`が次を正規化しています。
+
+- width / height
+- steps / cfgScale / seed
+- samplerName / scheduler / noiseSchedule
+- candidateCount
+- img2img / inpaint
+- hiresEnabled / hiresScale / hiresSteps / hiresDenoising / hiresUpscaler
+- 履歴用Checkpoint情報
+
+別のdefault定義を作らず、この検証処理をGeneration Serviceへ**移動して再利用**してください。
+
+### 3.5 ReForge・Capabilities
+
+既存`src/reforge.js`に次があります。
+
+- `listCheckpoints()`
+- `listSamplers()`
+- `listLoras()`
+- `switchCheckpoint()`
+- `generateImages()`
+- fallback sampler / scheduler
+
+インストール済みLoRAは`getInstalledLoras()`相当、つまり`listLoras()`と`civitai.mergeWithInstalled()`の既存経路を再利用します。
+
+### 3.6 History
+
+`createHistoryService()`は`JsonStore`を使用し、現在schemaVersion 2です。
+
+既存機能:
+
+- `addGeneration()`
+- `listPage({ favoritesOnly, limit, cursor })`
+- image ID cursor
+- 1〜100件制限
+- 古い履歴の読み出し時normalize
+
+保存済みgenerationには次が既に含まれます。
+
+- structuredPrompt
+- rawPromptOverride / rawPrompt
+- prompt / negativePrompt
+- effectivePrompt / effectiveNegativePrompt
+- settings / checkpoint metadata
+- loras / appliedTriggerWords
+- seed / images
+
+History schemaを上げたり全面Migrationしたりしないでください。
+
+### 3.7 アクセス制御
+
+- 既定bindは`127.0.0.1`。
+- `LOCAL_IMAGE_CHAT_HOST=0.0.0.0`ではLAN／Tailscaleへ公開可能。
+- 一般APIにログイン機能はない。
+- `/api/integrations`だけは既存integration key保護がある。
+
+`/api/v1`は既存一般APIと同じExpress app・同じbindへmountします。CORSを新規開放したり、新APIだけ別port・別server・保護迂回にしたりしないでください。
+
+## 4. 採用する構造
+
+原則として次を使用してください。
 
 ```text
-URL:
-https://huggingface.co/h94/IP-Adapter/resolve/main/models/image_encoder/model.safetensors
-
-配置先:
-C:\AI\StabilityMatrix-win-x64\Data\Packages\reforge\models\ControlNetPreprocessor\CLIP-ViT-H-14.safetensors
-
-bytes:   2,528,373,448
-SHA-256: 6ca9667da1ca9e0b0f75e46bb030f7e011f44f86cbfb8d5a36590fcd7507b030
+src/
+├─ api/
+│  └─ v1/
+│     ├─ router.js
+│     ├─ generations.js
+│     ├─ capabilities.js
+│     └─ history.js
+├─ services/
+│  ├─ generation-service.js
+│  └─ prompt-service.js
+├─ server.js
+├─ reforge.js
+├─ job-manager.js
+└─ history.js
 ```
 
-### 配置規則
+不要な既存ファイル移動は行わないでください。
 
-- 同名ファイルがあればsizeとSHA-256を先に確認し、一致なら再取得しない。
-- 不一致の既存ファイルは上書き・削除せず、停止して報告する。
-- 同一ディレクトリの`.part`へdownloadし、sizeとhash一致後だけ最終名へrenameする。
-- 0バイトまたは未検証の最終ファイルを残さない。Gitへ追加しない。
-- PID 5696を停止しない。
-- 配置後は`GET /controlnet/model_list?update=true`で再走査する。
-- 再走査しても認識しない場合、勝手にReForgeを再起動せず報告する。
+### 4.1 責務
 
-## 6. 変更対象（最大8ファイル）
+`src/api/v1/*`:
 
-1. `src/ip-adapter.js`（新規。検証・能力判定・unit構築）
-2. `src/reforge.js`
-3. `src/server.js`
-4. `src/history.js`（optionalな`generation.ipAdapter`の安全な正規化・永続化）
-5. `public/index.html`
-6. `public/app.js`
-7. `public/style.css`
-8. `test/server-integration.test.js`（純粋関数・UI契約・mock統合をこの1ファイルへ集約）
+- Express request/response
+- HTTP status
+- v1のエラー形式
+- DTO serialization
+- Application Service呼び出し
 
-`test/ip-adapter.test.js`は新規作成しません。これにより`src/history.js`を加えても8ファイル以内です。8ファイルを超える場合は実装を止めて理由を報告してください。`package.json`、lockfile、Task 09実装ファイルは変更禁止です。
+`src/services/prompt-service.js`:
 
-## 7. バックエンド
+- v1 PromptInputの検証
+- structured / rawの解決
+- positive / negative / modeの決定
+- DOM、Express、ReForge、Historyへ依存しない
 
-### 7.1 能力取得API
+`src/services/generation-service.js`:
 
-```text
-GET /api/reforge/ip-adapter/options
+- request validation
+- v1 requestから既存generation payloadへの変換
+- existing defaults適用
+- Job作成／取得／cancel
+- capabilities取得
+- Generation Runtime（既存performGeneration）の保持
+- ReForge／History／thumbnail／Discord／recoveryの既存処理のオーケストレーション
+
+`src/job-manager.js`:
+
+- queueと状態遷移だけを担当
+-責務を増やさない
+
+### 4.2 Generation Serviceの構築順
+
+循環依存を避けるため、同じファイルから次の2段階をexportして構いません。
+
+```js
+const runtime = createGenerationRuntime(dependencies);
+const jobs = createJobManager(runtime.executeWithRecovery);
+const generationService = createGenerationService({
+  jobs,
+  runtime,
+  config,
+  capabilityDependencies,
+  history,
+});
 ```
 
-短いtimeoutで次を照会します。
+役割:
 
-```text
-GET {reforgeUrl}/controlnet/module_list?alias_names=true
-GET {reforgeUrl}/controlnet/model_list?update=false
+- Runtime: 実際の1生成をReForge→保存→Historyまで実行
+- Service: API入力を正規化し、既存JobManagerへ投入・参照・cancel
+
+別queue、別worker、別History保存は作りません。
+
+## 5. 段階的な実装順
+
+### Phase A: 挙動を変えない抽出
+
+まず、現在`src/server.js`内にある次を`src/services/generation-service.js`へ**コピーではなく移動**してください。
+
+- `generateWithRecovery()`
+- `performGeneration()`
+- generation request/settings/mode/LoRA/structured prompt検証
+- source image / mask / IP-Adapter解決
+- generation固有の画像保存・履歴接続
+- generation固有のPrompt・LoRA合成補助
+- retry/recovery接続
+
+次は既存モジュールへ残します。
+
+- Express route定義
+- app/server lifecycle
+- `createJobManager()`本体
+- `src/reforge.js`のpayload構築・progress polling
+- `src/history.js`の保存normalize
+- thumbnail service
+- Discord service
+- experiment service
+
+抽出後、旧`POST /api/jobs`と旧`POST /api/generate`の既存テストを先に通してください。ここで挙動を変えないことが条件です。
+
+### Phase B: Prompt Service
+
+`src/services/prompt-service.js`へ、少なくとも次を追加してください。
+
+```js
+resolvePrompt(input)
 ```
 
-返却例:
+入力:
+
+```js
+{
+  structured?: {
+    character?: string,
+    appearance?: string,
+    composition?: string,
+    situation?: string,
+    style?: string,
+    extra?: string,
+  },
+  rawOverride?: string | null,
+  negative?: string,
+}
+```
+
+出力:
+
+```js
+{
+  structured,
+  rawOverride,
+  positive,
+  negative,
+  mode: "structured" | "raw",
+}
+```
+
+判定:
+
+- `rawOverride`が`null`／`undefined`以外の文字列ならraw mode。
+- raw modeの`positive`は`rawOverride`そのものを前後trimした値。
+- structured modeは`normalizeSections()`と`joinPromptSections()`を再利用。
+- `negative`は文字列として保持し、前後trim以外の変更をしない。
+- structured modeでは6項目を正規化したobjectを返す。
+- positiveが空のgeneration requestはGeneration Serviceで400にする。
+
+禁止:
+
+- タグ自動分類
+- 並び替え
+- 重複削除
+- 大文字小文字変更
+- LoRA構文や重み構文変更
+- 中身のカンマ正規化
+- 翻訳・AI補正
+
+### Phase C: API v1
+
+`app.use("/api/v1", createV1Router(...))`として同じExpress appへmountしてください。
+
+旧`/api/*`は削除・rename・レスポンス変更しません。
+
+## 6. v1 Generation Request契約
+
+初期完成範囲は安全な`txt2img`です。
 
 ```json
 {
-  "available": true,
-  "family": "sdxl",
-  "module": "CLIP-ViT-H (IPAdapter)",
-  "model": "ip-adapter-plus_sdxl_vit-h [hash]",
-  "message": "利用できます"
-}
-```
-
-要件:
-
-- moduleは完全一致。
-- modelはReForgeの実際の表示名からbasenameが`ip-adapter-plus_sdxl_vit-h`のものを選ぶ。hashを固定・推測しない。
-- `None`のみ、module不足、ReForge切断、timeout、JSON不正は`available:false`。
-- 能力取得失敗でアプリ起動やIP-Adapter無効の通常生成を止めない。
-- ローカル絶対パス、stack、巨大な全一覧をブラウザーへ返さない。
-- Checkpoint変更後は能力を再取得する。SD1.5時は利用不可にする。
-
-### 7.2 入力と検証
-
-概念形:
-
-```js
-ipAdapter: {
-  enabled: true,
-  weight: 0.65,
-  guidanceStart: 0,
-  guidanceEnd: 1,
-  referenceImageId: "履歴画像ID" // または
-  referenceImage: "data:image/...;base64,..." // または
-  referenceImageUrl: "/outputs/ip-adapter-reference_<hash>.png"
-}
-```
-
-- 参照指定は有効時に正確に1つ。0件・2件以上は入力エラー。
-- `enabled`はboolean。
-- weightは0〜2、既定0.65。
-- start/endは0〜1かつ`start < end`。
-- 画像は既存PNG/JPEG/WebP判定と20MB上限を再利用。
-- IDは既存`requireId()`と履歴解決を再利用。
-- URLは同一originの`/outputs/ip-adapter-reference_...`だけ。basename、拡張子、outputDir境界を検証する。
-- 任意URL、`file://`、絶対パス、`../`、別prefixのoutputs URLは禁止。
-- 有効なのに画像・module・modelが無い場合、ReForge生成前に日本語エラー。黙ってIP-Adapterなしで生成しない。
-- 無効時は参照画像とIP-AdapterパラメータをReForgeへ送らない。
-
-### 7.3 ReForge payload
-
-有効時だけ既存payloadへmergeします。
-
-```js
-payload.alwayson_scripts = {
-  ...(payload.alwayson_scripts ?? {}),
-  ControlNet: {
-    args: [{
-      enabled: true,
-      image: referenceBase64,
-      module: resolvedModule,
-      model: resolvedModel,
-      weight,
-      resize_mode: "Crop and Resize",
-      guidance_start: guidanceStart,
-      guidance_end: guidanceEnd,
-      pixel_perfect: false,
-      processor_res: -1,
-      threshold_a: -1,
-      threshold_b: -1,
-      control_mode: "Balanced",
-      save_detected_map: false
-    }]
+  "mode": "txt2img",
+  "prompt": {
+    "structured": {
+      "character": "1girl",
+      "appearance": "blonde hair",
+      "composition": "cowboy shot",
+      "situation": "ruined castle",
+      "style": "masterpiece, best quality",
+      "extra": ""
+    },
+    "rawOverride": null,
+    "negative": "lowres, worst quality"
+  },
+  "settings": {
+    "checkpoint": "example-model",
+    "width": 768,
+    "height": 1280,
+    "steps": 30,
+    "cfgScale": 4,
+    "sampler": "Euler a",
+    "scheduler": "SGM Uniform",
+    "seed": -1,
+    "candidateCount": 1,
+    "hires": {
+      "enabled": false,
+      "scale": 1.5,
+      "steps": 20,
+      "denoising": 0.4,
+      "upscaler": "R-ESRGAN 4x+ Anime6B"
+    }
+  },
+  "loras": [
+    {
+      "name": "example",
+      "weight": 0.7,
+      "enabled": true
+    }
+  ],
+  "metadata": {
+    "client": "web"
   }
-};
+}
 ```
 
-- script名はReForge公式テストと同じ`ControlNet`。
-- ReForgeへはdata URL prefixなしのbase64本体を渡す。
-- txt2imgに`init_images`を追加しない。
-- img2img/inpaintのinit image・maskとIP-Adapter imageを混同しない。
-- HiresはReForge既定の両pass適用。未検証の`hr_option`を追加しない。
-- 既存/将来の`alwayson_scripts`を丸ごと上書きしない。
-- 無効時のpayloadは変更前と同一。
-
-### 7.4 保存・履歴
-
-- upload画像は生成成功後だけ既存content-addressed保存を再利用し、`ip-adapter-reference_<hash>.<ext>`とする。
-- 同内容は再利用。失敗生成では保存しない。
-- 履歴JSONへbase64やローカル絶対パスを保存しない。
-- optionalな`generation.ipAdapter`へ、enabled、family、実module、実model、weight、start、end、referenceImageId/Urlを保存する。
-- API response、recipe、履歴復元、再生成、Hires.fixへ同じoptional構造を通す。
-- 古い履歴はIP-Adapter無効として正常に扱う。
-
-`src/history.js`の`normalizeGeneration()`へ、次のように専用normalizerを通したoptionalフィールドを追加してください。
-
-```js
-ipAdapter: normalizeIpAdapter(input.ipAdapter),
-```
-
-`normalizeIpAdapter()`の要件:
-
-- `null`、非object、`enabled !== true`は`null`。
-- 許可するのは、`enabled`、`family`、`module`、`model`、`weight`、`guidanceStart`、`guidanceEnd`、`referenceImageId`、`referenceImageUrl`だけ。
-- input全体を`structuredClone()`して保存しない。
-- `referenceImage`、`base64`、`buffer`、ローカル絶対パス、任意追加キーを保存しない。
-- 文字列長と数値範囲は`src/ip-adapter.js`の共通境界と一致させる。
-- `referenceImageId`と`referenceImageUrl`は生成時にサーバーが確定した安全な値だけを受け取り、両方同時に残す必要がなければ実際の由来に応じて片方を`null`にする。
-- 古い履歴にフィールドがなければ`null`。
-- 読み込み時にも同じnormalizerを通る現在の履歴構造を利用し、壊れた保存値でUIを落とさない。
-
-## 8. フロントエンド
-
-左カラムの「生成設定」アコーディオン内、「詳細設定」付近へコンパクトなIP-Adapterサブセクションを追加します。新画面・新カラムは作りません。
-
-表示:
-
-- 有効toggle、利用可否の補助テキスト
-- drop zone / file input / preview / 解除
-- Weight（range + 値、既定0.65）
-- Start（0.0）、End（1.0）
-- model名の読み取り専用表示（ellipsis + title）
-
-操作:
-
-- file input、click、drag & drop。acceptはPNG/JPEG/WebP。
-- ブラウザーでも20MB超を早期拒否するが、サーバー検証を残す。
-- previewは`object-fit:contain`。
-- Object URLを使う場合、差替え・解除・unload時にrevokeする。
-- base64画像をlocalStorageへ保存しない。
-- enabled/weight/start/endだけ既存自動保存方式またはlocalStorageへ保存可。
-- 再読込で画像がない場合、enabledだけを有効復元しない。
-- busy中は操作をdisabledにし、完了・失敗・中止後に戻す。
-- IP-Adapter参照とimg2img参照は必ず別state。片方の選択・解除で他方を変更しない。
-- 履歴復元時は設定と同一origin参照URLのpreviewを復元する。
-- 再生成・Hires.fixは元のIP-Adapter設定と参照画像を維持する。
-- 明示解除後の次回生成へ混入させない。
-
-### 中央の選択画像を参照に使用
-
-中央メインプレビューの既存画像操作領域へ、コンパクトな`IP参照`操作を追加してください。対象は現在中央に表示されている選択画像です。バリエーションサムネイル自体へボタンを増やしません。
-
-表示・アクセシビリティ:
-
-- ラベルは短く`IP参照`とする。
-- `title="この画像をIP-Adapter参照に使用"`。
-- `aria-label="この画像をIP-Adapter参照に使用"`。
-- 既存ツールバーが窮屈になる場合は、既存overflowメニューがあればそこへ入れる。新しい大きな行は作らない。
-- 選択画像がない場合は非表示またはdisabled。
-- 生成中はdisabled。
-- ライム背景の主要ボタンにはせず、既存の補助画像操作と同じ見た目にする。
-
-クリック時の処理:
+API境界で次へ変換します。
 
 ```text
-中央の選択画像
-→ 既存のimage IDをIP-Adapter参照stateへ設定
-→ IP-AdapterをON
-→ 生成設定とIP-Adapterサブセクションを開く
-→ 左カラム内でIP-Adapter設定が確認できる位置へ移動
-→ previewを表示
+prompt.structured       → structuredPrompt
+resolved positive       → prompt
+prompt.rawOverride      → rawPromptOverride=true + rawPrompt
+prompt.negative         → negativePrompt
+settings.sampler        → settings.samplerName
+settings.hires.enabled  → settings.hiresEnabled
+settings.hires.scale    → settings.hiresScale
+settings.hires.steps    → settings.hiresSteps
+settings.hires.denoising→ settings.hiresDenoising
+settings.hires.upscaler → settings.hiresUpscaler
 ```
 
-重要:
+未指定settingsは既存`config.defaults`と既存validationを利用します。
 
-- ブラウザーで原寸画像をfetchしてbase64へ変換し直さない。
-- 既存の`image.id`を`referenceImageId`として使う。
-- previewは既存の`thumbnailUrl`を優先し、なければ既存の安全な画像URL helperを使う。previewのためだけに原寸を再取得しない。
-- 生成直後の候補、バリエーション選択、右履歴から選択した画像のすべてで、現在中央に表示される画像IDを正しく取得する。
-- image IDが得られない古い項目では勝手にURL/base64方式へ落とさず、短いエラーを表示する。
-- IP-Adapter能力が利用不可の場合はONにせず、参照だけを黙って設定したように見せない。利用不可理由を表示する。
-- `event.stopPropagation()`を使い、IP参照クリックでメイン画像の拡大、画像選択、履歴選択を発火させない。
-- 生成モードをTXTからIMGへ切り替えない。
-- `initImageReference`、inpaint mask、img2img previewを変更しない。
-- 既に同じ画像が参照中なら重複stateを作らず、「この画像を参照中」と分かる状態にする。
-- 別画像を選ぶとIP-Adapter参照だけを置き換え、Weight / Start / Endは維持する。
-- ファイルuploadと中央画像指定の処理を個別実装せず、共通`setIpAdapterReference(...)`相当へ集約する。
+### 6.1 Mode
 
-見た目は既存の黒白＋落ち着いたライム。ライムは有効/成功だけ。大カード、発光、独自modalは作りません。本文は13px未満にしません。
+- v1初期版では`txt2img`を実装完了条件とする。
+- `img2img`／`inpaint`を安全なimage ID契約まで同時に実装できない場合、400 `UNSUPPORTED_MODE`で明示的に拒否する。
+- 任意filesystem pathや任意URLを受け取るだけの暫定実装は禁止。
+- 旧APIのimg2img／inpaintは変更しない。
 
-## 9. テスト
+### 6.2 Checkpoint
 
-### 純粋関数・履歴・UI契約テスト
+`settings.checkpoint`は任意文字列をReForgeへ素通ししないでください。
 
-新規テストファイルは作らず、以下を`test/server-integration.test.js`内の独立したtestとして追加します。巨大な1ケースへ詰め込まず、失敗理由が分かる単位へ分けてください。
+- `listCheckpoints()`の現在一覧と完全一致で解決する。
+- titleまたは公開用IDで指定できるようにする。
+- 見つからなければ400 `INVALID_CHECKPOINT`。
+- 指定がなければ現在active checkpointを使用。
+- queue実行時に対象checkpointがactiveでない場合だけ、既存`switchCheckpoint()`を使用する。
+- queueへ入る前の無秩序な切替は、別jobとの競合になるため禁止。
+- Historyへ保存するcheckpoint情報は実際に使用した正規化済み値にする。
 
-- hash付きSDXL Plus表示名の選択。
-- `None`のみ、module不足、切断はunavailable。
-- weight/start/end境界と`start < end`。
-- 参照0件・2件を拒否。
-- PNG/JPEG/WebP、破損、20MB超。
-- 任意URL、絶対パス、`../`、許可prefix外を拒否。
-- ControlNet unitの公式キー。
-- 無効時はalwaysonなし、既存alwaysonはmergeで維持。
-- HTMLにlabel、accept、利用可否live regionがある。
-- app.jsがimg2imgとは別stateを使い、Object URLの解放経路を持つ。
-- 中央`IP参照`操作が現在画像のIDを共通setterへ渡す。
-- `IP参照`クリックで拡大・画像選択のhandlerへ伝播しない。
-- 中央画像指定では原寸fetch、FileReader、base64変換を行わない。
-- 同一画像の再指定は重複せず、別画像への変更でもWeight / Start / Endを維持する。
-- 利用不可時はONにならず、img2img mode/stateも変化しない。
-- `normalizeGeneration()`が安全な`ipAdapter`だけを永続化し、base64・buffer・任意キーを捨てる。
-- `ipAdapter`なしの旧履歴、不正object、範囲外値を安全に扱う。
+既存Web UIのlegacy payloadには現在active checkpoint情報が入っています。既存生成で不要な切替が発生しないことをテストしてください。
 
-### mock ReForge統合
+### 6.3 LoRA
 
-`test/server-integration.test.js`のmockを拡張します。
+- nameは既存`validateLoras()`相当の制限を維持。
+- weightは既存0.05〜2、最大選択数を維持。
+- enabledを保持。
+- `<lora:...>`生成は既存`appendLoras()`経路を使用。
+- v1用にLoRA tag生成を別実装しない。
+- nameを任意ファイルパスとして扱わない。
 
-- 能力APIのmodule/model正規化。
-- txt2img + IP-Adapterの`alwayson_scripts.ControlNet.args[0]`。
-- txt2imgに`init_images`がない。
-- img2img/inpaintのinit/mask/IP imageが別。
-- 無効時の従来payload維持。
-- uploadは成功後URL化され、履歴にbase64がない。
-- recipe、再生成、古い履歴の互換。
-- 中央画像IDを参照指定した生成では、サーバーが履歴画像を安全に解決しControlNet imageへ渡す。
-- module/model不足時は生成endpointを呼ばない。
-- 既存通常生成、img2img、inpaint、Hires、cancelが通る。
+### 6.4 Client metadata
 
-テストは一時workspaceとmockのみ。実3030/7860/outputsを変更しません。
+- `metadata.client`は任意の短い識別子として受け付ける。
+- 最大40文字程度、制御文字不可。
+- `web`、`mcp`、`cli`を想定するが、client別に生成挙動を変えない。
+- Job metaへ保持する場合は`src/job-manager.js`の既存`normalizeMeta()`へ安全な文字列フィールドとして最小追加する。
+- 秘密情報、Prompt、パスをJob metaへ入れない。
 
-## 10. 実機smoke test
+## 7. Endpoint契約
 
-コードテスト後、2ファイルのhashと`model_list?update=true`の認識を確認します。認識された場合のみ、Local Image Chatを再起動せずReForge APIへ直接1回だけ実施可能です。
+### 7.1 GET `/api/v1/capabilities`
 
-- ReForge付属の安全な小fixture。
-- txt2img、512×512、4 steps、batch 1、固定Seed。
-- `save_images:false`、`do_not_save_samples:true`、`do_not_save_grid:true`。
-- 実際に返ったmodule/model名を使用。
-- HTTP 200、画像1枚、ReForgeログのIPAdapter適用を確認。
-- Local Image Chatの実履歴・実outputsへ保存しない。
-- OOM、不整合、timeout時は別モデルや設定を推測して自動再試行しない。
+Status: `200`
 
-## 11. 禁止事項
+最低限:
 
-- ReForge本体/builtin extension変更
-- npm/Python依存追加
-- FaceID、InstantID、SD1.5、複数unitのついで実装
-- base64の履歴/localStorage保存
-- 任意パス・任意URL受付
-- モデル不足時の通常生成fallback
-- img2img参照stateとの共有
-- Task 09便乗修正
-- 3030/7860の無断停止・再起動
-- 実outputs/履歴を使う自動テスト
-- 無関係な整形・全面リファクタリング・依存更新
+```json
+{
+  "checkpoints": [],
+  "samplers": [],
+  "schedulers": [],
+  "loras": [],
+  "defaults": {}
+}
+```
 
-## 12. 完了条件
+既存`listCheckpoints()`、`listSamplers()`、`getInstalledLoras()`相当を再利用してください。
 
-1. 公式model/encoderがbytes・SHA-256一致で配置済み。
-2. ReForge再走査でmodelを認識。
-3. UIで有効化、画像選択、preview、解除、weight/start/end操作が可能。
-4. 中央の現在画像を`IP参照`で設定でき、拡大・選択・img2img modeを誤発火しない。
-5. 中央画像指定はIDを使い、原寸fetchやbase64再変換をしない。
-6. txt2imgで適用される。
-7. img2img/inpaintと混同せず併用できる。
-8. 無効時の既存生成が不変。
-9. 未準備・不整合時は生成前に明示エラー。
-10. upload参照は成功後URL化され、履歴にbase64なし。
-11. 履歴・recipe・再生成・Hiresで実設定を維持。
-12. 古い履歴が正常。
-13. 任意パス、破損、巨大画像を拒否。
-14. Object URLを解放。
-15. mock統合でControlNet payloadを実証。
-16. 条件を満たす場合、実ReForge smoke test成功。
-17. Task 09差分、実outputs、3030/7860 PIDを変更しない。
-18. check、関連テスト、全テスト、diff checkが成功。
+公開DTO制約:
 
-## 13. 検証
+- Checkpointのローカル絶対`filename`を返さない。
+- LoRAのinstall path、preview path、registry内部パスを返さない。
+- Checkpointは`id/title/modelName/hash/active`程度。
+- LoRAは`name/displayName/recommendedWeight/favorite`など生成選択に必要な最小情報。
+- defaultsは既存`config.defaults`から公開可能な生成設定だけ。
+- ReForge由来の内部例外全文・stackを返さない。
+
+### 7.2 POST `/api/v1/generations`
+
+正常受付: `202 Accepted`
+
+```json
+{
+  "id": "既存JobManagerのUUID",
+  "status": "queued"
+}
+```
+
+- Prompt Serviceでpositiveを確定。
+- v1 requestを既存generation payloadへ変換。
+- Generation Serviceから既存`jobs.create()`へ投入。
+- 新しいqueueを作らない。
+- 受付前validation errorは400。
+
+### 7.3 GET `/api/v1/generations/:id`
+
+既存status名を維持します。
+
+running例:
+
+```json
+{
+  "id": "...",
+  "status": "running",
+  "progress": 0.62,
+  "message": "ReForgeで生成中"
+}
+```
+
+- v1の`progress`は0〜1へ変換する。
+- 既存legacy Job APIの0〜100は変更しない。
+
+done例:
+
+```json
+{
+  "id": "...",
+  "status": "done",
+  "progress": 1,
+  "result": {
+    "historyId": "generation UUID",
+    "images": []
+  }
+}
+```
+
+- `historyId`は既存resultの`generationId`。
+- imagesは既存thumbnailUrl/originalUrlを維持。
+- resultから絶対filesystem pathを除く。
+
+failed例:
+
+```json
+{
+  "id": "...",
+  "status": "failed",
+  "progress": 0.25,
+  "error": {
+    "code": "GENERATION_FAILED",
+    "message": "..."
+  }
+}
+```
+
+有効形式だが存在しないID: `404 JOB_NOT_FOUND`
+不正なID形式: `400 INVALID_REQUEST`
+
+### 7.4 POST `/api/v1/generations/:id/cancel`
+
+- queued/runningは既存`jobs.cancel()`を使用。
+- 成功は`200`でcancel後のv1 job DTOを返す。
+- 存在しないIDは404。
+- done/failed/cancelledは409 `JOB_NOT_CANCELLABLE`。
+- raceでcancel直前にterminalへ遷移した場合も409として安全に返す。
+
+旧`DELETE /api/jobs/:jobId`の既存挙動は変更しません。
+
+### 7.5 GET `/api/v1/history`
+
+既存`history.listPage()`をそのまま再利用します。
+
+query:
+
+```text
+limit    既存どおり既定20、最大100
+cursor   image ID cursor
+favorites=1 は維持してよい
+```
+
+response:
+
+```json
+{
+  "generations": [],
+  "limit": 20,
+  "total": 0,
+  "nextCursor": null,
+  "hasMore": false
+}
+```
+
+- 一覧へbase64を含めない。
+- imageはthumbnailUrl/originalUrlを返す。
+- `settings.checkpointFilename`など絶対pathをv1 DTOから除く。
+- Prompt、settings、LoRA、seed、画像情報は既存History互換の範囲で返す。
+- History schema、保存形式、既存`GET /api/history`は変更しない。
+
+## 8. エラー契約
+
+`/api/v1`だけ次へ統一します。
+
+```json
+{
+  "error": {
+    "code": "INVALID_REQUEST",
+    "message": "width must be greater than 0"
+  }
+}
+```
+
+最低限のcode:
+
+```text
+INVALID_REQUEST
+UNSUPPORTED_MODE
+INVALID_CHECKPOINT
+JOB_NOT_FOUND
+JOB_NOT_CANCELLABLE
+GENERATION_FAILED
+CAPABILITIES_UNAVAILABLE
+INTERNAL_ERROR
+```
+
+実装条件:
+
+- status/code/messageを持つ小さなError classまたはhelperをv1 router内で共通化。
+- routeごとに異なるエラーJSONを書かない。
+- stack trace、絶対path、ReForgeレスポンス全文をclientへ返さない。
+- server logにはmethod/path/codeと原因を残す。
+- malformed JSONも可能な範囲でv1 error形式へする。
+- `/api/v1/*`の未知routeは404の同形式。
+- 旧APIのエラー形式は変更しない。
+
+## 9. 既存APIの接続
+
+### 9.1 `POST /api/jobs`
+
+既存request/responseを一切変えず、内部だけ次へ寄せます。
+
+```text
+legacy route
+  → generationService.createLegacyJob(body, meta)
+  → existing jobs.create()
+```
+
+### 9.2 `POST /api/generate`
+
+削除しません。同期responseも変えません。
+
+```text
+legacy route
+  → generationService.generateLegacyNow(body, context)
+  → same Generation Runtime
+```
+
+完全統合が抽出リスクを大きくする場合でも、ReForge呼び出し・画像保存・History保存の巨大ロジックを2本作ることは禁止です。未統合の薄いadapterだけを残課題として報告してください。
+
+### 9.3 Web UI
+
+- `public/app.js`を`/api/v1`へ移行しない。
+- UI全面変更を行わない。
+- 既存`POST /api/jobs` pollingとcancelを維持。
+- Backend抽出によるUI回帰だけ既存テストで確認。
+
+## 10. セキュリティ
+
+- 任意shell commandを受け付けない。
+- 任意filesystem pathを受け付けない。
+- 任意URLをfetchしない。
+- v1 txt2imgへinit image pathを足さない。
+- Checkpoint／LoRAは現在のcapability一覧から安全に解決。
+- API responseへローカル絶対pathを出さない。
+- API responseへbase64画像を出さない。
+- client metadataを処理分岐、ファイル名、ログ注入へ使わない。
+- body sizeは既存Express JSON limitを維持し、今回拡大しない。
+- CORSを追加しない。
+- bind設定を変更しない。
+- 新APIだけReForge URLや内部configを公開しない。
+- stack traceを返さない。
+
+## 11. 変更対象
+
+想定変更:
+
+```text
+src/server.js
+src/job-manager.js                         （client metaを保持する場合のみ）
+src/services/prompt-service.js             新規
+src/services/generation-service.js         新規
+src/api/v1/router.js                       新規
+src/api/v1/generations.js                  新規
+src/api/v1/capabilities.js                 新規
+src/api/v1/history.js                      新規
+test/prompt-service.test.js                新規
+test/generation-service.test.js または test/api-v1.test.js
+test/server-integration.test.js            実配線確認を既存fixtureへ最小追加する場合
+test/job-manager.test.js                   client meta変更時のみ
+package.json                               npm run check対象追加のみ
+```
+
+原則13ファイル以内。13ファイルを超える場合は、実装を続ける前に理由と追加対象を報告してください。
+
+原則変更禁止:
+
+```text
+public/index.html
+public/app.js
+public/style.css
+src/reforge.js
+src/history.js
+src/json-store.js
+src/migrations.js
+data/*
+config.local.json
+package-lock.json
+ReForge本体
+```
+
+既存ロジックを安全に移動するため、`src/reforge.js`または`src/history.js`のexport調整が本当に必要な場合だけ、先に理由を報告してください。History schema変更は認めません。
+
+## 12. テスト
+
+### 12.1 Prompt Service
+
+必須:
+
+1. 6項目を指定順で結合
+2. 一部空欄
+3. structured全空欄
+4. 改行を含む値
+5. 日本語
+6. `<lora:name:0.7>`を無変更
+7. `(tag:1.2)`など重み構文を無変更
+8. rawOverrideあり
+9. rawOverrideなし
+10. negative保持
+11. タグ重複を勝手に削除しない
+12. 大文字小文字を変更しない
+
+### 12.2 Generation Service
+
+実`createJobManager()`とstub runtimeを使用して確認:
+
+1. v1 requestをlegacy payloadへ正しく変換
+2. existing defaults適用
+3. sampler alias
+4. nested hires alias
+5. metadata.client保持
+6. Job Managerへ1回だけ投入
+7. 同じ入力が同じresolved Promptになる
+8. raw mode
+9. invalid width/height/steps/cfg/seed
+10. invalid LoRA
+11. unknown checkpoint拒否
+12. arbitrary path／URLフィールドを採用しない
+
+### 12.3 API v1
+
+一時portの小さいExpress app、または既存隔離server fixtureを使う:
+
+1. `GET /api/v1/capabilities` 200
+2. responseに絶対pathがない
+3. `POST /api/v1/generations`正常request→202
+4. 不正request→400統一error
+5. `GET /api/v1/generations/:id` queued/running
+6. done→historyId/images
+7. failed→構造化error
+8. 存在しないJob→404
+9. queued cancel→200/cancelled
+10. terminal cancel→409
+11. `GET /api/v1/history` pagination
+12. history responseにbase64／絶対pathなし
+13. unknown v1 route→404統一error
+14. stack traceを返さない
+
+### 12.4 回帰
+
+既存テストで最低限確認:
+
+- legacy `/api/jobs`
+- legacy `/api/generate`
+- img2img / inpaint / Hires
+- IP-Adapter
+- recovery retry
+- History保存・復元
+- thumbnail/original URL
+- Web UI job polling/cancel
+
+## 13. 検証コマンド
 
 ```powershell
 npm run check
-node --test test/server-integration.test.js test/ui-shell.test.js
+node --test test/prompt-service.test.js test/generation-service.test.js test/api-v1.test.js
+node --test test/job-manager.test.js test/server-integration.test.js test/server-recovery.test.js test/ui-shell.test.js
 npm test
 git diff --check
-
-Get-NetTCPConnection -LocalPort 3030,7860 -State Listen |
-  Select-Object LocalPort,OwningProcess
-
-Invoke-RestMethod "http://127.0.0.1:7860/controlnet/module_list?alias_names=true"
-Invoke-RestMethod "http://127.0.0.1:7860/controlnet/model_list?update=true"
+git status --short
 ```
 
-2モデルファイルは`Get-FileHash -Algorithm SHA256`とLengthを報告してください。
+実際のファイル名に合わせて存在する関連テストだけ指定してください。
 
-## 14. 作業後の報告
+`package.json`の`check`へ次の新規JSを明示追加してください。
 
-- 変更ファイルと内容
-- model/encoderの配置先、bytes、SHA-256
-- ReForgeが返したmodule/model名
-- 能力API仕様
-- UI配置、state分離、保存
-- ControlNet unit（base64は伏せる）
-- 参照画像のURL化、履歴、復元
-- 未準備・不整合時の挙動
-- テストとsmoke test結果
-- 3030/7860 PIDが前後不変
-- 実outputs/履歴を変更していないこと
-- FaceID、複数unit、SD1.5が未対応であること
+- `src/services/prompt-service.js`
+- `src/services/generation-service.js`
+- `src/api/v1/router.js`
+- `src/api/v1/generations.js`
+- `src/api/v1/capabilities.js`
+- `src/api/v1/history.js`
+
+### 13.1 endpoint smoke
+
+実3030ではなく隔離serverで確認:
+
+```text
+GET  /api/v1/capabilities
+POST /api/v1/generations
+GET  /api/v1/generations/:id
+POST /api/v1/generations/:id/cancel
+GET  /api/v1/history
+```
+
+mock ReForgeを使用し、実GPU・実outputs・実historyを変更しないでください。
+
+## 14. 禁止事項
+
+- 新規リポジトリ
+- MCP Server本体
+- MCP→GUI／DOM／browser automation
+- MCP→ReForge直接接続
+- 新queue／新Job Manager
+- ReForge generation payloadの複製
+- History二重保存
+- UI全面改修
+- DB導入
+- History全面Migration／schema bump
+- server.js完全分割
+- ReForge abstraction全面刷新
+- OpenAPI完全整備
+- 認証全面刷新
+- Civitai／Discord／LoRA管理／比較APIのついで整理
+- 新規依存
+- CORS開放
+- 任意path／URL／shell受付
+- base64画像をv1 response/historyへ格納
+- 無関係なformat変更
+- 実3030／7860の無断停止・再起動
+- 実outputs／historyを使う自動テスト
+
+## 15. 完了条件
+
+1. `/api/v1`routerが存在する。
+2. capabilities、generation作成、status、cancel、historyが存在する。
+3. generation作成は既存JobManagerを使う。
+4. 新queueを作っていない。
+5. ReForge呼び出し・画像保存・History保存を複製していない。
+6. Prompt ServiceがDOM／Express非依存。
+7. structured promptを正しい順で解決する。
+8. Raw Prompt Overrideを解決する。
+9. backendが実際のpositiveを確定する。
+10. existing defaultsを再利用する。
+11. Checkpoint／LoRAを安全に解決する。
+12. v1 responseにbase64／絶対path／stackがない。
+13. 一貫したv1 error形式。
+14. History schema・旧履歴互換を維持。
+15. 旧`/api/jobs`、`/api/generate`を維持。
+16. 既存UIを変更・破壊していない。
+17. img2img／inpaint／Hires／IP-Adapterのlegacy回帰なし。
+18. client別に生成挙動を変えていない。
+19. MCP固有ロジックがない。
+20. 単体・API・回帰テストが追加されている。
+21. `npm run check`成功。
+22. `npm test`成功。
+23. `git diff --check`成功。
+24. 実3030／7860、実outputs／historyを変更していない。
+
+## 16. 作業後の報告
+
+次だけを具体的に報告してください。
+
+### 変更ファイル
+
+- 一覧
+- 各ファイルの責務と変更内容
+
+### 既存構成の確認結果
+
+- 旧生成経路
+- Job Manager
+- ReForge
+- History
+- Prompt
+
+### Application Service
+
+- Runtimeへ移した処理
+- Serviceが担当する処理
+- 旧API／v1が同じ処理へ合流する場所
+
+### API
+
+各endpointについて:
+
+- method/path
+- request
+- response
+- status code
+- error code
+
+### Prompt
+
+- structured結合
+- raw override
+- negative
+- LoRAとの接続
+
+### Generation
+
+- Job Manager投入
+- Checkpoint解決・切替
+- ReForge呼び出し
+- 画像保存
+- History保存
+
+### 後方互換性
+
+- `/api/jobs`
+- `/api/generate`
+- UI
+- History
+- img2img/inpaint/Hires/IP-Adapter
+
+### Tests / Verification
+
+- 追加テスト
+- 全コマンドとpassed/failed件数
+- 実環境を変更していない証拠
+
+### 残課題
+
+必ず明記:
+
+- Web UIの`/api/v1`移行
+- v1 img2img／inpaint（今回未対応なら）
+- MCP Server
+- OpenAPI
+- legacy adapterの残存箇所
+
+## 17. 実装停止条件
+
+次の場合は推測で進めず、変更前またはその時点で設計監督へ報告してください。
+
+- 13ファイルを超える。
+- History schema bumpが必要に見える。
+- ReForge payloadを別実装しないと進められない。
+- UI変更が必要に見える。
+- 任意path／URL受付が必要に見える。
+- 新依存が必要に見える。
+- 実3030／7860を再起動しないとテストできない。
+- 既存`performGeneration()`を共通Runtimeへ移せず、巨大生成ロジックが2本になる。
+
+## 18. Luna向け補足：実装時の重要ルール
+
+この節は本文の補足です。本文と解釈が競合する場合は、本文の具体的なAPI契約・変更範囲・停止条件を正本として優先してください。
+
+### 18.1 最優先は既存挙動を変えない共通化
+
+今回作るものは新しい画像生成機能ではありません。次を同じGeneration Runtimeへ収束させるための基盤です。
+
+```text
+既存 POST /api/jobs
+既存 POST /api/generate
+新規 POST /api/v1/generations
+将来 MCP
+          │
+          ▼
+同じGeneration Runtime
+```
+
+別系統のqueue、ReForge生成、画像保存、History保存を作らないでください。
+
+Phase 1の入力と出力は次でなければなりません。
+
+```text
+同じ入力
+  → 同じvalidation
+  → 同じReForge request
+  → 同じ画像保存
+  → 同じHistory
+  → 同じresult
+```
+
+### 18.2 Phase 1へ機能改善を混ぜない
+
+Generation Runtime抽出と同時に、次を変更しないでください。
+
+- request schema全面変更
+- History形式変更
+- ReForge request形式変更
+- Job Manager設計変更
+- Prompt仕様変更
+- legacy APIのエラー形式変更
+- default値変更
+- legacy settings名称変更
+
+抽出後に旧API回帰を確認し、失敗が残っている状態でPrompt Serviceや`/api/v1`の実装へ進まないでください。
+
+Phase 1の確認対象:
+
+```text
+POST /api/jobs
+GET /api/jobs/:id
+DELETE /api/jobs/:id
+POST /api/generate
+txt2img
+img2img
+inpaint
+Hires.fix
+IP-Adapter
+History
+cancel
+```
+
+現行のlegacy cancelは`DELETE /api/jobs/:jobId`です。存在しない`POST /api/jobs/:id/cancel`へ変更・追加しないでください。
+
+### 18.3 generation-service.jsを第二のserver.jsにしない
+
+循環依存は禁止です。
+
+```text
+generation-service.js → server.jsをimport
+server.js → generation-service.jsをimport
+```
+
+上記のような構造にしないでください。
+
+Serviceが`server.js`のmutable globalを暗黙参照する構造も避け、必要な依存だけをfactory引数等で明示してください。
+
+候補:
+
+- config
+- history service
+- thumbnail service
+- Discord service
+- experiment service
+- ReForge adapter functions
+- Ollama functions
+- output directory
+- Job Manager
+
+DI frameworkやservice containerは追加しません。既存ES moduleと小さなfactoryで十分です。
+
+Generation Serviceはオーケストレーション層です。queue、AbortController管理、ReForge HTTP、History storageの仕組み自体を取り込み直さないでください。
+
+現在、原画像保存は`performGeneration()`内にあります。抽出時はその既存処理をRuntimeとともに移して構いませんが、保存方式の再設計や別実装は行わないでください。Thumbnailは既存serviceを呼びます。
+
+### 18.4 Promptロジックの正本を1つにする
+
+第一候補は既存`public/structured-prompt.js`のDOM非依存関数をBackendから再利用することです。
+
+```js
+normalizeSections()
+joinPromptSections()
+```
+
+`src/services`から`public`への依存が、実際の抽出後構造で明らかに不自然になる場合だけ、純粋PromptロジックをBrowser／Backend双方からimportできる共通モジュールへ**移動**して構いません。
+
+禁止:
+
+- Browser版とBackend版のコピー
+- 2つの`PROMPT_FIELDS`
+- 2つの`joinPromptSections()`
+- UIとAPIで異なるRaw Override判定
+
+Prompt仕様の正本は常に1つにしてください。
+
+入力文字列に対して、次を行いません。
+
+- タグ順変更
+- 重複タグ削除
+- AI分類・修正
+- 翻訳
+- capitalization変更
+- LoRA構文変更
+- weight構文変更
+- 内部空白の正規化
+- 過剰なcomma正規化
+
+変更してよいのは、既存仕様にある各section端の処理と、6項目の順序付き結合だけです。
+
+```text
+character → appearance → composition → situation → style → extra
+```
+
+Raw Prompt Overrideはstructuredより必ず優先します。
+
+### 18.5 API DTOはallowlistで組み立てる
+
+Capabilities、Job result、Historyの公開DTOは、内部objectのclone後に危険fieldをdeleteする方式を避けてください。
+
+推奨:
+
+```js
+return {
+  id,
+  title,
+  modelName,
+  hash,
+  active,
+};
+```
+
+のように公開fieldを明示するallowlist方式です。
+
+次を`/api/v1`responseへ含めません。
+
+```text
+C:\AI\...
+C:\stable-diffusion\...
+checkpointFilename
+installPath
+absolute image path
+absolute LoRA path
+ReForge working directory
+内部config
+stack trace
+base64 image
+```
+
+画像は既存のimage ID、`thumbnailUrl`、`originalUrl`を使用してください。
+
+History DTOの最低限候補:
+
+```text
+id
+createdAt
+title（存在する場合）
+prompt.structured
+prompt.rawPromptOverride
+prompt.effectivePrompt
+prompt.negativePrompt
+settings.checkpoint（公開identifier）
+settings.width / height / steps / cfgScale
+settings.sampler / scheduler / seed
+loras
+images
+```
+
+既存Historyに存在しない値を推測して生成する必要はありません。
+
+### 18.6 Checkpoint identifierは1種類
+
+`GET /api/v1/capabilities`が返すCheckpointの公開`id`を、`POST /api/v1/generations`の`settings.checkpoint`へそのまま渡せるようにしてください。
+
+```text
+capabilities.checkpoints[].id
+        ↓ same value
+generation.settings.checkpoint
+```
+
+公開identifierをtitle／modelName／filename／pathの複数推測にしないでください。
+
+- 公開`id`を1種類決める。
+- Generation Serviceは現在一覧の公開`id`と完全一致で解決する。
+- 内部で対応するcanonical titleを取得する。
+- 任意pathをReForgeへ渡さない。
+- 不一致は400 `INVALID_CHECKPOINT`。
+
+Checkpoint切替はrequest受付時ではなく、そのJobがqueue内で`running`になった後、ReForge生成直前に行います。
+
+```text
+Job A: checkpoint X
+Job B: checkpoint Y
+```
+
+が待機中に互いのCheckpointを変更しないよう、既存queueの直列性を利用してください。
+
+### 18.7 Job状態とprogressの正本
+
+Job Manager内部statusは変更しません。
+
+```text
+queued
+running
+done
+failed
+cancelled
+```
+
+新APIだけ`done`を`completed`へ変換しないでください。
+
+progressをv1で0〜1にする処理はDTO境界だけです。
+
+```js
+progress: job.progress / 100
+```
+
+Job Manager内部と旧`/api/jobs`の0〜100仕様は変更しません。
+
+### 18.8 client metadataは情報だけ
+
+`metadata.client`は保持して構いませんが、次のような生成分岐は禁止です。
+
+```js
+if (client === "mcp") {
+  // 別のPrompt・settings・ReForge処理
+}
+```
+
+`web`、`mcp`、`cli`の同じGenerationRequestは同じ意味・同じRuntimeになります。
+
+### 18.9 txt2img以外を無理にv1へ入れない
+
+v1初期完成範囲はtxt2imgです。
+
+img2img／inpaintの安全なasset transportが未設計なら、400で次を返してください。
+
+```json
+{
+  "error": {
+    "code": "UNSUPPORTED_MODE",
+    "message": "This mode is not available in API v1"
+  }
+}
+```
+
+次の暫定入力は禁止です。
+
+```json
+{ "imagePath": "C:\\..." }
+{ "imageUrl": "https://arbitrary-site/..." }
+{ "imageBase64": "..." }
+```
+
+将来のasset upload／asset ID APIは別タスクです。既存legacy APIのimg2img／inpaintは維持します。
+
+### 18.10 API routeは薄く、error mappingは境界で行う
+
+routeは次の程度に留めます。
+
+```js
+router.post("/generations", async (request, response) => {
+  const result = await generationService.create(request.body);
+  response.status(202).json(result);
+});
+```
+
+route内へ次を書かないでください。
+
+- Checkpoint切替
+- ReForge payload構築
+- 画像保存
+- History保存
+- Prompt結合
+- queue実装
+
+既存内部moduleのError形式を全面変更せず、v1 API境界でvalidation／checkpoint／job／generation errorを公開Errorへ変換します。
+
+### 18.11 実環境を汚さず、小さいdiffを優先
+
+テスト対象:
+
+```text
+temporary workspace
+temporary port
+mock/stub Ollama
+mock/stub ReForge
+temporary history
+temporary outputs
+```
+
+変更禁止:
+
+```text
+実3030
+実7860
+実outputs
+実history
+実config
+CSS
+UI構造
+無関係な変数名
+大量formatting
+History schema
+ReForge module設計
+依存
+package-lock
+```
+
+### 18.12 指示と現コードが食い違う場合
+
+推測で設計を拡大しないでください。
+
+最終報告へ次を記載します。
+
+1. 何がCURRENT_TASKの想定と違ったか。
+2. 指示どおりに進めると何が危険だったか。
+3. どの既存挙動を正本としたか。
+4. 代わりに行った最小変更。
+
+13ファイル上限や他の停止条件へ該当する場合は、変更を増やす前に設計監督へ確認してください。
+
+### 18.13 完了時の必須提出物
+
+本文16節の報告に加え、次を明確に分けて提出してください。
+
+1. `git diff --stat`と追加／変更／削除ファイル。
+2. Runtime抽出前後のcall flow。
+3. `POST /api/jobs`と`POST /api/generate`が通るService／Runtime。
+4. v1全5 endpointのrequest／response／status／error。
+5. structured／Raw Overrideの共通化方法。
+6. Capabilities／History DTOのallowlist。
+7. Checkpoint公開IDとqueue内切替。
+8. path／base64／stack漏洩防止。
+9. 追加テストとpassed／failed件数。
+10. `npm run check`、`npm test`、`git diff --check`の結果。
+11. 実3030／7860、実outputs／historyを変更していないこと。
+12. 意図的に未対応とした次の項目。
+
+```text
+v1 img2img
+v1 inpaint
+asset API
+Web UIのv1移行
+MCP Server
+OpenAPI
+```
+
+このタスクの成功条件は単なるendpoint追加ではありません。旧Web UI、旧API、新v1 API、将来MCPが、既存挙動を維持した同じGeneration Runtimeへ自然に収束できる構造であることです。

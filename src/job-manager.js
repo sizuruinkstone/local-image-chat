@@ -13,7 +13,7 @@ export function createJobManager(execute, { retentionMs = 60 * 60 * 1000 } = {})
     const source = meta ?? {};
     const text = (value, max) => (typeof value === "string" && value.trim() ? value.trim().slice(0, max) : null);
     const count = (value) => (Number.isFinite(Number(value)) ? Number(value) : null);
-    return {
+    const normalized = {
       kind: source.kind === "comparison" ? "comparison" : "generation",
       label: text(source.label, 120) ?? "",
       experimentId: text(source.experimentId, 80),
@@ -21,6 +21,9 @@ export function createJobManager(execute, { retentionMs = 60 * 60 * 1000 } = {})
       index: count(source.index),
       total: count(source.total)
     };
+    const client = text(source.client, 40);
+    if (client) normalized.client = client;
+    return normalized;
   }
 
   function create(payload, meta = {}) {
