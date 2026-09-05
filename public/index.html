@@ -326,6 +326,13 @@
                     <span>生成設定</span>
                     <span id="generationSettingsSummary" class="generationSettingsSummary">--</span>
                   </summary>
+                  <div class="settingsRow generationRuntimeRow">
+                    <label for="runtimeSelect">Runtime</label>
+                    <select id="runtimeSelect" disabled>
+                      <option value="reforge">ReForge</option>
+                    </select>
+                    <p id="runtimeStatus" class="hint" aria-live="polite">Runtimeを取得中…</p>
+                  </div>
                   <div class="settingsRow generationCheckpointRow">
                     <label for="checkpointSelect">Checkpoint</label>
                     <div class="checkpointToolbar">
@@ -525,6 +532,11 @@
                     <span id="generateProgressText" aria-live="polite">生成中…</span>
                     <button id="cancelGenerateButton" class="dangerButton smallButton" type="button">中止</button>
                   </div>
+                  <fieldset class="contentRatingControl" aria-label="ギャラリー分類">
+                    <legend>分類</legend>
+                    <label><input id="contentRatingGeneral" type="radio" name="contentRating" value="general" checked /><span>一般</span></label>
+                    <label><input id="contentRatingNsfw" type="radio" name="contentRating" value="nsfw" /><span>NSFW</span></label>
+                  </fieldset>
                   <div class="generateActionRow">
                     <div class="candidateStepper">
                       <span class="candidateStepperLabel" id="candidateCountLabel">生成枚数</span>
@@ -752,6 +764,11 @@
                   <button id="galleryAllButton" class="galleryQuickFilter active" type="button" aria-pressed="true">すべて</button>
                   <button id="galleryFavoriteButton" class="galleryQuickFilter" type="button" aria-pressed="false">お気に入り</button>
                 </div>
+                <div id="galleryRatingFilter" class="galleryQuickFilters galleryRatingFilters" role="group" aria-label="コンテンツ分類で絞り込み">
+                  <button class="galleryQuickFilter active" type="button" data-gallery-rating="all" aria-pressed="true">全分類</button>
+                  <button class="galleryQuickFilter" type="button" data-gallery-rating="general" aria-pressed="false">一般</button>
+                  <button class="galleryQuickFilter" type="button" data-gallery-rating="nsfw" aria-pressed="false">NSFW</button>
+                </div>
                 <button id="galleryCompareModeButton" class="secondary" type="button" aria-pressed="false">比較モード</button>
               </div>
               <div id="galleryCompareModeBar" class="galleryCompareModeBar hidden" aria-live="polite">
@@ -777,6 +794,15 @@
                     <button class="galleryKind" type="button" data-gallery-kind="favorite" aria-pressed="false">Favorite</button>
                     <button class="galleryKind" type="button" data-gallery-kind="normal" aria-pressed="false">通常生成</button>
                     <button class="galleryKind" type="button" data-gallery-kind="experiment" aria-pressed="false">比較実験</button>
+                  </div>
+                  <div class="galleryFilterSection">
+                    <span class="galleryFilterSectionLabel">コンテンツ分類</span>
+                    <div id="galleryRatingDialogFilter" class="galleryKindFilter" role="group" aria-label="コンテンツ分類で絞り込み">
+                      <button class="galleryKind active" type="button" data-gallery-rating="all" aria-pressed="true">すべて</button>
+                      <button class="galleryKind" type="button" data-gallery-rating="general" aria-pressed="false">一般</button>
+                      <button class="galleryKind" type="button" data-gallery-rating="nsfw" aria-pressed="false">NSFW</button>
+                      <button class="galleryKind" type="button" data-gallery-rating="unrated" aria-pressed="false">未分類</button>
+                    </div>
                   </div>
                   <div class="galleryFilterGrid">
                     <label>Checkpoint<select id="galleryCheckpoint"><option value="">すべて</option></select></label>
@@ -1027,6 +1053,7 @@
                 </div>
                 <div class="loraToolbar">
                   <input id="loraSearch" type="search" placeholder="LoRAを検索" aria-label="LoRAを検索" />
+                  <button id="loraFolderButton" class="ghost smallButton" type="button">フォルダ</button>
                   <select id="loraCompatibilityFilter" aria-label="現在のCheckpointとの互換性で絞り込み">
                     <option value="all">すべて</option>
                     <option value="compatible">対応のみ</option>
@@ -1038,7 +1065,26 @@
                 </div>
                 <p id="loraStatus" class="hint" aria-live="polite">LoRAを取得中…</p>
                 <div class="loraWorkspace">
-                  <div id="loraList" class="loraList"></div>
+                  <aside id="loraFolderPane" class="loraFolderPane" aria-label="LoRAフォルダ">
+                    <div class="loraFolderPaneHeader">
+                      <strong>フォルダ</strong>
+                      <span class="hint">保存場所</span>
+                    </div>
+                    <div class="loraRootBar">
+                      <span class="loraRootLabel">LoRAルート:</span>
+                      <span id="loraRootPath" class="loraRootPath">確認中…</span>
+                      <span id="loraRootBadge" class="loraRootBadge">確認中</span>
+                      <button id="openLoraRootButton" class="ghost smallButton" type="button">LoRAフォルダを開く</button>
+                    </div>
+                    <div id="loraFolderTree" class="loraFolderTree" role="tree" aria-label="LoRAフォルダ一覧"></div>
+                  </aside>
+                  <div class="loraListPane" aria-label="LoRA一覧">
+                    <div class="loraListHeader">
+                      <div id="loraListBreadcrumb" class="loraListBreadcrumb">LoRA / すべて</div>
+                      <p id="loraListCount" class="loraListCount" aria-live="polite">0件</p>
+                    </div>
+                    <div id="loraList" class="loraList"></div>
+                  </div>
                   <aside id="loraPreview" class="loraPreview" aria-live="polite" aria-label="LoRAプレビュー"></aside>
                 </div>
                 <div id="selectedLoraSummary" class="selectedLoraSummary">LoRAなし</div>
@@ -1048,12 +1094,6 @@
               <details id="civitaiDetails">
                 <summary>Civitai URLからLoRAを追加</summary>
                 <p class="hint">モデルページURLを貼ると、対応バージョン・Trigger Words・保存先を確認してReForgeへ配置します。</p>
-                <div class="loraRootBar">
-                  <span class="loraRootLabel">LoRAルート:</span>
-                  <span id="loraRootPath" class="loraRootPath">確認中…</span>
-                  <span id="loraRootBadge" class="loraRootBadge">確認中</span>
-                  <button id="openLoraRootButton" class="ghost smallButton" type="button">LoRAフォルダを開く</button>
-                </div>
                 <label>Civitaiモデルページ
                   <div class="clearableField clearableInput">
                     <input id="civitaiUrl" type="url" placeholder="https://civitai.com/models/..." />
@@ -1077,6 +1117,7 @@
                   </label>
                   <label>APIキー（必要な場合だけ）
                     <input id="civitaiToken" type="password" autocomplete="off" placeholder="非公開・制限付きモデル用" />
+                    <span class="hint">サーバー側にAPIキーを設定済みの場合は空欄で利用できます。ここへの入力はこのブラウザーセッションだけの一時上書きです。</span>
                   </label>
                 </div>
                 <label id="civitaiNewFolderRow" class="hidden">新規フォルダ名

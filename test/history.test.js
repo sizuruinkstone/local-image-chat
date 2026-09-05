@@ -294,3 +294,78 @@ test("履歴を画像単位で20件ずつページングし、重複なく最後
   assert.equal(favorites.generations.flatMap((item) => item.images).every((image) => image.favorite), true);
   await assert.rejects(() => history.listPage({ cursor: "../20" }), /カーソルが不正/);
 });
+
+test("contentRatingをgeneration単位で保存・分類し、絞り込み後に正しくページングする", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "local-image-chat-history-rating-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const history = createHistoryService(directory);
+
+  const general = await history.addGeneration({
+    id: "generation-general",
+    contentRating: "general",
+    images: [
+      { id: "image-general-1", filename: "g1.png", imageUrl: "/outputs/g1.png", seed: 1, favorite: true },
+      { id: "image-general-2", filename: "g2.png", imageUrl: "/outputs/g2.png", seed: 2 }
+    ]
+  });
+  const nsfw = await history.addGeneration({
+    id: "generation-nsfw",
+    contentRating: "nsfw",
+    images: [
+      { id: "image-nsfw-1", filename: "n1.png", imageUrl: "/outputs/n1.png", seed: 3, favorite: true },
+      { id: "image-nsfw-2", filename: "n2.png", imageUrl: "/outputs/n2.png", seed: 4 }
+    ]
+  });
+  assert.equal(general.contentRating, "general");
+  assert.equal(nsfw.contentRating, "nsfw");
+
+  const first = await history.listPage({ contentRating: "nsfw", limit: 1 });
+  assert.equal(first.total, 2);
+  assert.equal(first.generations[0].images[0].id, "image-nsfw-1");
+  assert.equal(first.hasMore, true);
+  const second = await history.listPage({ contentRating: "nsfw", limit: 1, cursor: first.nextCursor });
+  assert.equal(second.generations[0].images[0].id, "image-nsfw-2");
+  assert.equal(second.hasMore, false);
+
+  const favoriteNsfw = await history.listPage({ favoritesOnly: true, contentRating: "nsfw" });
+  assert.equal(favoriteNsfw.total, 1);
+  assert.equal(favoriteNsfw.generations[0].images[0].id, "image-nsfw-1");
+
+  const changed = await history.setContentRating("image-general-2", "nsfw");
+  assert.equal(changed.generationId, "generation-general");
+  assert.deepEqual(changed.imageIds, ["image-general-1", "image-general-2"]);
+  assert.equal((await history.getGeneration("generation-general")).contentRating, "nsfw");
+  assert.equal((await history.getGeneration("generation-nsfw")).contentRating, "nsfw", "他generationは変更しない");
+  await assert.rejects(() => history.setContentRating("image-general-1", "unrated"), /contentRatingが不正/);
+  await assert.rejects(() => history.listPage({ contentRating: "broken" }), /ratingが不正/);
+});
+
+test("古い履歴のcontentRating欠落・不明値はunratedとして読み、新規省略時はgeneralになる", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "local-image-chat-history-unrated-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const history = createHistoryService(directory);
+  const created = await history.addGeneration({
+    id: "generation-default",
+    images: [{ id: "image-default-1", filename: "default.png", imageUrl: "/outputs/default.png", seed: 1 }]
+  });
+  assert.equal(created.contentRating, "general");
+
+  const file = path.join(directory, "history.json");
+  const data = JSON.parse(await fs.readFile(file, "utf8"));
+  data.generations.unshift(
+    {
+      id: "generation-legacy",
+      images: [{ id: "image-legacy-1", filename: "legacy.png", imageUrl: "/outputs/legacy.png", seed: 2 }]
+    },
+    {
+      id: "generation-broken",
+      contentRating: "adult-ish",
+      images: [{ id: "image-broken-1", filename: "broken.png", imageUrl: "/outputs/broken.png", seed: 3 }]
+    }
+  );
+  await fs.writeFile(file, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+
+  const unrated = await history.listPage({ contentRating: "unrated" });
+  assert.equal(unrated.total, 2);
+  assert.deepEqual(unrated.generations.map((item) => item.contentRating), ["unrated", "unrated"]);
+});

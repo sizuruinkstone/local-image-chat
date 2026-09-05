@@ -16,13 +16,9 @@ import {
 } from "./experiments.js";
 import { checkOllama, createPrompt } from "./ollama.js";
 import {
-  checkReforge,
-  getIpAdapterOptions,
   listCheckpoints,
-  listLoras,
   listSamplers,
-  refreshLoras,
-  switchCheckpoint
+  refreshLoras
 } from "./reforge.js";
 import { appendUniqueTags, normalizePromptBoosts } from "./services/prompt-service.js";
 import { buildGrokShareMarkdown, createAiShareService } from "./ai-share.js";
@@ -40,10 +36,17 @@ import { describeBinding, resolveServerBinding } from "./net-info.js";
 import { createPromptTemplateService } from "./prompt-template.js";
 import { createJobManager } from "./job-manager.js";
 import { createCivitaiService } from "./civitai.js";
+import { createCivitaiTokenResolver } from "./civitai-token.js";
 import { createUpdater } from "./updater.js";
 import { createThumbnailService } from "./thumbnails.js";
 import { acquireInstanceLock, InstanceAlreadyRunningError } from "./instance-lock.js";
 import { createStorageSettingsService } from "./storage-settings.js";
+import { createReferenceAssetBodyParser } from "./api/v1/assets.js";
+import {
+  createReferenceAssetService,
+  createReferenceImageResolver,
+  isReferenceAssetId
+} from "./reference-assets.js";
 import {
   createGenerationRuntime,
   createGenerationService,
@@ -137,6 +140,8 @@ await migrateDataFiles(dataDir);
 const history = createHistoryService(dataDir, {
   limit: config.storage?.historyLimit ?? 500
 });
+const referenceAssets = createReferenceAssetService({ outputDir, dataDir });
+await referenceAssets.ensureStorage();
 const thumbnails = createThumbnailService({ outputDir, thumbnailDir });
 const civitai = createCivitaiService({
   dataDir,
@@ -158,7 +163,15 @@ const discord = createDiscordService({
   webhookFromEnv: process.env.LOCAL_IMAGE_CHAT_DISCORD_WEBHOOK ?? "",
   webhookFromConfig: config.discord?.webhookUrl ?? ""
 });
+const resolveCivitaiToken = createCivitaiTokenResolver(
+  process.env.LOCAL_IMAGE_CHAT_CIVITAI_TOKEN
+);
 const resolveOutputImagePath = createOutputImagePathResolver(outputDir);
+const resolveReferenceImage = createReferenceImageResolver({
+  history,
+  referenceAssets,
+  resolveOutputImagePath
+});
 const generationDependencies = {
   config,
   history,
@@ -166,9 +179,11 @@ const generationDependencies = {
   discord,
   experiments: null,
   outputDir,
-  resolveOutputImagePath
+  resolveOutputImagePath,
+  resolveReferenceImage
 };
 const generationRuntime = createGenerationRuntime(generationDependencies);
+const runtimeRegistry = generationRuntime.registry;
 const jobs = createJobManager(generationRuntime.executeWithRecovery);
 const experiments = createExperimentService(dataDir, {
   jobs,
@@ -180,6 +195,8 @@ const generationService = createGenerationService({
   runtime: generationRuntime,
   config,
   history,
+  resolveReferenceImage,
+  runtimeRegistry,
   capabilityDependencies: {
     listCheckpoints: (reforgeConfig) => listCheckpoints(reforgeConfig),
     listSamplers: (reforgeConfig) => listSamplers(reforgeConfig),
@@ -188,6 +205,7 @@ const generationService = createGenerationService({
 });
 
 const app = express();
+app.use("/api/v1/assets/images", createReferenceAssetBodyParser());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.static(path.join(rootDir, "public")));
 const immutableImageStaticOptions = {
@@ -197,6 +215,9 @@ const immutableImageStaticOptions = {
   immutable: true,
   fallthrough: false
 };
+app.use("/outputs/.reference-assets", (_request, response) => {
+  response.status(404).end();
+});
 app.use("/outputs", express.static(outputDir, immutableImageStaticOptions));
 app.use("/favorites", express.static(favoritesDir, immutableImageStaticOptions));
 
@@ -214,7 +235,7 @@ app.use(
     }
   })
 );
-app.use("/api/v1", createV1Router({ generationService }));
+app.use("/api/v1", createV1Router({ generationService, referenceAssets }));
 app.use(createV1ErrorMiddleware());
 
 app.get("/api/config", (_request, response) => {
@@ -231,6 +252,8 @@ app.get("/api/config", (_request, response) => {
       }
     },
     defaults: config.defaults,
+    runtimes: runtimeRegistry.listDescriptors(),
+    defaultRuntimeId: runtimeRegistry.defaultRuntimeId,
     ollamaModel: config.ollama.model,
     lora: {
       defaultWeight: config.lora?.defaultWeight ?? 0.7,
@@ -242,6 +265,20 @@ app.get("/api/config", (_request, response) => {
       branch: config.github?.branch ?? "main"
     }
   });
+});
+
+app.get("/api/runtimes", async (_request, response) => {
+  try {
+    const health = await runtimeRegistry.healthAll();
+    response.json({
+      runtimes: runtimeRegistry.listDescriptors().map((descriptor) =>
+        mergeRuntimeHealthDescriptor(descriptor, health[descriptor.id])
+      ),
+      defaultRuntimeId: runtimeRegistry.defaultRuntimeId
+    });
+  } catch (error) {
+    response.status(503).json({ error: "Runtimeの接続状態を確認できません" });
+  }
 });
 
 app.get("/api/storage/settings", async (_request, response) => {
@@ -281,13 +318,16 @@ app.patch("/api/storage/settings", async (request, response) => {
 });
 
 app.get("/api/health", async (_request, response) => {
-  const [ollama, reforge] = await Promise.allSettled([
-    checkOllama(config.ollama),
-    checkReforge(config.reforge)
+  const [ollama, runtimes] = await Promise.all([
+    Promise.allSettled([checkOllama(config.ollama)]),
+    runtimeRegistry.healthAll()
   ]);
+  const ollamaResult = ollama[0];
+  const reforge = runtimes.reforge ?? { ok: false, error: "ReForgeへ接続できません" };
   response.json({
-    ollama: ollama.status === "fulfilled" ? ollama.value : { ok: false, error: ollama.reason.message },
-    reforge: reforge.status === "fulfilled" ? reforge.value : { ok: false, error: reforge.reason.message }
+    ollama: ollamaResult.status === "fulfilled" ? ollamaResult.value : { ok: false, error: "Ollamaへ接続できません" },
+    reforge,
+    runtimes
   });
 });
 
@@ -304,46 +344,70 @@ app.post("/api/prompt", async (request, response) => {
   }
 });
 
-app.get("/api/loras", async (_request, response) => {
+app.get("/api/loras", async (request, response) => {
   try {
-    response.json({ loras: await getInstalledLoras() });
+    const provider = runtimeRegistry.resolve(request.query.runtimeId);
+    const loras = await provider.listLoras();
+    response.json({ loras: await civitai.mergeWithInstalled(loras) });
   } catch (error) {
-    response.status(500).json({ error: readableError(error) });
+    response.status(error?.statusCode ?? 500).json({ error: readableError(error) });
   }
 });
 
 // Sampler / Schedulerの候補。ReForgeが落ちていても既定値で選択できるようにする。
-app.get("/api/samplers", async (_request, response) => {
+app.get("/api/samplers", async (request, response) => {
   try {
-    response.json(await listSamplers(config.reforge));
+    response.json(await runtimeRegistry.resolve(request.query.runtimeId).listSamplers());
   } catch (error) {
-    response.status(500).json({ error: readableError(error) });
+    response.status(error?.statusCode ?? 500).json({ error: readableError(error) });
   }
 });
 
-app.get("/api/reforge/ip-adapter/options", async (_request, response) => {
-  response.json(await getIpAdapterOptions(config.reforge));
+app.get("/api/reforge/ip-adapter/options", async (request, response) => {
+  try {
+    response.json(await runtimeRegistry.resolve(request.query.runtimeId).getIpAdapterOptions());
+  } catch (error) {
+    response.status(error?.statusCode ?? 500).json({ error: readableError(error) });
+  }
 });
 
-app.get("/api/checkpoints", async (_request, response) => {
+app.get("/api/checkpoints", async (request, response) => {
   try {
-    response.json(await listCheckpoints(config.reforge));
+    response.json(await runtimeRegistry.resolve(request.query.runtimeId).listCheckpoints());
   } catch (error) {
-    response.status(500).json({ error: readableError(error) });
+    response.status(error?.statusCode ?? 500).json({ error: readableError(error) });
+  }
+});
+
+app.post("/api/checkpoints/refresh", async (request, response) => {
+  try {
+    const provider = runtimeRegistry.resolve(request.query.runtimeId);
+    const checkpoints = typeof provider.refreshCheckpoints === "function"
+      ? await provider.refreshCheckpoints()
+      : await provider.listCheckpoints();
+    response.json(checkpoints);
+  } catch (error) {
+    response.status(error?.statusCode ?? 500).json({ error: readableError(error) });
   }
 });
 
 app.post("/api/checkpoints/select", async (request, response) => {
   try {
     const selected = requireText(request.body.checkpoint, "Checkpoint");
-    const available = await listCheckpoints(config.reforge);
+    const provider = runtimeRegistry.resolve(request.body.runtimeId);
+    if (provider.descriptor.id !== "reforge") {
+      const checkpoint = await provider.resolveV1Checkpoint(selected);
+      response.json({ checkpoint: checkpoint.id });
+      return;
+    }
+    const available = await provider.listCheckpoints();
     const checkpoint = available.checkpoints.find((item) =>
       [item.title, item.modelName, item.filename].some((value) => value === selected)
     );
     if (!checkpoint) throw new Error("選択したCheckpointがReForgeに見つかりません");
-    response.json(await switchCheckpoint(config.reforge, checkpoint.title));
+    response.json(await provider.switchCheckpoint(checkpoint.title));
   } catch (error) {
-    response.status(500).json({ error: readableError(error) });
+    response.status(error?.statusCode ?? 500).json({ error: readableError(error) });
   }
 });
 
@@ -400,9 +464,15 @@ app.post("/api/loras/:uid/move", async (request, response) => {
   }
 });
 
-app.post("/api/loras/refresh", async (_request, response) => {
+app.post("/api/loras/refresh", async (request, response) => {
   try {
-    const loras = await refreshLoras(config.reforge);
+    const provider = runtimeRegistry.resolve(request.query.runtimeId);
+    // 各Runtimeに正式な再走査処理があれば使用する。ReForgeの既存経路も維持する。
+    const loras = provider.descriptor.id === "reforge"
+      ? await refreshLoras(config.reforge)
+      : typeof provider.refreshLoras === "function"
+        ? await provider.refreshLoras()
+        : await provider.listLoras();
     response.json({ loras: await civitai.mergeWithInstalled(loras) });
   } catch (error) {
     response.status(500).json({ error: readableError(error) });
@@ -435,7 +505,7 @@ app.post("/api/lora/open-root", async (_request, response) => {
 app.post("/api/civitai/inspect", async (request, response) => {
   try {
     const url = requireText(request.body.url, "Civitai URL");
-    const metadata = await civitai.inspect(url, sanitizeSecret(request.body.token));
+    const metadata = await civitai.inspect(url, resolveCivitaiToken(request.body.token));
     response.json({ metadata });
   } catch (error) {
     response.status(500).json({ error: readableError(error) });
@@ -454,7 +524,7 @@ app.post("/api/civitai/check-duplicate", async (request, response) => {
   try {
     response.json(await civitai.checkDuplicate({
       url: requireText(request.body.url, "Civitai URL"),
-      token: sanitizeSecret(request.body.token),
+      token: resolveCivitaiToken(request.body.token),
       category: textOrDefault(request.body.category, "style"),
       folder: typeof request.body.folder === "string" ? request.body.folder : ""
     }));
@@ -464,10 +534,14 @@ app.post("/api/civitai/check-duplicate", async (request, response) => {
 });
 
 app.post("/api/civitai/install", async (request, response) => {
+  const requestedRuntimeId = typeof request.body?.runtimeId === "string"
+    ? request.body.runtimeId.trim()
+    : "";
+  const runtimeId = requestedRuntimeId || runtimeRegistry.defaultRuntimeId;
   try {
     const result = await civitai.install({
       url: requireText(request.body.url, "Civitai URL"),
-      token: sanitizeSecret(request.body.token),
+      token: resolveCivitaiToken(request.body.token),
       category: textOrDefault(request.body.category, "style"),
       folder: typeof request.body.folder === "string" ? request.body.folder : "",
       overwrite: request.body.overwrite === true,
@@ -475,19 +549,18 @@ app.post("/api/civitai/install", async (request, response) => {
       filename: typeof request.body.filename === "string" ? request.body.filename : "",
       confirmMove: request.body.confirmMove === true
     });
-    const loras = await refreshLoras(config.reforge);
     response.json({
       ...result,
-      loras: await civitai.mergeWithInstalled(loras)
+      loras: await listLorasForRuntime(runtimeId)
     });
   } catch (error) {
-    response.status(500).json({ error: readableError(error) });
+    response.status(500).json({ error: readableError(error, runtimeLabelForId(runtimeId)) });
   }
 });
 
 app.post("/api/civitai/refresh-registrations", async (request, response) => {
   try {
-    const result = await civitai.refreshRegistrations(sanitizeSecret(request.body.token));
+    const result = await civitai.refreshRegistrations(resolveCivitaiToken(request.body.token));
     response.json(result);
   } catch (error) {
     response.status(500).json({ error: readableError(error) });
@@ -498,6 +571,7 @@ app.get("/api/history", async (request, response) => {
   try {
     const page = await history.listPage({
       favoritesOnly: request.query.favorites === "1",
+      contentRating: request.query.rating,
       limit: request.query.limit,
       cursor: request.query.cursor
     });
@@ -514,11 +588,21 @@ app.get("/api/images/:imageId/thumbnail", async (request, response) => {
   let image = null;
   let imagePaths = null;
   try {
-    image = await history.getImage(requireId(request.params.imageId));
+    const imageId = requireId(request.params.imageId);
+    if (isReferenceAssetId(imageId)) {
+      const thumbnailPath = await referenceAssets.resolveAssetPath(imageId, "thumbnail");
+      await sendImmutableImage(request, response, thumbnailPath, { allowDotfiles: true });
+      return;
+    }
+    image = await history.getImage(imageId);
     imagePaths = thumbnails.pathsFor(image);
     const { thumbnailPath } = await thumbnails.ensure(image);
     await sendImmutableImage(request, response, thumbnailPath);
   } catch (error) {
+    if (isReferenceAssetId(request.params.imageId)) {
+      response.status(404).json({ error: "参照画像が見つかりません" });
+      return;
+    }
     if (image) {
       console.warn(
         `[Thumbnail] action=serve imageId=${image.id}`
@@ -538,7 +622,13 @@ app.get("/api/images/:imageId/thumbnail", async (request, response) => {
 
 app.get("/api/images/:imageId/original", async (request, response) => {
   try {
-    const image = await history.getImage(requireId(request.params.imageId));
+    const imageId = requireId(request.params.imageId);
+    if (isReferenceAssetId(imageId)) {
+      const originalPath = await referenceAssets.resolveAssetPath(imageId, "original");
+      await sendImmutableImage(request, response, originalPath, { allowDotfiles: true });
+      return;
+    }
+    const image = await history.getImage(imageId);
     const originalPath = resolveOutputImagePath(image.filename);
     await fs.access(originalPath);
     await sendImmutableImage(request, response, originalPath);
@@ -600,6 +690,19 @@ app.get("/api/history/:imageId/discord", async (request, response) => {
     response.json({ discord: await discord.getState(requireId(request.params.imageId)) });
   } catch (error) {
     response.status(404).json({ error: readableError(error) });
+  }
+});
+
+app.patch("/api/history/:imageId/content-rating", async (request, response) => {
+  try {
+    const result = await history.setContentRating(
+      requireId(request.params.imageId),
+      request.body?.contentRating
+    );
+    response.json(result);
+  } catch (error) {
+    const notFound = /履歴にありません/.test(String(error?.message ?? ""));
+    response.status(notFound ? 404 : 400).json({ error: readableError(error) });
   }
 });
 
@@ -766,12 +869,16 @@ app.get("/api/jobs", (_request, response) => {
 });
 
 app.post("/api/jobs", (request, response) => {
-  const body = request.body ?? {};
-  const job = generationService.createLegacyJob(body, {
-    kind: "generation",
-    label: describeGenerationJob(body)
-  });
-  response.status(202).json({ job });
+  try {
+    const body = request.body ?? {};
+    const job = generationService.createLegacyJob(body, {
+      kind: "generation",
+      label: describeGenerationJob(body)
+    });
+    response.status(202).json({ job });
+  } catch (error) {
+    response.status(error?.statusCode ?? 400).json({ error: readableError(error) });
+  }
 });
 
 // ヘッダー右上のキュー表示用。通常生成と比較実験をまとめて返す。
@@ -983,7 +1090,7 @@ app.post("/api/generate", async (request, response) => {
       report: () => {}
     }));
   } catch (error) {
-    response.status(500).json({ error: readableError(error) });
+    response.status(error?.statusCode ?? 500).json({ error: readableError(error) });
   }
 });
 
@@ -1172,8 +1279,18 @@ function numberOrNull(value) {
   return Number.isFinite(number) ? number : null;
 }
 
-async function getInstalledLoras() {
-  return civitai.mergeWithInstalled(await listLoras(config.reforge));
+async function listLorasForRuntime(runtimeId = runtimeRegistry.defaultRuntimeId) {
+  const provider = runtimeRegistry.resolve(runtimeId);
+  const loras = provider.descriptor.id === "reforge"
+    ? await refreshLoras(config.reforge)
+    : await provider.listLoras();
+  return civitai.mergeWithInstalled(loras);
+}
+
+async function getInstalledLoras(runtimeId = "reforge") {
+  const provider = runtimeRegistry.resolve(runtimeId);
+  const installed = await provider.listLoras();
+  return civitai.mergeWithInstalled(installed);
 }
 
 // shellを経由せず、確定済みディレクトリパスだけを引数として渡す。
@@ -1215,7 +1332,7 @@ function validateInstallMode(value) {
   return INSTALL_MODES.includes(value) ? value : "auto";
 }
 
-async function sendImmutableImage(request, response, filePath) {
+async function sendImmutableImage(request, response, filePath, { allowDotfiles = false } = {}) {
   const stats = await fs.stat(filePath);
   const etag = `W/"${stats.size.toString(16)}-${Math.trunc(stats.mtimeMs).toString(16)}"`;
   response.set({
@@ -1226,6 +1343,11 @@ async function sendImmutableImage(request, response, filePath) {
   });
   if (request.headers["if-none-match"] === etag) {
     response.status(304).end();
+    return;
+  }
+  if (allowDotfiles) {
+    // Reference Assetはドットディレクトリ配下だが、ID検証済みの固定APIだけに限定する。
+    response.sendFile(filePath, { dotfiles: "allow" });
     return;
   }
   response.sendFile(filePath);
@@ -1313,10 +1435,34 @@ function textOrDefault(value, fallback) {
   return typeof value === "string" && value.trim() ? value.trim().slice(0, 100) : fallback;
 }
 
-function readableError(error) {
+function mergeRuntimeHealthDescriptor(descriptor, health) {
+  const live = health && typeof health === "object" && !Array.isArray(health) ? health : {};
+  const online = live.ok === true && live.available !== false;
+  const merged = {
+    ...descriptor,
+    available: online,
+    ok: online
+  };
+  if (typeof live.error === "string" && live.error.trim()) {
+    merged.error = live.error.trim().slice(0, 200);
+  }
+  return merged;
+}
+
+function runtimeLabelForId(runtimeId) {
+  try {
+    return runtimeRegistry.resolve(runtimeId).descriptor.label;
+  } catch {
+    return "";
+  }
+}
+
+function readableError(error, runtimeLabel = "") {
   if (error?.name === "TimeoutError") return "処理がタイムアウトしました";
   if (error?.name === "AbortError" || /中止/.test(error?.message ?? "")) return "処理を中止しました";
-  if (error?.cause?.code === "ECONNREFUSED") return "接続できません。OllamaとReForgeが起動しているか確認してください";
+  if (error?.cause?.code === "ECONNREFUSED") {
+    return runtimeLabel ? `${runtimeLabel}へ接続できません` : "接続できません。OllamaとReForgeが起動しているか確認してください";
+  }
   return error?.message ?? "不明なエラーが発生しました";
 }
 

@@ -205,6 +205,7 @@ const NOW = Date.parse("2026-07-27T12:00:00.000Z");
 const GENERATIONS = [
   {
     id: "g1",
+    contentRating: "nsfw",
     createdAt: "2026-07-27T09:00:00.000Z",
     description: "夜の秋葉原",
     prompt: "1girl, neon",
@@ -241,6 +242,12 @@ test("履歴を画像単位へ平坦化して絞り込む", () => {
   assert.deepEqual(
     filterGalleryEntries(entries, { lora: "characters/saileach_il" }).map((e) => e.image.id),
     ["i1", "i2"]
+  );
+  assert.deepEqual(filterGalleryEntries(entries, { rating: "nsfw" }).map((e) => e.image.id), ["i1", "i2"]);
+  assert.deepEqual(filterGalleryEntries(entries, { rating: "unrated" }).map((e) => e.image.id), ["i3"]);
+  assert.deepEqual(
+    filterGalleryEntries(entries, { kind: "favorite", rating: "nsfw" }).map((e) => e.image.id),
+    ["i1"]
   );
 });
 
@@ -345,6 +352,21 @@ test("絞り込み条件を1行で説明する", () => {
   const text = describeGalleryFilter({ kind: "favorite", checkpoint: "wai", query: "夜" }, 10, 3);
   assert.equal(text, "3/10枚・Favorite・Checkpoint: wai・検索: 夜");
   assert.equal(describeGalleryFilter({ kind: "all" }, 5, 5), "5/5枚");
+  assert.equal(describeGalleryFilter({ rating: "nsfw" }, 5, 2), "2/5枚・NSFW");
+});
+
+test("生成分類UIとギャラリー分類UIはHistory APIへ明示値を接続する", async () => {
+  const html = await fs.readFile("public/index.html", "utf8");
+  const app = await fs.readFile("public/app.js", "utf8");
+  assert.match(html, /id="contentRatingGeneral"[^>]*value="general"[^>]*checked/);
+  assert.match(html, /id="contentRatingNsfw"[^>]*value="nsfw"/);
+  assert.match(html, /data-gallery-rating="general"/);
+  assert.match(html, /data-gallery-rating="nsfw"/);
+  assert.match(html, /data-gallery-rating="unrated"/);
+  assert.match(app, /contentRating:\s*selectedContentRating\(\)/);
+  assert.match(app, /localImageChat\.contentRating/);
+  assert.match(app, /rating=\$\{encodeURIComponent\(galleryFilter\.rating\)\}/);
+  assert.match(app, /\/content-rating`, \{ contentRating \}/);
 });
 
 test("生成画面はプロンプト・キャンバス・履歴の3カラム構造を持つ", async () => {
@@ -707,4 +729,30 @@ test("設定画面はTask 04/05の保存方式と既存イベントを維持す�
   assert.match(app, /activateSettingsCategory\("lora",\s*\{\s*targetId:\s*"settingsLoraDetails"/);
   assert.match(html, /id="discordDetails"[\s\S]*?id="discordGenerationAutoSend"[\s\S]*?id="saveDiscordSettingsButton"/);
   assert.match(html, /id="titleGenerationDetails"[\s\S]*?id="titleGenerationMode"[\s\S]*?id="titleTemplate"/);
+});
+
+test("Task25のLoRAブラウザーは共有ツリー・相対場所・狭幅導線を持つ", async () => {
+  const html = await fs.readFile("public/index.html", "utf8");
+  const app = await fs.readFile("public/app.js", "utf8");
+  const css = await fs.readFile("public/style.css", "utf8");
+  const catalog = await fs.readFile("public/preset-catalog.js", "utf8");
+
+  const folderPane = html.match(/<aside id="loraFolderPane"[\s\S]*?id="loraFolderTree"[\s\S]*?\/aside>/)?.[0] ?? "";
+  assert.match(folderPane, /id="openLoraRootButton"/);
+  assert.match(folderPane, /role="tree"/);
+  for (const id of ["loraFolderButton", "loraListBreadcrumb", "loraListCount"]) {
+    assert.match(html, new RegExp(`id="${id}"`), `${id} should exist`);
+  }
+  assert.match(catalog, /export function buildLoraFolderTree\(items = \[\]\)/);
+  assert.match(catalog, /export function filterItemsByFolder\(items = \[\], selectedFolder = ""\)/);
+  assert.match(catalog, /export function formatLoraRelativeLocation\(item\)/);
+  assert.match(app, /function renderLoraFolderTree\(container, items/);
+  assert.match(app, /filterItemsByFolder\(installedLoras, selectedLoraFolder\)/);
+  assert.match(app, /formatLoraRelativeLocation\(lora\)/);
+  assert.match(app, /folderBrowser:\s*true/);
+  assert.match(app, /function shouldUseLoraDetailModal\(\)/);
+  assert.match(css, /\.loraWorkspace\s*\{[\s\S]*?minmax\(180px, 220px\)[\s\S]*?minmax\(280px, 1fr\)[\s\S]*?minmax\(280px, 1fr\)/);
+  assert.match(css, /\.loraPickerBody \.pickerThumb img\s*\{\s*object-fit:\s*contain/);
+  assert.match(css, /@media \(max-width: 1099px\)[\s\S]*?\.loraFolderPane,[\s\S]*?\.loraPreview\s*\{\s*display:\s*none/);
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.loraToolbar\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\)/);
 });

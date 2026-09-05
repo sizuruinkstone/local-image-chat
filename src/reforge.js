@@ -448,7 +448,7 @@ function img2imgRefineDimensions(width, height, scale) {
 
 export function normalizeLora(item) {
   if (!item || typeof item.name !== "string") return null;
-  const name = item.name.trim();
+  const name = normalizeLoraIdentifier(item.name);
   if (!name) return null;
   const alias = typeof item.alias === "string" ? item.alias.trim() : "";
   const folder = inferLoraFolder(item, name);
@@ -461,6 +461,15 @@ export function normalizeLora(item) {
   };
 }
 
+function normalizeLoraIdentifier(value) {
+  const raw = String(value ?? "").trim();
+  const normalized = normalizePath(raw);
+  if (!normalized || /^[a-z]:\//i.test(normalized) || normalized.startsWith("/")
+    || normalized.split("/").some((segment) => segment === "." || segment === "..")
+    || /[\u0000-\u001f\u007f]/.test(normalized)) return "";
+  return raw.slice(0, 400);
+}
+
 function inferLoraFolder(item, name) {
   const normalizedName = normalizePath(name);
   const nameFolder = dirname(normalizedName);
@@ -470,9 +479,8 @@ function inferLoraFolder(item, name) {
   if (!normalizedPath) return "";
 
   const marker = normalizedPath.match(/(?:^|\/)(?:lora|loras|lycoris)(?:\/|$)/i);
-  const relativePath = marker
-    ? normalizedPath.slice((marker.index ?? 0) + marker[0].length)
-    : normalizedPath.split("/").slice(-2).join("/");
+  if (!marker) return "";
+  const relativePath = normalizedPath.slice((marker.index ?? 0) + marker[0].length);
   return dirname(relativePath);
 }
 

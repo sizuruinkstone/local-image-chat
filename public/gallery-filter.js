@@ -10,6 +10,14 @@ export const GALLERY_KIND_LABELS = {
   experiment: "比較実験"
 };
 
+export const GALLERY_RATINGS = ["all", "general", "nsfw", "unrated"];
+export const GALLERY_RATING_LABELS = {
+  all: "すべて",
+  general: "一般",
+  nsfw: "NSFW",
+  unrated: "未分類"
+};
+
 const STRUCTURED_POSITIVE_FIELDS = [
   "character", "appearance", "composition", "situation", "style", "extra"
 ];
@@ -107,6 +115,11 @@ function matchesKind(entry, kind) {
   return true;
 }
 
+function entryContentRating(entry) {
+  const value = entry.generation?.contentRating;
+  return value === "general" || value === "nsfw" ? value : "unrated";
+}
+
 function matchesSince(entry, since) {
   if (!since) return true;
   const createdAt = Date.parse(entry.generation?.createdAt ?? "");
@@ -145,6 +158,7 @@ function matchesQuery(entry, query) {
 
 export function filterGalleryEntries(entries = [], {
   kind = "all",
+  rating = "all",
   checkpoint = "",
   lora = "",
   period = "",
@@ -156,6 +170,7 @@ export function filterGalleryEntries(entries = [], {
   const selectedTags = Array.isArray(tags) ? tags.filter((tag) => text(tag)) : [];
   return entries.filter((entry) => {
     if (!matchesKind(entry, kind)) return false;
+    if (rating !== "all" && entryContentRating(entry) !== rating) return false;
     if (checkpoint && text(entry.generation?.settings?.checkpoint) !== text(checkpoint)) return false;
     if (lora && !(entry.generation?.loras ?? []).some((item) => text(item?.name) === text(lora))) return false;
     if (!matchesSince(entry, since)) return false;
@@ -183,6 +198,7 @@ export function sortGalleryEntries(entries = [], sort = "newest") {
 export function describeGalleryFilter(filter = {}, total = 0, shown = 0) {
   const parts = [`${shown}/${total}枚`];
   if (filter.kind && filter.kind !== "all") parts.push(GALLERY_KIND_LABELS[filter.kind] ?? filter.kind);
+  if (filter.rating && filter.rating !== "all") parts.push(GALLERY_RATING_LABELS[filter.rating] ?? filter.rating);
   if (filter.checkpoint) parts.push(`Checkpoint: ${filter.checkpoint}`);
   if (filter.lora) parts.push(`LoRA: ${filter.lora}`);
   if (filter.period) parts.push({ today: "今日", week: "7日以内", month: "30日以内" }[filter.period] ?? filter.period);

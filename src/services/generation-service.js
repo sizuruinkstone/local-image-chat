@@ -18,7 +18,13 @@ import {
 } from "../reforge.js";
 import { isComparableParameter } from "../experiments.js";
 import { hashOutputImage, sha256OfBuffer } from "../content-hash.js";
-import { applyPromptWeights, dedupeLoraTags, sameLoraName } from "../../public/lora-tags.js";
+import {
+  applyPromptWeights,
+  dedupeLoraTags,
+  parseLoraTags,
+  removeLoraTags,
+  sameLoraName
+} from "../../public/lora-tags.js";
 import {
   buildGenerationTitle,
   normalizeManualTitle,
@@ -26,11 +32,18 @@ import {
   normalizeTitleTemplate
 } from "../../public/history-title.js";
 import { ipAdapterReferenceFilename, validateIpAdapter } from "../ip-adapter.js";
+import {
+  HistoryGenerationNotFoundError,
+  normalizeNewContentRating,
+  requireHistoryContentRatingFilter,
+  requireNewContentRating
+} from "../history.js";
 import { appendUniqueTags, normalizePromptBoosts, resolvePrompt } from "./prompt-service.js";
 import { PROMPT_FIELDS } from "../../public/structured-prompt.js";
+import { createGenerationRuntimeRegistry } from "../generation-runtimes.js";
 
 const MAX_INIT_IMAGE_BYTES = 20 * 1024 * 1024;
-const DERIVATION_TYPES = ["same-seed", "lora", "outfit", "background", "expression", "duplicate"];
+const DERIVATION_TYPES = ["same-seed", "lora", "outfit", "background", "expression", "duplicate", "ai-workflow"];
 const INSTALL_MODES = ["auto", "reuse", "metadata", "rename", "move"];
 const LORA_NOTICE_TYPES = ["duplicate", "unresolved", "ambiguous", "invalidWeight"];
 const RETRY_TRACKED_KEYS = [
@@ -52,6 +65,17 @@ export function createGenerationRuntime(dependencies) {
   const getIpAdapterOptionsFn = deps.getIpAdapterOptions ?? getIpAdapterOptions;
   const listCheckpointsFn = deps.listCheckpoints ?? listCheckpoints;
   const switchCheckpointFn = deps.switchCheckpoint ?? switchCheckpoint;
+  const runtimeRegistry = deps.runtimeRegistry ?? createGenerationRuntimeRegistry({
+    config,
+    logger,
+    overrides: {
+      generateImages: generateImagesFn,
+      getIpAdapterOptions: getIpAdapterOptionsFn,
+      listCheckpoints: listCheckpointsFn,
+      switchCheckpoint: switchCheckpointFn,
+      resolveV1Checkpoint: deps.resolveV1Checkpoint
+    }
+  });
 
   async function executeWithRecovery(body, context) {
     try {
@@ -61,7 +85,10 @@ export function createGenerationRuntime(dependencies) {
       const previousCount = Number(body?.retryInfo?.retryCount ?? 0);
       if (previousCount >= MAX_RETRY_COUNT) throw error;
 
-      const classification = classifyGenerationError(error);
+      const classification = localizeRecoveryClassification(
+        classifyGenerationError(error),
+        runtimeDescriptorForRecovery(body, runtimeRegistry)
+      );
       if (!classification.retryable) throw error;
       const originalSettings = validateSettings(body?.settings ?? {}, config);
       const plan = buildRecoveryPlan(originalSettings, classification.kind);
@@ -93,12 +120,15 @@ export function createGenerationRuntime(dependencies) {
     const reportProgress = typeof report === "function" ? report : () => {};
     const generationStartedAt = new Date().toISOString();
     const description = passthroughText(body.description, 4000).trim();
+    const contentRating = normalizeNewContentRating(body.contentRating);
     const hasPrompt = Boolean(body.prompt?.trim());
     if (!description && !hasPrompt) throw new Error("生成したい内容かPromptを入力してください");
     const mode = validateGenerationMode(body.mode);
+    const provider = runtimeRegistry.resolve(body.runtimeId ?? body._runtimeId);
     let settings = validateSettings(body.settings ?? {}, config);
+    provider.validateRequest?.({ mode, settings, body });
     if (body._source === "api-v1") {
-      settings = await prepareApiCheckpoint(settings, body._checkpointId);
+      if (provider.descriptor.id === "reforge") settings = await prepareApiCheckpoint(settings, body._checkpointId);
     }
     const loras = validateLoras(body.loras, config);
     const promptBoosts = normalizePromptBoosts(body.promptBoosts);
@@ -111,7 +141,12 @@ export function createGenerationRuntime(dependencies) {
     const rawPrompt = rawPromptOverride ? passthroughText(body.rawPrompt, 12000) : "";
     const sourceImage = await resolveSourceImage(body, mode, deps);
     const maskImage = resolveMaskImage(body, mode, settings);
-    const ipAdapter = await resolveIpAdapter(body, deps, getIpAdapterOptionsFn);
+    const ipAdapter = await resolveIpAdapter(
+      body,
+      deps,
+      provider.getIpAdapterOptions ?? getIpAdapterOptionsFn,
+      provider.config ?? config.reforge
+    );
 
     reportProgress(5, "プロンプトを準備中");
     const generatedPrompt = hasPrompt
@@ -146,8 +181,14 @@ export function createGenerationRuntime(dependencies) {
         .map((item) => ({ type: "duplicate", name: item.name, weights: item.weights, weight: item.weight }))
     ];
 
-    reportProgress(25, "ReForgeで生成を開始");
-    const generated = await generateImagesFn(config.reforge, {
+    reportProgress(25, `${provider.descriptor.label}で生成を開始`);
+    const prepared = await provider.prepareGeneration?.({
+      settings,
+      requestedCheckpoint: body._checkpointId ?? settings.checkpoint,
+      signal
+    });
+    if (prepared && typeof prepared === "object") settings = { ...settings, ...prepared };
+    const generated = await provider.generateImages({
       mode,
       prompt: effectivePrompt,
       negativePrompt: effectiveNegativePrompt,
@@ -220,6 +261,7 @@ export function createGenerationRuntime(dependencies) {
       createdAt,
       title,
       kind: settings.hiresEnabled ? "hires" : "candidates",
+      contentRating,
       mode,
       parentImageId: body.parentImageId,
       parentGenerationId: passthroughText(body.parentGenerationId, 80) || null,
@@ -248,6 +290,7 @@ export function createGenerationRuntime(dependencies) {
       settings,
       loras: effectiveLoras,
       loraNotices,
+      runtime: provider.descriptor,
       images: savedImages
     });
 
@@ -277,6 +320,8 @@ export function createGenerationRuntime(dependencies) {
       sourceImageUrl: stored.sourceImageUrl,
       maskImageUrl: stored.maskImageUrl,
       ipAdapter: stored.ipAdapter,
+      runtime: stored.runtime,
+      contentRating: stored.contentRating,
       images: stored.images.map(serializeImage),
       prompt: promptWithBoosts,
       negativePrompt: generatedPrompt.negative_prompt,
@@ -334,24 +379,69 @@ export function createGenerationRuntime(dependencies) {
     execute: performGeneration,
     validateSettings: (input) => validateSettings(input, config),
     resolveV1Checkpoint,
-    resolveOutputImagePath
+    resolveOutputImagePath,
+    registry: runtimeRegistry
   };
 }
 
-export function createGenerationService({ jobs, runtime, config, capabilityDependencies = {}, history }) {
+export function createGenerationService({
+  jobs,
+  runtime,
+  config,
+  capabilityDependencies = {},
+  history,
+  resolveReferenceImage = null,
+  runtimeRegistry = null
+}) {
   const listCheckpointsFn = capabilityDependencies.listCheckpoints
     ?? ((reforgeConfig) => listCheckpoints(reforgeConfig));
   const listSamplersFn = capabilityDependencies.listSamplers
     ?? (async () => ({ samplers: [], schedulers: [] }));
   const listLorasFn = capabilityDependencies.listLoras
     ?? ((reforgeConfig) => listLoras(reforgeConfig));
+  const registry = runtimeRegistry ?? runtime?.registry ?? createGenerationRuntimeRegistry({
+    config,
+    overrides: {
+      listCheckpoints: listCheckpointsFn,
+      listSamplers: listSamplersFn,
+      listLoras: listLorasFn,
+      resolveV1Checkpoint: runtime?.resolveV1Checkpoint
+    }
+  });
 
-  async function getCapabilities() {
+  function resolveProvider(runtimeId) {
+    return registry.resolve(runtimeId);
+  }
+
+  function providerLoras(provider) {
+    return provider.descriptor.id === "reforge"
+      ? listLorasFn(config.reforge)
+      : provider.listLoras();
+  }
+
+  function providerCheckpoints(provider) {
+    return provider.descriptor.id === "reforge"
+      ? listCheckpointsFn(config.reforge)
+      : provider.listCheckpoints();
+  }
+
+  function providerSamplers(provider) {
+    return provider.descriptor.id === "reforge"
+      ? listSamplersFn(config.reforge)
+      : provider.listSamplers();
+  }
+
+  function providerCheckpointResolver(provider) {
+    return provider.resolveV1Checkpoint;
+  }
+
+  async function getCapabilities(runtimeId) {
+    const provider = resolveProvider(runtimeId);
     try {
       const [checkpointData, samplerData, loras] = await Promise.all([
-        listCheckpointsFn(config.reforge),
-        listSamplersFn(config.reforge),
-        listLorasFn(config.reforge)
+        providerCheckpoints(provider),
+        providerSamplers(provider),
+        providerLoras(provider)
       ]);
       const active = String(checkpointData?.activeCheckpoint ?? "");
       return {
@@ -363,16 +453,56 @@ export function createGenerationService({ jobs, runtime, config, capabilityDepen
         loras: (Array.isArray(loras) ? loras : [])
           .map((item) => publicLora(item, config.lora?.defaultWeight))
           .filter(Boolean),
-        defaults: publicDefaults(config.defaults, config.lora)
+        defaults: publicDefaults(config.defaults, config.lora),
+        runtime: provider.descriptor,
+        runtimes: registry.listDescriptors(),
+        defaultRuntimeId: registry.defaultRuntimeId
       };
     } catch (error) {
       throw apiError("CAPABILITIES_UNAVAILABLE", "生成能力一覧を取得できません", 503, error);
     }
   }
 
+  function enqueueV1Request({
+    resolvedPrompt,
+    settings,
+    loras,
+    checkpoint,
+    client,
+    ipAdapter = null,
+    provenance = null,
+    runtimeId = null,
+    contentRating = "general"
+  }) {
+    const payload = {
+      mode: "txt2img",
+      prompt: resolvedPrompt.positive,
+      negativePrompt: resolvedPrompt.negative,
+      structuredPrompt: resolvedPrompt.structured,
+      rawPromptOverride: resolvedPrompt.mode === "raw",
+      rawPrompt: resolvedPrompt.mode === "raw" ? resolvedPrompt.positive : "",
+      loras,
+      settings,
+      _source: "api-v1",
+      _checkpointId: checkpoint?.id ?? null,
+      contentRating
+    };
+    if (runtimeId && runtimeId !== "reforge") payload.runtimeId = runtimeId;
+    if (ipAdapter) payload.ipAdapter = ipAdapter;
+    if (provenance) Object.assign(payload, provenance);
+    return jobs.create(payload, {
+      kind: "generation",
+      label: describeGenerationJob(payload),
+      client
+    });
+  }
+
   async function createV1Job(request) {
     if (!isPlainObject(request)) throw apiError("INVALID_REQUEST", "リクエストJSONが不正です", 400);
     const mode = request.mode ?? "txt2img";
+    const contentRating = validateRequestedContentRating(request.contentRating);
+    const provider = resolveProvider(request.runtimeId);
+    provider.validateRequest?.({ mode, settings: request.settings ?? {}, body: request });
     if (mode !== "txt2img") {
       throw apiError("UNSUPPORTED_MODE", "このモードはAPI v1では利用できません", 400);
     }
@@ -392,34 +522,148 @@ export function createGenerationService({ jobs, runtime, config, capabilityDepen
       throw apiError("INVALID_REQUEST", error.message, 400, error);
     }
     if (!resolvedPrompt.positive) throw apiError("INVALID_REQUEST", "positive Promptを指定してください", 400);
+    const ipAdapter = await resolveV1IpAdapter(request.ipAdapter, history, resolveReferenceImage);
 
     const settingsInput = normalizeV1Settings(request.settings);
+    provider.validateRequest?.({ mode, settings: settingsInput, body: request });
     const checkpoint = settingsInput.checkpoint === undefined
       ? null
-      : await runtime.resolveV1Checkpoint(settingsInput.checkpoint);
+      : await providerCheckpointResolver(provider)(settingsInput.checkpoint);
     if (checkpoint) {
       settingsInput.checkpoint = checkpoint.id;
       settingsInput.checkpointHash = checkpoint.hash;
       settingsInput.checkpointModelName = checkpoint.modelName;
     }
-    const loras = await normalizeV1Loras(request.loras, listLorasFn, config);
+    const loras = await normalizeV1Loras(request.loras, () => providerLoras(provider), config);
     const client = normalizeClient(request.metadata?.client);
-    const payload = {
-      mode: "txt2img",
-      prompt: resolvedPrompt.positive,
-      negativePrompt: resolvedPrompt.negative,
-      structuredPrompt: resolvedPrompt.structured,
-      rawPromptOverride: resolvedPrompt.mode === "raw",
-      rawPrompt: resolvedPrompt.mode === "raw" ? resolvedPrompt.positive : "",
-      loras,
+    return enqueueV1Request({
+      resolvedPrompt,
       settings: settingsInput,
-      _source: "api-v1",
-      _checkpointId: checkpoint?.id ?? null
-    };
-    return jobs.create(payload, {
-      kind: "generation",
-      label: describeGenerationJob(payload),
-      client
+      loras,
+      checkpoint,
+      client,
+      ipAdapter,
+      runtimeId: provider.descriptor.id,
+      contentRating
+    });
+  }
+
+  async function getHistoryItem(generationId) {
+    const id = requireId(generationId);
+    try {
+      const generation = await history.getGeneration(id);
+      if (!generation) throw new HistoryGenerationNotFoundError(id);
+      return generation;
+    } catch (error) {
+      if (error instanceof HistoryGenerationNotFoundError || error?.code === "HISTORY_NOT_FOUND") {
+        throw apiError("HISTORY_NOT_FOUND", "指定した生成履歴が見つかりません", 404, error);
+      }
+      throw error;
+    }
+  }
+
+  async function createV1Regeneration(historyId, request) {
+    if (!isPlainObject(request)) throw apiError("INVALID_REQUEST", "リクエストJSONが不正です", 400);
+    const generationId = requireId(historyId);
+    const sourceImageId = requireSourceImageId(request.sourceImageId);
+    let sourceGeneration;
+    try {
+      sourceGeneration = await history.getGeneration(generationId);
+      if (!sourceGeneration) throw new HistoryGenerationNotFoundError(generationId);
+    } catch (error) {
+      if (error instanceof HistoryGenerationNotFoundError || error?.code === "HISTORY_NOT_FOUND") {
+        throw apiError("HISTORY_NOT_FOUND", "指定した生成履歴が見つかりません", 404, error);
+      }
+      throw error;
+    }
+    if (sourceGeneration?.mode !== "txt2img") {
+      throw apiError("UNSUPPORTED_HISTORY_MODE", "この履歴モードはAI Workflow再生成に対応していません", 400);
+    }
+    const inheritedRuntimeId = sourceGeneration?.runtime?.id ?? "reforge";
+    const provider = resolveProvider(request.runtimeId ?? inheritedRuntimeId);
+    provider.validateRequest?.({ mode: sourceGeneration.mode, settings: request.settings ?? {}, body: request });
+    const sourceImage = Array.isArray(sourceGeneration.images)
+      ? sourceGeneration.images.find((image) => image?.id === sourceImageId)
+      : null;
+    if (!sourceImage) throw apiError("SOURCE_IMAGE_NOT_FOUND", "指定した画像が生成履歴にありません", 404);
+    const ipAdapter = await resolveV1IpAdapter(request.ipAdapter, history, resolveReferenceImage);
+
+    if (request.loras !== undefined && !Array.isArray(request.loras)) {
+      throw apiError("INVALID_REQUEST", "lorasが不正です", 400);
+    }
+    const inheritedPositive = usesInheritedPositivePrompt(request.prompt);
+    const promptInput = buildRegenerationPromptInput(sourceGeneration, request.prompt);
+    if (request.loras !== undefined && inheritedPositive) {
+      removeInheritedLoraTags(promptInput);
+    }
+    let resolvedPrompt;
+    try {
+      resolvedPrompt = resolvePrompt(promptInput);
+    } catch (error) {
+      throw apiError("INVALID_REQUEST", error.message, 400, error);
+    }
+    if (!resolvedPrompt.positive) throw apiError("INVALID_REQUEST", "positive Promptを指定してください", 400);
+
+    const settingsInput = normalizeV1Settings(request.settings);
+    const inheritedSettings = historySettingsToV1(sourceGeneration.settings);
+    const mergedSettings = { ...inheritedSettings, ...settingsInput };
+    provider.validateRequest?.({ mode: sourceGeneration.mode, settings: mergedSettings, body: request });
+    if (!Object.hasOwn(settingsInput, "candidateCount")) mergedSettings.candidateCount = 1;
+
+    const reuseSeed = request.reuseSeed === undefined ? false : request.reuseSeed;
+    if (typeof reuseSeed !== "boolean") {
+      throw apiError("INVALID_REQUEST", "reuseSeedはbooleanで指定してください", 400);
+    }
+    if (reuseSeed && isPlainObject(request.settings) && Object.hasOwn(request.settings, "seed")) {
+      throw apiError("INVALID_REQUEST", "reuseSeed=trueのときsettings.seedは指定できません", 400);
+    }
+    if (reuseSeed) {
+      const sourceSeed = Number(sourceImage.seed);
+      if (!Number.isInteger(sourceSeed) || sourceSeed < 0 || sourceSeed > 4294967295) {
+        throw apiError("INVALID_REQUEST", "指定した画像のseedを再利用できません", 400);
+      }
+      mergedSettings.seed = sourceSeed;
+    } else if (!Object.hasOwn(settingsInput, "seed")) {
+      mergedSettings.seed = -1;
+    }
+
+    const checkpoint = mergedSettings.checkpoint === undefined
+      ? null
+      : await providerCheckpointResolver(provider)(mergedSettings.checkpoint);
+    if (checkpoint) {
+      mergedSettings.checkpoint = checkpoint.id;
+      mergedSettings.checkpointHash = checkpoint.hash;
+      mergedSettings.checkpointModelName = checkpoint.modelName;
+    }
+
+    const historyLoras = request.loras === undefined;
+    const normalizedLoras = await normalizeV1Loras(
+      historyLoras ? historyLorasToV1(sourceGeneration.loras) : request.loras,
+      () => providerLoras(provider),
+      config
+    );
+    const loras = historyLoras
+      ? restoreHistoryLoraMetadata(normalizedLoras, sourceGeneration.loras)
+      : normalizedLoras;
+    const client = normalizeClient(request.metadata?.client);
+    const instruction = normalizeWorkflowInstruction(request.instruction);
+    const contentRating = request.contentRating === undefined
+      ? normalizeNewContentRating(sourceGeneration.contentRating)
+      : validateRequestedContentRating(request.contentRating);
+    return enqueueV1Request({
+      resolvedPrompt,
+      settings: mergedSettings,
+      loras,
+      checkpoint,
+      client,
+      ipAdapter,
+      contentRating,
+      runtimeId: provider.descriptor.id,
+      provenance: {
+        parentGenerationId: generationId,
+        parentImageId: sourceImageId,
+        derivation: { type: "ai-workflow", instruction }
+      }
     });
   }
 
@@ -461,6 +705,7 @@ export function createGenerationService({ jobs, runtime, config, capabilityDepen
     try {
       return await history.listPage({
         favoritesOnly: query.favorites === "1",
+        contentRating: requireHistoryContentRatingFilter(query.rating),
         limit: query.limit,
         cursor: query.cursor
       });
@@ -470,14 +715,122 @@ export function createGenerationService({ jobs, runtime, config, capabilityDepen
   }
 
   return {
-    createLegacyJob: (body, meta) => jobs.create(body, meta),
-    generateLegacyNow: (body, context) => runtime.execute(body, context),
+    createLegacyJob: (body, meta) => createLegacyJob(body, meta),
+    generateLegacyNow: (body, context) => generateLegacyNow(body, context),
     getCapabilities,
     createV1Job,
+    getHistoryItem,
+    createV1Regeneration,
     getV1Job,
     cancelV1Job,
     listHistory
   };
+
+  function createLegacyJob(body, meta) {
+    if (!isPlainObject(body)) throw apiError("INVALID_REQUEST", "リクエストJSONが不正です", 400);
+    validateRequestedContentRating(body.contentRating);
+    const provider = resolveProvider(body.runtimeId ?? body._runtimeId);
+    provider.validateRequest?.({
+      mode: validateGenerationMode(body.mode),
+      settings: body.settings ?? {},
+      body
+    });
+    const payload = provider.descriptor.id === "reforge"
+      ? body
+      : { ...body, runtimeId: provider.descriptor.id };
+    return jobs.create(payload, meta);
+  }
+
+  async function generateLegacyNow(body, context) {
+    if (!isPlainObject(body)) throw apiError("INVALID_REQUEST", "リクエストJSONが不正です", 400);
+    validateRequestedContentRating(body.contentRating);
+    const provider = resolveProvider(body.runtimeId ?? body._runtimeId);
+    provider.validateRequest?.({
+      mode: validateGenerationMode(body.mode),
+      settings: body.settings ?? {},
+      body
+    });
+    if (provider.descriptor.id === "reforge") {
+      return runtime.execute(body, context);
+    }
+
+    // Forge Neoのmodel/module transitionと生成を、旧同期APIでも既存JobManagerへ合流させる。
+    // ReForgeの従来同期経路は変更しない。
+    const payload = { ...body, runtimeId: provider.descriptor.id };
+    const job = jobs.create(payload, {
+      kind: "generation",
+      label: describeGenerationJob(payload),
+      client: "legacy-sync"
+    });
+    return waitForLegacyJob(job.id, context);
+  }
+
+  function waitForLegacyJob(jobId, { signal } = {}) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let unsubscribe = () => {};
+
+      const cleanup = () => {
+        unsubscribe();
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const settle = (job) => {
+        if (settled) return;
+        if (job.status === "done") {
+          settled = true;
+          cleanup();
+          resolve(job.result);
+          return;
+        }
+        if (job.status === "failed") {
+          settled = true;
+          cleanup();
+          const error = new Error(job.error ?? "生成に失敗しました");
+          error.statusCode = 500;
+          reject(error);
+          return;
+        }
+        if (job.status === "cancelled") {
+          settled = true;
+          cleanup();
+          const error = new Error("生成を中止しました");
+          error.name = "AbortError";
+          error.statusCode = 499;
+          reject(error);
+        }
+      };
+      const onAbort = () => {
+        try {
+          jobs.cancel(jobId);
+        } catch {
+          // Jobがすでにterminalなら、下のresponse待機結果を優先する。
+        }
+        if (settled) return;
+        settled = true;
+        cleanup();
+        const error = new Error("生成を中止しました");
+        error.name = "AbortError";
+        error.statusCode = 499;
+        reject(error);
+      };
+
+      unsubscribe = jobs.subscribe((job) => {
+        if (job.id === jobId) settle(job);
+      });
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
+      try {
+        settle(jobs.get(jobId));
+      } catch (error) {
+        settled = true;
+        cleanup();
+        reject(error);
+      }
+    });
+  }
 }
 
 export function createOutputImagePathResolver(outputDir) {
@@ -526,6 +879,245 @@ export function apiError(code, message, statusCode = 400, cause) {
   error.apiCode = code;
   error.statusCode = statusCode;
   return error;
+}
+
+const V1_IP_ADAPTER_KEYS = new Set([
+  "referenceImageId",
+  "weight",
+  "guidanceStart",
+  "guidanceEnd"
+]);
+
+export function normalizeV1IpAdapter(input) {
+  if (input === undefined) return null;
+  if (!isPlainObject(input)) throw apiError("INVALID_REQUEST", "ipAdapterが不正です", 400);
+
+  const unknownKey = Object.keys(input).find((key) => !V1_IP_ADAPTER_KEYS.has(key));
+  if (unknownKey) throw apiError("INVALID_REQUEST", "ipAdapterに許可されていないfieldがあります", 400);
+  if (typeof input.referenceImageId !== "string" || !input.referenceImageId.trim()) {
+    throw apiError("INVALID_REQUEST", "ipAdapter.referenceImageIdが不正です", 400);
+  }
+  for (const key of ["weight", "guidanceStart", "guidanceEnd"]) {
+    if (input[key] !== undefined && (typeof input[key] !== "number" || !Number.isFinite(input[key]))) {
+      throw apiError("INVALID_REQUEST", `ipAdapter.${key}は有限数で指定してください`, 400);
+    }
+  }
+
+  const referenceImageId = requireId(input.referenceImageId.trim());
+  let normalized;
+  try {
+    normalized = validateIpAdapter({
+      enabled: true,
+      referenceImageId,
+      weight: input.weight,
+      guidanceStart: input.guidanceStart,
+      guidanceEnd: input.guidanceEnd
+    });
+  } catch (error) {
+    throw apiError("INVALID_REQUEST", error.message, 400, error);
+  }
+  return {
+    enabled: true,
+    referenceImageId,
+    weight: normalized.weight,
+    guidanceStart: normalized.guidanceStart,
+    guidanceEnd: normalized.guidanceEnd
+  };
+}
+
+async function resolveV1IpAdapter(input, historyService, referenceResolver = null) {
+  const normalized = normalizeV1IpAdapter(input);
+  if (!normalized) return null;
+  try {
+    const image = referenceResolver
+      ? await referenceResolver(normalized.referenceImageId)
+      : await historyService.getImage(normalized.referenceImageId);
+    if (!image) throw new Error("指定された画像が履歴にありません");
+  } catch (error) {
+    if (error?.message === "指定された画像が履歴にありません"
+      || error?.code === "HISTORY_IMAGE_NOT_FOUND"
+      || error?.code === "ASSET_NOT_FOUND"
+      || error?.apiCode === "ASSET_NOT_FOUND") {
+      throw apiError("REFERENCE_IMAGE_NOT_FOUND", "指定した参照画像が見つかりません", 404, error);
+    }
+    throw error;
+  }
+  return normalized;
+}
+
+function requireSourceImageId(value) {
+  if (typeof value !== "string") throw apiError("INVALID_REQUEST", "sourceImageIdが不正です", 400);
+  return requireId(value);
+}
+
+function buildRegenerationPromptInput(generation, override) {
+  const input = historyPromptInput(generation);
+  if (override === undefined) return input;
+  if (!isPlainObject(override)) throw apiError("INVALID_REQUEST", "promptが不正です", 400);
+
+  if (override.rawOverride !== undefined && override.rawOverride !== null) {
+    if (typeof override.rawOverride !== "string") {
+      throw apiError("INVALID_REQUEST", "prompt.rawOverrideは文字列で指定してください", 400);
+    }
+    input.rawOverride = override.rawOverride;
+  } else if (override.structured !== undefined && override.structured !== null) {
+    input.structured = requireCompleteStructuredPrompt(override.structured);
+    input.rawOverride = null;
+  }
+  if (override.negative !== undefined) {
+    if (typeof override.negative !== "string") {
+      throw apiError("INVALID_REQUEST", "prompt.negativeは文字列で指定してください", 400);
+    }
+    input.negative = override.negative;
+  }
+  return input;
+}
+
+function usesInheritedPositivePrompt(override) {
+  if (override === undefined) return true;
+  if (!isPlainObject(override)) return false;
+  if (override.rawOverride !== undefined && override.rawOverride !== null) return false;
+  if (override.structured !== undefined && override.structured !== null) return false;
+  return true;
+}
+
+function removeInheritedLoraTags(promptInput) {
+  if (typeof promptInput.rawOverride === "string") {
+    promptInput.rawOverride = removeAllLoraTags(promptInput.rawOverride);
+  }
+  if (isPlainObject(promptInput.structured)) {
+    promptInput.structured = Object.fromEntries(PROMPT_FIELDS.map((field) => [
+      field,
+      removeAllLoraTags(promptInput.structured[field])
+    ]));
+  }
+}
+
+function removeAllLoraTags(value) {
+  let result = typeof value === "string" ? value : "";
+  const names = [...new Set([...parseLoraTags(result)].map((tag) => tag.name))];
+  for (const name of names) result = removeLoraTags(result, name).text;
+  return result;
+}
+
+function historyPromptInput(generation) {
+  const negative = typeof generation?.negativePrompt === "string"
+    ? generation.negativePrompt
+    : typeof generation?.effectiveNegativePrompt === "string"
+      ? generation.effectiveNegativePrompt
+      : "";
+  if (generation?.rawPromptOverride === true) {
+    const raw = firstNonEmptyString(generation.rawPrompt, generation.prompt, generation.effectivePrompt);
+    return { structured: null, rawOverride: raw, negative };
+  }
+  if (isPlainObject(generation?.structuredPrompt)) {
+    return { structured: generation.structuredPrompt, rawOverride: null, negative };
+  }
+  const raw = firstNonEmptyString(generation?.rawPrompt, generation?.prompt, generation?.effectivePrompt);
+  return { structured: null, rawOverride: raw, negative };
+}
+
+function requireCompleteStructuredPrompt(value) {
+  if (!isPlainObject(value) || PROMPT_FIELDS.some((field) => typeof value[field] !== "string")) {
+    throw apiError("INVALID_REQUEST", "prompt.structuredは6項目すべてを文字列で指定してください", 400);
+  }
+  return Object.fromEntries(PROMPT_FIELDS.map((field) => [field, value[field]]));
+}
+
+function firstNonEmptyString(...values) {
+  return values.find((value) => typeof value === "string" && value.trim())?.trim() ?? "";
+}
+
+function historySettingsToV1(settings) {
+  if (!isPlainObject(settings)) return {};
+  const result = {};
+  if (settings.checkpoint !== undefined && settings.checkpoint !== null && String(settings.checkpoint).trim()) {
+    if (!isSafePublicName(settings.checkpoint)) {
+      throw apiError("INVALID_CHECKPOINT", "履歴に保存されたCheckpoint identifierが不正です", 400);
+    }
+    result.checkpoint = String(settings.checkpoint).trim();
+  }
+  copyHistoryInteger(settings.width, result, "width", 256, 1536, 64);
+  copyHistoryInteger(settings.height, result, "height", 256, 1536, 64);
+  copyHistoryInteger(settings.steps, result, "steps", 1, 80);
+  copyHistoryNumber(settings.cfgScale, result, "cfgScale", 1, 20);
+  copyHistoryString(settings.samplerName ?? settings.sampler, result, "samplerName", 100);
+  copyHistoryString(settings.scheduler, result, "scheduler", 100);
+  copyHistoryString(settings.noiseSchedule, result, "noiseSchedule", 100);
+  if (typeof settings.hiresEnabled === "boolean") result.hiresEnabled = settings.hiresEnabled;
+  copyHistoryNumber(settings.hiresScale, result, "hiresScale", 1, 2);
+  copyHistoryInteger(settings.hiresSteps, result, "hiresSteps", 1, 50);
+  copyHistoryNumber(settings.hiresDenoising, result, "hiresDenoising", 0.1, 0.8);
+  copyHistoryString(settings.hiresUpscaler, result, "hiresUpscaler", 200);
+  return result;
+}
+
+function historyLorasToV1(loras) {
+  if (!Array.isArray(loras)) return [];
+  return loras.map((lora) => {
+    const normalized = {
+      name: lora?.name,
+      weight: lora?.weight,
+      enabled: lora?.enabled !== false
+    };
+    for (const [key, maximum] of [
+      ["triggerWords", 500],
+      ["negativeWords", 500],
+      ["characterTriggerWords", 500],
+      ["outfitChoiceId", 200],
+      ["outfitPresetName", 200],
+      ["outfitTriggerWords", 500]
+    ]) {
+      if (typeof lora?.[key] === "string") normalized[key] = lora[key].slice(0, maximum);
+    }
+    if (["ui", "prompt", "both"].includes(lora?.source)) normalized.source = lora.source;
+    return normalized;
+  });
+}
+
+function restoreHistoryLoraMetadata(normalized, sourceLoras) {
+  const source = historyLorasToV1(sourceLoras);
+  return normalized.map((lora) => {
+    const stored = source.find((item) => sameLoraName(item.name, lora.name));
+    if (!stored) return lora;
+    const restored = { ...lora };
+    for (const key of [
+      "triggerWords",
+      "negativeWords",
+      "characterTriggerWords",
+      "outfitChoiceId",
+      "outfitPresetName",
+      "outfitTriggerWords",
+      "source"
+    ]) {
+      if (stored[key] !== undefined) restored[key] = stored[key];
+    }
+    return restored;
+  });
+}
+
+function copyHistoryString(value, output, key, maximum) {
+  if (typeof value === "string" && value.trim() && isSafePublicName(value)) {
+    output[key] = value.trim().slice(0, maximum);
+  }
+}
+
+function copyHistoryInteger(value, output, key, minimum, maximum, multiple = 1) {
+  if (Number.isInteger(value) && value >= minimum && value <= maximum && value % multiple === 0) {
+    output[key] = value;
+  }
+}
+
+function copyHistoryNumber(value, output, key, minimum, maximum) {
+  if (Number.isFinite(value) && value >= minimum && value <= maximum) output[key] = value;
+}
+
+function normalizeWorkflowInstruction(value) {
+  if (value === undefined) return "";
+  if (typeof value !== "string" || value.length > 500 || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw apiError("INVALID_REQUEST", "instructionは制御文字を含まない500文字以内で指定してください", 400);
+  }
+  return value;
 }
 
 function normalizeV1Settings(input) {
@@ -604,6 +1196,15 @@ function normalizeClient(value) {
     throw apiError("INVALID_REQUEST", "metadata.clientは40文字以内の識別子で指定してください", 400);
   }
   return client;
+}
+
+function validateRequestedContentRating(value) {
+  if (value === undefined || value === null || value === "") return "general";
+  try {
+    return requireNewContentRating(value);
+  } catch (error) {
+    throw apiError("INVALID_REQUEST", "contentRatingはgeneralまたはnsfwで指定してください", 400, error);
+  }
 }
 
 function publicCheckpoint(item, active) {
@@ -762,10 +1363,10 @@ async function resolveSourceImage(body, mode, deps = null) {
   throw new Error(`${mode === "inpaint" ? "部分修正" : "img2img"}の参照画像を選択してください`);
 }
 
-async function resolveIpAdapter(body, deps, getIpAdapterOptionsFn) {
+async function resolveIpAdapter(body, deps, getIpAdapterOptionsFn, providerConfig = null) {
   const normalized = validateIpAdapter(body.ipAdapter);
   if (!normalized) return null;
-  const capability = await getIpAdapterOptionsFn(deps.config.reforge);
+  const capability = await getIpAdapterOptionsFn(providerConfig ?? deps.config.reforge);
   if (!capability.available) throw new Error(capability.message || "IP-Adapterを利用できないため生成できません");
   const reference = await resolveIpAdapterReference(normalized, deps);
   const metadata = {
@@ -797,6 +1398,20 @@ async function resolveIpAdapter(body, deps, getIpAdapterOptionsFn) {
 async function resolveIpAdapterReference(input, deps) {
   if (input.referenceImageId) {
     const imageId = requireId(input.referenceImageId);
+    if (typeof deps.resolveReferenceImage === "function") {
+      const reference = await deps.resolveReferenceImage(imageId);
+      const buffer = reference?.buffer;
+      const extension = extensionFromFilename(`reference.${reference?.extension ?? ""}`);
+      validateImageBuffer(buffer, extension);
+      return {
+        base64: buffer.toString("base64"),
+        buffer,
+        extension,
+        imageId,
+        imageUrl: reference.imageUrl ?? `/api/images/${encodeURIComponent(imageId)}/original`,
+        uploaded: false
+      };
+    }
     const image = await deps.history.getImage(imageId);
     const filename = path.basename(String(image.filename ?? ""));
     if (!filename || filename !== image.filename) throw new Error("IP-Adapter参照画像の保存先が不正です");
@@ -1047,6 +1662,28 @@ function booleanOrDefault(value, fallback) {
 
 function textOrDefault(value, fallback) {
   return typeof value === "string" && value.trim() ? value.trim().slice(0, 100) : fallback;
+}
+
+function runtimeDescriptorForRecovery(body, runtimeRegistry) {
+  try {
+    return runtimeRegistry?.resolve?.(body?.runtimeId ?? body?._runtimeId);
+  } catch {
+    return null;
+  }
+}
+
+function localizeRecoveryClassification(classification, provider) {
+  const runtimeLabel = String(provider?.descriptor?.label ?? "").trim();
+  if (!runtimeLabel || runtimeLabel === "ReForge") return classification;
+  return {
+    ...classification,
+    label: replaceRecoveryRuntimeName(classification.label, runtimeLabel),
+    message: replaceRecoveryRuntimeName(classification.message, runtimeLabel)
+  };
+}
+
+function replaceRecoveryRuntimeName(value, runtimeLabel) {
+  return String(value ?? "").replaceAll("ReForge", runtimeLabel);
 }
 
 function normalizeNoiseSchedule(value, fallback) {

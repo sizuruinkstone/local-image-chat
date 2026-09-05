@@ -1,14 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  LORA_ROOT_FOLDER,
   MAX_CANDIDATE_COUNT,
   MIN_CANDIDATE_COUNT,
+  buildLoraFolderTree,
   buildCharacterPresets,
   buildGroups,
   buildLoraCatalog,
   buildOutfitPresets,
   clampCandidateCount,
+  filterItemsByFolder,
   filterPresets,
+  formatLoraRelativeLocation,
+  getFolderDescendantCount,
   isValidCandidateCount,
   loraFolderKey,
   resolvePresetCategory,
@@ -109,6 +114,47 @@ test("フォルダ・分類の選択肢を件数付きで作る", () => {
   ]);
   const categories = buildGroups(catalog, "category");
   assert.equal(categories.find((group) => group.value === "clothing").label, "衣装");
+});
+
+test("LoRAフォルダツリーは親子件数とルートを正しく集計する", () => {
+  const items = [
+    { name: "a", folder: "Anima\\Character" },
+    { name: "b", folder: "Anima/Character" },
+    { name: "c", folder: "Anima/Style" },
+    { name: "d", folder: "Other" },
+    { name: "e", folder: "" }
+  ];
+  const tree = buildLoraFolderTree(items);
+  assert.deepEqual(tree.children.map((node) => node.value), ["Anima", "Other"]);
+  assert.equal(tree.directCount, 1);
+  assert.equal(getFolderDescendantCount(tree), 5);
+
+  const anima = tree.children[0];
+  assert.equal(getFolderDescendantCount(anima), 3);
+  assert.deepEqual(anima.children.map((node) => [node.value, node.directCount]), [
+    ["Anima/Character", 2], ["Anima/Style", 1]
+  ]);
+  assert.equal(getFolderDescendantCount(anima.children[0]), 2);
+  assert.equal(tree.label, LORA_ROOT_FOLDER);
+});
+
+test("LoRAフォルダ絞り込みは配下を含み、相対保存場所だけを表示する", () => {
+  const items = [
+    { name: "Anima/Character/a", folder: "Anima/Character" },
+    { name: "Anima/Character/Sub/b", folder: "Anima/Character/Sub" },
+    { name: "Other/c", folder: "Other" },
+    { name: "root", folder: "" }
+  ];
+  assert.deepEqual(
+    filterItemsByFolder(items, "Anima/Character").map((item) => item.name),
+    ["Anima/Character/a", "Anima/Character/Sub/b"]
+  );
+  assert.deepEqual(filterItemsByFolder(items, LORA_ROOT_FOLDER).map((item) => item.name), ["root"]);
+  assert.equal(filterItemsByFolder(items).length, 4);
+  assert.equal(formatLoraRelativeLocation(items[0]), "Anima/Character/a");
+  assert.equal(formatLoraRelativeLocation({ name: "style", folder: "Anima/Style" }), "Anima/Style/style");
+  assert.equal(formatLoraRelativeLocation({ relativeName: "C:\\private\\secret.safetensors", name: "Safe/model", folder: "Safe" }), "Safe/model");
+  assert.equal(formatLoraRelativeLocation({ name: "C:\\private\\secret.safetensors" }), LORA_ROOT_FOLDER);
 });
 
 test("検索は名前・トリガーワード・フォルダ・分類を対象にする", () => {

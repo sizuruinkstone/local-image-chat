@@ -15,6 +15,7 @@ import {
   validateIpAdapter
 } from "../src/ip-adapter.js";
 import { createHistoryService } from "../src/history.js";
+import { createAttachmentReader } from "../src/mcp/attachment-reader.js";
 import { generationTitle } from "../public/history-title.js";
 
 const ONE_PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
@@ -318,6 +319,67 @@ test("Task 09の移行競合は旧保存先で起動し、旧URLとsourceを維�
   assert.equal(await fileExists(path.join(server.outputDir, "a.png")), true);
   assert.equal(await fileExists(path.join(server.outputDir, "z.png")), true);
   assert.equal(await fileExists(path.join(server.outputDir, "favorite", "a.png")), true);
+});
+
+test("Task 18以前のHistory dotfile配信拒否を固定する", async (t) => {
+  const server = await createIsolatedStorageServer(t, "history-dotfile");
+  if (!server) return;
+  await seedStorageFixture(server, { filename: ".broken.png", imageId: "hidden-image-id" });
+  await fs.writeFile(path.join(server.outputDir, ".broken.png"), "not-an-image");
+  await server.start();
+
+  const original = await fetch(`${server.baseUrl}/api/images/hidden-image-id/original`);
+  assert.equal(original.status, 404);
+  const thumbnail = await fetch(`${server.baseUrl}/api/images/hidden-image-id/thumbnail`);
+  assert.notEqual(thumbnail.status, 200);
+});
+
+test("Task 18のReference Asset APIは実配信と既存保存先移行へ合流する", async (t) => {
+  const server = await createIsolatedStorageServer(t, "reference-assets");
+  if (!server) return;
+  await server.start();
+  const imageBytes = Buffer.from(ONE_PIXEL_PNG, "base64");
+  const imported = await fetch(`${server.baseUrl}/api/v1/assets/images`, {
+    method: "POST",
+    headers: { "Content-Type": "image/png" },
+    body: imageBytes
+  });
+  const asset = await imported.json();
+  assert.equal(imported.status, 201);
+  assert.equal(asset.kind, "reference-asset");
+  assert.match(asset.id, /^asset-[a-z0-9-]+$/);
+  assert.doesNotMatch(JSON.stringify(asset), /C:\\|filename|source|base64/);
+
+  for (const [url, contentType] of [
+    [`/api/images/${asset.id}/original`, /^image\/png/],
+    [`/api/images/${asset.id}/thumbnail`, /^image\/webp/]
+  ]) {
+    const response = await fetch(`${server.baseUrl}${url}`);
+    assert.equal(response.status, 200, url);
+    assert.match(response.headers.get("content-type") ?? "", contentType, url);
+  }
+  const directOutput = await fetch(`${server.baseUrl}/outputs/.reference-assets/originals/${asset.id}.png`);
+  assert.equal(directOutput.status, 404);
+
+  const reserved = await requestJsonWithStatus(`${server.baseUrl}/api/storage/settings`, {
+    method: "PATCH",
+    body: { targetOutputDir: server.targetDir, confirmMigration: true }
+  });
+  assert.equal(reserved.status, 200);
+  await server.stop();
+  await server.start();
+
+  assert.equal(await fileExists(path.join(server.targetDir, ".reference-assets", "originals", `${asset.id}.png`)), true);
+  assert.equal(await fileExists(path.join(server.targetDir, ".reference-assets", "thumbnails", `${asset.id}.webp`)), true);
+  for (const url of [
+    `/api/images/${asset.id}/original`,
+    `/api/images/${asset.id}/thumbnail`
+  ]) {
+    const response = await fetch(`${server.baseUrl}${url}`);
+    assert.equal(response.status, 200, url);
+  }
+  const unknown = await fetch(`${server.baseUrl}/api/images/asset-ffffffff-ffff-4fff-8fff-ffffffffffff/original`);
+  assert.equal(unknown.status, 404);
 });
 
 test("生成キューからReForge、履歴、👍集計までAPIが往復する", async (t) => {
@@ -1064,6 +1126,102 @@ test("生成キューからReForge、履歴、👍集計までAPIが往復する
   assert.equal(v1Completed.progress, 1);
   assert.equal(v1Completed.result.images.length, 1);
   assert.equal("filename" in v1Completed.result.images[0], false);
+
+  // 添付readerからraw Asset API、v1生成、Runtime、ReForge、Historyまでを一連で確認する。
+  const attachmentRoot = path.join(temporaryDir, "attachments");
+  const attachmentPath = path.join(attachmentRoot, "host-attached.png");
+  await fs.mkdir(attachmentRoot, { recursive: true });
+  await fs.writeFile(attachmentPath, Buffer.from(ONE_PIXEL_PNG, "base64"));
+  const attachmentReader = createAttachmentReader({
+    env: { LOCAL_IMAGE_CHAT_IMPORT_ROOTS: attachmentRoot }
+  });
+  const attachment = await attachmentReader.read(attachmentPath);
+  const importedResponse = await fetch(`${baseUrl}/api/v1/assets/images`, {
+    method: "POST",
+    headers: { "Content-Type": attachment.mimeType },
+    body: attachment.bytes
+  });
+  const importedAsset = await importedResponse.json();
+  assert.equal(importedResponse.status, 201);
+  assert.match(importedAsset.id, /^asset-[a-z0-9-]+$/);
+  assert.doesNotMatch(JSON.stringify(importedAsset), /host-attached|attachments|base64/);
+  const normalizedResponse = await fetch(`${baseUrl}${importedAsset.originalUrl}`);
+  const normalizedBase64 = Buffer.from(await normalizedResponse.arrayBuffer()).toString("base64");
+
+  const assetGeneration = await requestJsonWithStatus(`${baseUrl}/api/v1/generations`, {
+    method: "POST",
+    body: {
+      mode: "txt2img",
+      prompt: { rawOverride: "asset runtime generation" },
+      settings: { width: 512, height: 512, steps: 5, candidateCount: 1 },
+      ipAdapter: { referenceImageId: importedAsset.id, weight: 0.65, guidanceStart: 0, guidanceEnd: 1 }
+    }
+  });
+  assert.equal(assetGeneration.status, 202);
+  const assetGenerationDone = await waitForV1Job(baseUrl, assetGeneration.body.id);
+  assert.equal(assetGenerationDone.status, "done");
+  const assetGenerationHistoryId = assetGenerationDone.result.historyId;
+  const assetGenerationHistory = await requestJsonWithStatus(
+    `${baseUrl}/api/v1/history/${assetGenerationHistoryId}`
+  );
+  assert.equal(assetGenerationHistory.status, 200);
+  assert.deepEqual(assetGenerationHistory.body.ipAdapter, {
+    referenceImageId: importedAsset.id,
+    weight: 0.65,
+    guidanceStart: 0,
+    guidanceEnd: 1
+  });
+  assert.doesNotMatch(JSON.stringify(assetGenerationHistory.body), /host-attached|attachments|base64|C:\\\\/);
+  const assetGenerationRequest = reforgeRequests.filter((item) => item.url === "/sdapi/v1/txt2img").at(-1);
+  assert.equal(assetGenerationRequest.body.alwayson_scripts.ControlNet.args[0].image, normalizedBase64);
+
+  const assetRegeneration = await requestJsonWithStatus(
+    `${baseUrl}/api/v1/history/${assetGenerationHistoryId}/regenerations`,
+    {
+      method: "POST",
+      body: {
+        sourceImageId: assetGenerationHistory.body.images[0].id,
+        ipAdapter: { referenceImageId: importedAsset.id, weight: 0.45, guidanceStart: 0.1, guidanceEnd: 0.9 }
+      }
+    }
+  );
+  assert.equal(assetRegeneration.status, 202);
+  const assetRegenerationDone = await waitForV1Job(baseUrl, assetRegeneration.body.id);
+  assert.equal(assetRegenerationDone.status, "done");
+  const assetRegenerationHistory = await requestJsonWithStatus(
+    `${baseUrl}/api/v1/history/${assetRegenerationDone.result.historyId}`
+  );
+  assert.deepEqual(assetRegenerationHistory.body.ipAdapter, {
+    referenceImageId: importedAsset.id,
+    weight: 0.45,
+    guidanceStart: 0.1,
+    guidanceEnd: 0.9
+  });
+  const assetRegenerationRequest = reforgeRequests.filter((item) => item.url === "/sdapi/v1/txt2img").at(-1);
+  assert.equal(assetRegenerationRequest.body.alwayson_scripts.ControlNet.args[0].image, normalizedBase64);
+
+  const historyBeforeUnavailableAsset = await requestJsonWithStatus(`${baseUrl}/api/v1/history?limit=50`);
+  const generatedBeforeUnavailableAsset = reforgeRequests.filter((item) => item.url === "/sdapi/v1/txt2img").length;
+  reforgeRequests.ipAdapterModelSupported = false;
+  const unavailableAssetGeneration = await requestJsonWithStatus(`${baseUrl}/api/v1/generations`, {
+    method: "POST",
+    body: {
+      mode: "txt2img",
+      prompt: { rawOverride: "asset capability unavailable" },
+      settings: { width: 512, height: 512, steps: 5, candidateCount: 1 },
+      ipAdapter: { referenceImageId: importedAsset.id }
+    }
+  });
+  const unavailableAssetDone = await waitForV1Job(baseUrl, unavailableAssetGeneration.body.id);
+  assert.equal(unavailableAssetDone.status, "failed");
+  assert.equal(
+    reforgeRequests.filter((item) => item.url === "/sdapi/v1/txt2img").length,
+    generatedBeforeUnavailableAsset,
+    "利用不可時はAsset参照でもReForge生成へfallbackしない"
+  );
+  const historyAfterUnavailableAsset = await requestJsonWithStatus(`${baseUrl}/api/v1/history?limit=50`);
+  assert.equal(historyAfterUnavailableAsset.body.total, historyBeforeUnavailableAsset.body.total);
+  reforgeRequests.ipAdapterModelSupported = true;
 
   // 実サーバーを同じroot+portで2個起動し、2個目だけが拒否されることを確認する。
   const duplicate = spawn(process.execPath, ["src/server.js"], {

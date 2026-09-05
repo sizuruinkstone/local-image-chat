@@ -55,16 +55,22 @@ import {
   toggleFavoriteOption
 } from "./option-picker.js";
 import {
+  LORA_ROOT_FOLDER,
   MAX_CANDIDATE_COUNT,
   MIN_CANDIDATE_COUNT,
   PRESET_CATEGORY_LABELS,
   buildCharacterPresets,
+  buildLoraFolderTree,
   buildGroups,
   buildLoraCatalog,
   buildOutfitPresets,
   clampCandidateCount,
+  filterItemsByFolder,
   filterPresets,
+  formatLoraRelativeLocation,
+  getFolderDescendantCount,
   isValidCandidateCount,
+  loraFolderKey,
   splitTriggerPreview
 } from "./preset-catalog.js";
 import {
@@ -228,8 +234,10 @@ let storageMigrationBusy = false;
 const elements = Object.fromEntries(
   [
     "health", "healthButton", "generateButton",
+    "contentRatingGeneral", "contentRatingNsfw",
     "prompt", "negativePrompt", "width", "height", "steps", "cfgScale", "seed",
     "resolutionPreset", "randomizeSeedButton", "seedFixedToggle", "generationSettingsSummary", "generationTitle",
+    "runtimeSelect", "runtimeStatus",
     "samplerName", "scheduler", "noiseSchedule", "candidateCount", "hiresScale", "hiresSteps",
     "hiresDenoising", "hiresUpscaler", "emptyState", "loading", "loadingText",
     "resultTab",
@@ -237,7 +245,8 @@ const elements = Object.fromEntries(
     "finishButton", "finalResult", "resultImage", "seedText",
     "resolutionText", "downloadLink", "explanation", "error", "loraSearch",
     "loraList", "loraStatus", "loraSelectedCount", "selectedLoraSummary",
-    "loraCompatibilityFilter", "loraPreview",
+    "loraCompatibilityFilter", "loraPreview", "loraFolderButton", "loraFolderPane",
+    "loraFolderTree", "loraListBreadcrumb", "loraListCount",
     "refreshLorasButton", "loraCategories", "jobBar", "jobMessage",
     "checkpointDetails", "checkpointSelect", "refreshCheckpointsButton", "checkpointStatus",
     "checkpointFamilyBadge", "checkpointProfileSelect", "checkpointAutoApply",
@@ -311,6 +320,7 @@ const elements = Object.fromEntries(
     "loraUseDetails", "loraUseCount", "usedLoraList", "addLoraButton",
     "loraUseSummary", "openLoraManagementButton", "settingsLoraDetails", "candidateCountDown", "candidateCountUp",
     "regenerateFinalButton", "openInGalleryButton", "galleryKindFilter", "galleryCheckpoint", "galleryLora",
+    "galleryRatingFilter", "galleryRatingDialogFilter",
     "galleryPeriod", "gallerySearch", "galleryFilterSummary", "resetGalleryFilterButton",
     "studioOutputStats", "studioGenerationStatus", "studioGenerationTime", "studioResolution", "studioSeed",
     "studioSampler", "studioCfg", "studioSteps", "studioRecentCount", "studioRecentList",
@@ -440,12 +450,21 @@ let historyEntries = [];
 // ここを切り替えても生成は止まらない。
 let currentView = "generate";
 // ギャラリーの絞り込み条件（画面側だけの状態。履歴データは変えない）。
-let galleryFilter = { kind: "all", checkpoint: "", lora: "", period: "", query: "", tags: [] };
+let galleryFilter = { kind: "all", rating: "all", checkpoint: "", lora: "", period: "", query: "", tags: [] };
 let gallerySort = "newest";
 let galleryTagQuery = "";
 let galleryCompareMode = false;
 // Sampler / Scheduler の候補一覧（ReForgeから取得、失敗時は既定値）。
 let samplerOptions = { samplers: [], schedulers: [] };
+let runtimeOptions = [];
+let activeRuntimeId = "reforge";
+let activeRuntime = null;
+let configuredDefaultRuntimeId = "reforge";
+let runtimeSelectionToken = 0;
+let runtimeSwitching = false;
+let runtimeSwitchPromise = Promise.resolve(true);
+let runtimeSwitchSnapshot = null;
+let checkpointRefreshInFlight = false;
 // 直近に取得した履歴。絞り込みのたびに取り直さないよう保持する。
 let lastHistoryGenerations = [];
 const HISTORY_PAGE_SIZE = 20;
@@ -462,8 +481,12 @@ const imageFavorites = new Map();
 // 次の生成が「どの派生操作から来たか」を履歴へ残すための一時情報。
 let pendingDerivation = null;
 let installedCheckpoints = [];
+// Backendが現在ロードしているCheckpointと、次回生成で使う選択値を分離する。
 let activeCheckpoint = null;
+let selectedCheckpoint = null;
 let activeLoraCategory = loadLoraCategory();
+let selectedLoraFolder = "";
+const expandedLoraFolders = new Set();
 let pinnedLoraName = null;
 let displayedLoraName = null;
 // Seedの「ランダム」はアプリ全体で-1。空欄と同じ扱いにはしない。
@@ -558,6 +581,7 @@ syncIpAdapterUi();
   startQueuePolling();
 
 elements.healthButton.addEventListener("click", checkHealth);
+elements.runtimeSelect.addEventListener("change", () => void handleRuntimeChange());
 elements.storageTargetOutputDir.addEventListener("input", invalidateStoragePlan);
 elements.storagePlanButton.addEventListener("click", planStorageMigration);
 elements.storageReserveButton.addEventListener("click", reserveStorageMigration);
@@ -775,6 +799,11 @@ elements.cancelJobButton.addEventListener("click", cancelActiveJob);
 elements.queueIndicator.addEventListener("click", openQueuePanel);
 elements.clearPromptsButton.addEventListener("click", clearBothPrompts);
 elements.candidateCount.addEventListener("change", normalizeCandidateCount);
+for (const radio of [elements.contentRatingGeneral, elements.contentRatingNsfw]) {
+  radio.addEventListener("change", () => {
+    if (radio.checked) localStorage.setItem("localImageChat.contentRating", radio.value);
+  });
+}
 elements.prompt.addEventListener("input", handleRawPromptInput);
 elements.negativePrompt.addEventListener("input", () => {
   markPromptAsCurrent();
@@ -794,7 +823,8 @@ elements.loraCompatibilityFilter.addEventListener("change", () => {
   renderLoras();
 });
 elements.refreshLorasButton.addEventListener("click", () => loadLoras(true));
-elements.refreshCheckpointsButton.addEventListener("click", loadCheckpoints);
+elements.loraFolderButton.addEventListener("click", openLoraFolderModal);
+elements.refreshCheckpointsButton.addEventListener("click", () => void refreshCheckpoints());
 elements.checkpointSelect.addEventListener("change", switchSelectedCheckpoint);
 elements.checkpointProfileSelect.addEventListener("change", handleCheckpointProfileChange);
 elements.checkpointSetSelect.addEventListener("change", syncCheckpointSetControls);
@@ -869,6 +899,12 @@ elements.galleryTagSearch.addEventListener("input", () => {
   galleryTagQuery = elements.galleryTagSearch.value;
   renderGalleryTagOptions(toGalleryEntries(lastHistoryGenerations));
 });
+for (const container of [elements.galleryRatingFilter, elements.galleryRatingDialogFilter]) {
+  container.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-gallery-rating]");
+    if (button) setGalleryFilter({ rating: button.dataset.galleryRating });
+  });
+}
 elements.resetGalleryFilterButton.addEventListener("click", resetGalleryFilter);
 elements.compareTrayOpenButton.addEventListener("click", compareCurrentSelection);
 elements.compareTrayClearButton.addEventListener("click", clearCompareSelection);
@@ -924,8 +960,19 @@ elements.loraCategories.addEventListener("click", (event) => {
 
 async function loadConfig() {
   const response = await fetch("/api/config");
-  const { defaults, lora, version, runtime } = await response.json();
+  const { defaults, lora, version, runtime, runtimes, defaultRuntimeId } = await response.json();
   void loadVersionContract(version, runtime);
+  let liveRuntimeData = null;
+  try {
+    const liveResponse = await fetch("/api/runtimes");
+    if (liveResponse.ok) liveRuntimeData = await liveResponse.json();
+  } catch {
+    // live healthが取得できなくても、静的configで既存UIの初期化を続ける。
+  }
+  configureRuntimeOptions(
+    liveRuntimeData?.runtimes ?? runtimes,
+    liveRuntimeData?.defaultRuntimeId ?? defaultRuntimeId
+  );
   loraConfig = { ...loraConfig, ...lora };
   for (const [key, value] of Object.entries(defaults)) {
     if (!elements[key]) continue;
@@ -938,11 +985,363 @@ async function loadConfig() {
   }
   const savedCount = localStorage.getItem("localImageChat.candidateCount");
   if (["1", "2", "3", "4"].includes(savedCount)) elements.candidateCount.value = savedCount;
+  setContentRating(localStorage.getItem("localImageChat.contentRating") === "nsfw" ? "nsfw" : "general", {
+    persist: false
+  });
   elements.autoRetryOnFailure.checked = localStorage.getItem("localImageChat.autoRetry") === "true";
   elements.autoRetryOnFailure.addEventListener("change", () => {
     localStorage.setItem("localImageChat.autoRetry", String(elements.autoRetryOnFailure.checked));
   });
   syncSamplerLabels();
+}
+
+function configureRuntimeOptions(options, defaultRuntimeId) {
+  runtimeOptions = Array.isArray(options)
+    ? options.filter((item) => item && typeof item.id === "string" && typeof item.label === "string")
+    : [];
+  if (!runtimeOptions.some((item) => item.id === "reforge")) {
+    runtimeOptions.unshift({
+      id: "reforge",
+      label: "ReForge",
+      provider: "reforge",
+      available: true,
+      supportedModes: ["txt2img", "img2img", "inpaint"],
+      features: { txt2img: true, img2img: true, inpaint: true, hires: true, ipAdapter: true }
+    });
+  }
+  configuredDefaultRuntimeId = safeRuntimeId(defaultRuntimeId) || "reforge";
+  const saved = localStorage.getItem("localImageChat.runtimeId");
+  const preferred = saved || configuredDefaultRuntimeId || "reforge";
+  const selected = runtimeOptions.find((item) => item.id === preferred && isRuntimeSelectable(item))
+    ?? runtimeOptions.find((item) => item.id === configuredDefaultRuntimeId && isRuntimeSelectable(item))
+    ?? runtimeOptions.find((item) => isRuntimeSelectable(item))
+    ?? runtimeOptions.find((item) => item.id === preferred)
+    ?? runtimeOptions[0];
+  activeRuntimeId = selected?.id ?? "reforge";
+  activeRuntime = selected ?? null;
+  if (activeRuntimeId) localStorage.setItem("localImageChat.runtimeId", activeRuntimeId);
+  runtimeSelectionToken += 1;
+  renderRuntimeOptions();
+  elements.runtimeSelect.value = activeRuntimeId;
+  elements.runtimeSelect.disabled = runtimeOptions.length < 2
+    || runtimeOptions.every((runtime) => !isRuntimeSelectable(runtime));
+  syncRuntimeUi();
+}
+
+function selectedContentRating() {
+  return elements.contentRatingNsfw.checked ? "nsfw" : "general";
+}
+
+function setContentRating(value, { persist = true } = {}) {
+  const rating = value === "nsfw" ? "nsfw" : "general";
+  elements.contentRatingGeneral.checked = rating === "general";
+  elements.contentRatingNsfw.checked = rating === "nsfw";
+  if (persist) localStorage.setItem("localImageChat.contentRating", rating);
+  return rating;
+}
+
+function isRuntimeSelectable(runtime) {
+  if (!runtime || runtime.available === false) return false;
+  return runtime.ok === undefined || runtime.ok === true;
+}
+
+function renderRuntimeOptions() {
+  elements.runtimeSelect.replaceChildren();
+  for (const item of runtimeOptions) {
+    const option = new Option(runtimeOptionLabel(item), item.id);
+    option.disabled = !isRuntimeSelectable(item);
+    if (item.error) option.title = String(item.error);
+    elements.runtimeSelect.append(option);
+  }
+}
+
+function runtimeOptionLabel(runtime) {
+  const label = String(runtime?.label ?? runtime?.id ?? "Runtime");
+  if (runtime?.ok === false) return `${label}（未接続）`;
+  if (runtime?.available === false) return `${label}（無効）`;
+  return label;
+}
+
+async function applyRuntimeHealth(health) {
+  if (!health || typeof health !== "object" || Array.isArray(health)) return false;
+  runtimeOptions = runtimeOptions.map((runtime) => {
+    const live = health[runtime.id];
+    if (!live || typeof live !== "object" || Array.isArray(live)) return runtime;
+    return {
+      ...runtime,
+      available: live.ok === true && live.available !== false,
+      ok: live.ok === true,
+      ...(typeof live.error === "string" && live.error.trim()
+        ? { error: live.error.trim().slice(0, 200) }
+        : {})
+    };
+  });
+  activeRuntime = runtimeOptions.find((runtime) => runtime.id === activeRuntimeId) ?? activeRuntime;
+  renderRuntimeOptions();
+  const fallback = runtimeOptions.find((runtime) => runtime.id === configuredDefaultRuntimeId && isRuntimeSelectable(runtime))
+    ?? runtimeOptions.find((runtime) => isRuntimeSelectable(runtime));
+  if (activeRuntime && !isRuntimeSelectable(activeRuntime)
+    && fallback && fallback.id !== activeRuntimeId && !generationBusy && !runtimeSwitching) {
+    elements.runtimeSelect.value = fallback.id;
+    await handleRuntimeChange(fallback.id);
+  } else {
+    elements.runtimeSelect.value = activeRuntimeId;
+    syncRuntimeUi();
+  }
+  return true;
+}
+
+function runtimeRequestContext() {
+  return { token: runtimeSelectionToken, runtimeId: activeRuntimeId };
+}
+
+function isRuntimeContextCurrent(context) {
+  return context?.token === runtimeSelectionToken && context.runtimeId === activeRuntimeId;
+}
+
+function captureRuntimeState() {
+  return {
+    activeRuntimeId,
+    activeRuntime,
+    form: captureRuntimeFormState(),
+    installedCheckpoints,
+    activeCheckpoint,
+    selectedCheckpoint,
+    installedLoras,
+    samplerOptions: {
+      samplers: [...(samplerOptions.samplers ?? [])],
+      schedulers: [...(samplerOptions.schedulers ?? [])]
+    },
+    ipAdapterOptions,
+    ipAdapterState: { ...ipAdapterState },
+    selectedLoras: new Map(selectedLoras),
+    loraSelectionSources: new Map(loraSelectionSources),
+    disabledLoras: new Set(disabledLoras),
+    lastCheckpoint: localStorage.getItem("localImageChat.lastCheckpoint")
+  };
+}
+
+function restoreRuntimeState(snapshot) {
+  if (!snapshot) return;
+  activeRuntimeId = snapshot.activeRuntimeId;
+  activeRuntime = snapshot.activeRuntime;
+  localStorage.setItem("localImageChat.runtimeId", activeRuntimeId);
+  installedCheckpoints = snapshot.installedCheckpoints;
+  activeCheckpoint = snapshot.activeCheckpoint;
+  selectedCheckpoint = snapshot.selectedCheckpoint;
+  installedLoras = snapshot.installedLoras;
+  samplerOptions = snapshot.samplerOptions;
+  ipAdapterOptions = snapshot.ipAdapterOptions;
+  ipAdapterState = snapshot.ipAdapterState;
+  selectedLoras.clear();
+  for (const [name, weight] of snapshot.selectedLoras) selectedLoras.set(name, weight);
+  loraSelectionSources.clear();
+  for (const [name, source] of snapshot.loraSelectionSources) loraSelectionSources.set(name, source);
+  disabledLoras.clear();
+  for (const name of snapshot.disabledLoras) disabledLoras.add(name);
+  if (snapshot.lastCheckpoint === null) localStorage.removeItem("localImageChat.lastCheckpoint");
+  else localStorage.setItem("localImageChat.lastCheckpoint", snapshot.lastCheckpoint);
+  elements.runtimeSelect.value = activeRuntimeId;
+  renderCheckpointControls();
+  renderCheckpointSetSelect();
+  renderCheckpointProfileSummary();
+  renderLoras();
+  renderSelectedLoraSummary();
+  syncSamplerLabels();
+  restoreRuntimeFormState(snapshot.form);
+  syncIpAdapterUi();
+}
+
+function captureRuntimeFormState() {
+  const valueIds = [
+    "prompt", "negativePrompt", "width", "height", "steps", "cfgScale", "seed", "generationTitle",
+    "samplerName", "scheduler", "noiseSchedule", "candidateCount", "hiresScale", "hiresSteps",
+    "hiresDenoising", "hiresUpscaler", "img2imgDenoising", "img2imgResizeMode", "inpaintDenoising",
+    "maskBlur", "inpaintFill", "inpaintFullResPadding"
+  ];
+  const checkedIds = ["seedFixedToggle", "inpaintFullRes", "autoRetryOnFailure", "syncInitImageSize"];
+  return {
+    values: Object.fromEntries(valueIds
+      .filter((id) => elements[id])
+      .map((id) => [id, elements[id].value])),
+    checked: Object.fromEntries(checkedIds
+      .filter((id) => elements[id])
+      .map((id) => [id, elements[id].checked])),
+    promptDescription,
+    structuredPrompt: readStructuredSections(),
+    appliedTriggerWords: [...appliedTriggerWords],
+    rawPromptOverride,
+    rawPromptOverrideSource,
+    promptMode,
+    generationMode,
+    initImageReference: initImageReference ? { ...initImageReference } : null
+  };
+}
+
+function restoreRuntimeFormState(snapshot) {
+  if (!snapshot) return;
+  for (const [id, value] of Object.entries(snapshot.values ?? {})) {
+    if (elements[id]) elements[id].value = value;
+  }
+  for (const [id, checked] of Object.entries(snapshot.checked ?? {})) {
+    if (elements[id]) elements[id].checked = checked === true;
+  }
+  promptDescription = String(snapshot.promptDescription ?? "");
+  appliedTriggerWords = Array.isArray(snapshot.appliedTriggerWords)
+    ? [...snapshot.appliedTriggerWords]
+    : [];
+  rawPromptOverride = snapshot.rawPromptOverride === true;
+  rawPromptOverrideSource = snapshot.rawPromptOverrideSource === "generated" ? "generated" : "manual";
+  writeStructuredSections(snapshot.structuredPrompt ?? {});
+  setPromptMode(snapshot.promptMode);
+  syncRawPromptFromSections();
+  renderPromptModeState();
+  if (snapshot.initImageReference) {
+    setImageReference({ ...snapshot.initImageReference }, { mode: snapshot.generationMode });
+  } else if (initImageReference) {
+    clearInitImageReference();
+  }
+  setGenerationMode(snapshot.generationMode);
+  syncSamplerLabels();
+  handleCandidateCountChange();
+  handleImg2ImgDenoisingInput();
+  handleInpaintSettingsChange();
+}
+
+function runtimeSupports(feature, runtime = activeRuntime) {
+  if (!runtime) return feature === "txt2img";
+  return runtime.features?.[feature] === true
+    || (feature === "txt2img" && runtime.supportedModes?.includes("txt2img"));
+}
+
+function safeRuntimeId(value) {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(value.trim())
+    ? value.trim()
+    : "";
+}
+
+function runtimeForGeneration(generation) {
+  const id = safeRuntimeId(generation?.runtime?.id) || "reforge";
+  return runtimeOptions.find((item) => item.id === id && isRuntimeSelectable(item)) ?? null;
+}
+
+function runtimePayloadFor(runtime) {
+  return { runtimeId: safeRuntimeId(runtime?.id) || "reforge" };
+}
+
+function runtimeApiUrl(pathname) {
+  // configured defaultと画面上の選択Runtimeが異なっても、選択先へ送る。
+  if (!activeRuntimeId) return pathname;
+  const separator = pathname.includes("?") ? "&" : "?";
+  return `${pathname}${separator}runtimeId=${encodeURIComponent(activeRuntimeId)}`;
+}
+
+function runtimePayload() {
+  return activeRuntimeId ? { runtimeId: activeRuntimeId } : {};
+}
+
+function isForgeNeoRuntime() {
+  return activeRuntime?.provider === "forge-neo" || activeRuntime?.id === "forge-neo-anima";
+}
+
+function syncRuntimeUi() {
+  const runtimeLabel = activeRuntime?.label ?? activeRuntimeId;
+  const supported = activeRuntime?.supportedModes?.join(" / ") || "txt2img";
+  const connection = activeRuntime?.ok === undefined
+    ? "接続状態未確認"
+    : isRuntimeSelectable(activeRuntime) ? "接続OK" : "未接続";
+  const connectionDetail = activeRuntime?.ok === false && activeRuntime.error
+    ? ` · ${activeRuntime.error}`
+    : "";
+  elements.runtimeStatus.textContent = activeRuntime
+    ? `${runtimeLabel} · ${connection}${connectionDetail} · 対応: ${supported}${runtimeSupports("hires") ? "" : " · img2img / inpaint / Hires / IP-Adapterは利用不可"}`
+    : "Runtime情報を取得できません";
+  const busy = generationBusy || runtimeSwitching;
+  const runtimeUnavailable = Boolean(activeRuntime) && !isRuntimeSelectable(activeRuntime);
+  const hiresRuntime = selectedCandidate && lastGeneration
+    ? runtimeForGeneration(lastGeneration)
+    : activeRuntime;
+  const hiresAvailable = Boolean(hiresRuntime && runtimeSupports("hires", hiresRuntime));
+  elements.runtimeSelect.disabled = busy || runtimeOptions.length < 2
+    || runtimeOptions.every((runtime) => !isRuntimeSelectable(runtime));
+  elements.generateButton.disabled = busy || runtimeUnavailable;
+  elements.healthButton.disabled = busy;
+  elements.addLoraButton.disabled = busy;
+  elements.openLoraManagementButton.disabled = busy;
+  elements.refreshLorasButton.disabled = busy;
+  elements.refreshCheckpointsButton.disabled = busy || checkpointRefreshInFlight;
+  elements.img2imgModeButton.disabled = busy || !runtimeSupports("img2img");
+  elements.inpaintModeButton.disabled = busy || !runtimeSupports("inpaint");
+  elements.ipAdapterEnabled.disabled = busy || !runtimeSupports("ipAdapter");
+  for (const control of [
+    elements.hiresScale,
+    elements.hiresSteps,
+    elements.hiresDenoising,
+    elements.hiresUpscaler
+  ]) control.disabled = busy || !hiresAvailable;
+  if (!runtimeSwitching && !runtimeSupports("img2img") && ["img2img", "inpaint"].includes(generationMode)) {
+    setGenerationMode("txt2img");
+  }
+  elements.finishButton.disabled = busy || !selectedCandidate || !hiresAvailable;
+  syncIpAdapterUi();
+}
+
+async function handleRuntimeChange(requestedRuntimeId = elements.runtimeSelect.value) {
+  const selected = runtimeOptions.find((item) => item.id === requestedRuntimeId);
+  if (!selected || !isRuntimeSelectable(selected)) {
+    elements.runtimeSelect.value = activeRuntimeId;
+    return false;
+  }
+  if (generationBusy) {
+    elements.runtimeSelect.value = activeRuntimeId;
+    showError("生成中はRuntimeを切り替えられません");
+    return false;
+  }
+  if (selected.id === activeRuntimeId) {
+    elements.runtimeSelect.value = activeRuntimeId;
+    return runtimeSwitching ? runtimeSwitchPromise : true;
+  }
+  if (!runtimeSwitching) runtimeSwitchSnapshot = captureRuntimeState();
+  activeRuntimeId = selected.id;
+  activeRuntime = selected;
+  runtimeSelectionToken += 1;
+  const context = runtimeRequestContext();
+  runtimeSwitching = true;
+  localStorage.setItem("localImageChat.runtimeId", activeRuntimeId);
+  syncRuntimeUi();
+  const switching = (async () => {
+    if (!runtimeSupports("txt2img")) {
+      if (isRuntimeContextCurrent(context)) {
+        restoreRuntimeState(runtimeSwitchSnapshot);
+        runtimeSelectionToken += 1;
+        runtimeSwitching = false;
+        runtimeSwitchSnapshot = null;
+        syncRuntimeUi();
+      }
+      return false;
+    }
+    const results = await Promise.all([
+      loadCheckpoints(context),
+      loadLoras(false, context),
+      loadSamplerOptions(context),
+      loadIpAdapterOptions(context)
+    ]);
+    if (!isRuntimeContextCurrent(context)) return false;
+    if (!results.every(Boolean)) {
+      restoreRuntimeState(runtimeSwitchSnapshot);
+      runtimeSelectionToken += 1;
+      runtimeSwitching = false;
+      runtimeSwitchSnapshot = null;
+      syncRuntimeUi();
+      return false;
+    }
+    runtimeSwitching = false;
+    runtimeSwitchSnapshot = null;
+    syncRuntimeUi();
+    return true;
+  })();
+  runtimeSwitchPromise = switching;
+  return switching;
 }
 
 async function loadVersionContract(serverVersion, runtime) {
@@ -1061,6 +1460,10 @@ function syncTitleTemplateVisibility() {
 }
 
 function setGenerationMode(mode) {
+  if (mode !== "txt2img" && !runtimeSupports(mode)) {
+    showError(`${activeRuntime?.label ?? "選択したRuntime"}では${mode === "inpaint" ? "inpaint" : "img2img"}を利用できません`);
+    return;
+  }
   generationMode = ["img2img", "inpaint"].includes(mode) ? mode : "txt2img";
   const isImg2Img = generationMode === "img2img";
   const isInpaint = generationMode === "inpaint";
@@ -1075,6 +1478,7 @@ function setGenerationMode(mode) {
   elements.img2imgSettings.classList.toggle("hidden", !isImg2Img);
   elements.inpaintPanel.classList.toggle("hidden", !isInpaint);
   if (isInpaint && initImageReference) void initializeInpaintEditor(initImageReference);
+  syncRuntimeUi();
   updateGenerateButton();
 }
 
@@ -1125,6 +1529,7 @@ function activateSettingsCategory(categoryId, { targetId = "", focus = false } =
   elements.settingsCategorySelect.value = category.id;
   elements.settingsCategoryTitle.textContent = category.label;
   elements.settingsCategoryDescription.textContent = category.description;
+  elements.settingsContent.classList.toggle("is-lora-category", category.id === "lora");
   for (const panel of elements.settingsContent.querySelectorAll("[data-settings-panel]")) {
     const selected = panel.dataset.settingsCategory === category.id;
     panel.hidden = !selected;
@@ -1832,33 +2237,84 @@ function initializeCheckpointControls() {
   elements.checkpointAutoApply.checked = savedAutoApply !== "false";
 }
 
-async function loadCheckpoints() {
-  elements.checkpointStatus.textContent = "ReForgeからCheckpointを取得中…";
+async function loadCheckpoints(context = runtimeRequestContext()) {
+  elements.checkpointStatus.textContent = `${activeRuntime?.label ?? "Runtime"}からCheckpointを取得中…`;
   elements.checkpointSelect.disabled = true;
   elements.refreshCheckpointsButton.disabled = true;
   try {
-    const data = await getJson("/api/checkpoints");
-    installedCheckpoints = data.checkpoints ?? [];
-    activeCheckpoint = findCheckpoint(data.activeCheckpoint) ?? (
-      data.activeCheckpoint
-        ? { title: data.activeCheckpoint, modelName: data.activeCheckpoint, filename: "" }
-        : null
-    );
-    renderCheckpointControls();
-    renderCheckpointSetSelect();
-    localStorage.setItem("localImageChat.lastCheckpoint", activeCheckpoint?.title ?? "");
-    elements.checkpointStatus.textContent = activeCheckpoint
-      ? `使用中: ${activeCheckpoint.title}`
-      : "使用中のCheckpointを判定できません";
-    renderLoras();
-    renderSelectedLoraSummary();
+    const data = await getJson(runtimeApiUrl("/api/checkpoints"));
+    if (!isRuntimeContextCurrent(context)) return false;
+    applyCheckpointCatalog(data);
+    return true;
   } catch (error) {
+    if (!isRuntimeContextCurrent(context)) return false;
     elements.checkpointSelect.replaceChildren(new Option("取得失敗", ""));
     elements.checkpointStatus.textContent = `Checkpoint一覧を取得できません: ${error.message}`;
     renderCheckpointProfileSummary();
+    return false;
   } finally {
-    elements.checkpointSelect.disabled = !installedCheckpoints.length;
-    elements.refreshCheckpointsButton.disabled = false;
+    if (isRuntimeContextCurrent(context)) {
+      elements.checkpointSelect.disabled = !installedCheckpoints.length;
+      elements.refreshCheckpointsButton.disabled = generationBusy || runtimeSwitching || checkpointRefreshInFlight;
+    }
+  }
+}
+
+function applyCheckpointCatalog(data, statusPrefix = "") {
+  installedCheckpoints = data.checkpoints ?? [];
+  activeCheckpoint = findCheckpoint(data.activeCheckpoint) ?? (
+    data.activeCheckpoint
+      ? { title: data.activeCheckpoint, modelName: data.activeCheckpoint, filename: "" }
+      : null
+  );
+  const rememberedSelection = selectedCheckpoint?.title
+    || localStorage.getItem("localImageChat.lastCheckpoint")
+    || "";
+  selectedCheckpoint = findCheckpoint(rememberedSelection) ?? activeCheckpoint;
+  renderCheckpointControls();
+  renderCheckpointSetSelect();
+  localStorage.setItem("localImageChat.lastCheckpoint", selectedCheckpoint?.title ?? "");
+  renderCheckpointStatus(statusPrefix);
+  renderLoras();
+  renderSelectedLoraSummary();
+}
+
+function renderCheckpointStatus(statusPrefix = "") {
+  const prefix = String(statusPrefix ?? "");
+  if (activeCheckpoint && selectedCheckpoint
+    && activeCheckpoint.title !== selectedCheckpoint.title) {
+    elements.checkpointStatus.textContent = `${prefix}使用中: ${activeCheckpoint.title}（次回生成で切替: ${selectedCheckpoint.title}）`;
+  } else if (activeCheckpoint) {
+    elements.checkpointStatus.textContent = `${prefix}使用中: ${activeCheckpoint.title}`;
+  } else if (selectedCheckpoint) {
+    elements.checkpointStatus.textContent = `${prefix}次回生成で切替: ${selectedCheckpoint.title}（使用中のCheckpointを確認できません）`;
+  } else {
+    elements.checkpointStatus.textContent = `${prefix}使用中のCheckpointを判定できません`;
+  }
+}
+
+async function refreshCheckpoints() {
+  if (generationBusy || runtimeSwitching || checkpointRefreshInFlight) return false;
+  const context = runtimeRequestContext();
+  checkpointRefreshInFlight = true;
+  elements.checkpointSelect.disabled = true;
+  elements.refreshCheckpointsButton.disabled = true;
+  elements.checkpointStatus.textContent = `${activeRuntime?.label ?? "Runtime"}でCheckpointを再走査中…`;
+  try {
+    const data = await postJson(runtimeApiUrl("/api/checkpoints/refresh"), {});
+    if (!isRuntimeContextCurrent(context)) return false;
+    applyCheckpointCatalog(data, "Checkpoint一覧を更新しました。 ");
+    return true;
+  } catch (error) {
+    if (!isRuntimeContextCurrent(context)) return false;
+    elements.checkpointStatus.textContent = `Checkpoint一覧の更新に失敗: ${error.message}`;
+    return false;
+  } finally {
+    checkpointRefreshInFlight = false;
+    if (isRuntimeContextCurrent(context)) {
+      elements.checkpointSelect.disabled = !installedCheckpoints.length;
+      elements.refreshCheckpointsButton.disabled = generationBusy || runtimeSwitching;
+    }
   }
 }
 
@@ -1868,64 +2324,78 @@ function renderCheckpointControls() {
     elements.checkpointSelect.append(new Option(checkpoint.title, checkpoint.title));
   }
   if (
+    selectedCheckpoint
+    && !installedCheckpoints.some((checkpoint) => checkpoint.title === selectedCheckpoint.title)
+  ) {
+    elements.checkpointSelect.append(new Option(selectedCheckpoint.title, selectedCheckpoint.title));
+  }
+  if (
     activeCheckpoint
+    && activeCheckpoint.title !== selectedCheckpoint?.title
     && !installedCheckpoints.some((checkpoint) => checkpoint.title === activeCheckpoint.title)
   ) {
     elements.checkpointSelect.append(new Option(activeCheckpoint.title, activeCheckpoint.title));
   }
-  elements.checkpointSelect.value = activeCheckpoint?.title ?? "";
-  elements.checkpointProfileSelect.value = getCheckpointProfileSelection(activeCheckpoint);
+  elements.checkpointSelect.value = selectedCheckpoint?.title ?? "";
+  elements.checkpointProfileSelect.value = getCheckpointProfileSelection(selectedCheckpoint);
   renderCheckpointProfileSummary();
 }
 
 async function switchSelectedCheckpoint() {
   const selectedTitle = elements.checkpointSelect.value;
-  if (!selectedTitle || selectedTitle === activeCheckpoint?.title) return;
-  const previous = activeCheckpoint;
+  if (!selectedTitle || selectedTitle === selectedCheckpoint?.title) return;
+  const previousSelected = selectedCheckpoint;
   const selected = installedCheckpoints.find((checkpoint) => checkpoint.title === selectedTitle);
+  const neoSelection = isForgeNeoRuntime();
   elements.checkpointSelect.disabled = true;
   elements.refreshCheckpointsButton.disabled = true;
-  elements.checkpointStatus.textContent = `切替中: ${selectedTitle}（モデル読込に時間がかかる場合があります）`;
+  elements.checkpointStatus.textContent = neoSelection
+    ? `次回生成用のCheckpointを確認中: ${selectedTitle}`
+    : `切替中: ${selectedTitle}（モデル読込に時間がかかる場合があります）`;
   try {
-    const data = await postJson("/api/checkpoints/select", { checkpoint: selectedTitle });
-    activeCheckpoint = selected ?? findCheckpoint(data.checkpoint) ?? {
+    const data = await postJson("/api/checkpoints/select", { checkpoint: selectedTitle, ...runtimePayload() });
+    const nextCheckpoint = selected ?? findCheckpoint(data.checkpoint) ?? {
       title: data.checkpoint || selectedTitle,
       modelName: data.checkpoint || selectedTitle,
       filename: ""
     };
-    localStorage.setItem("localImageChat.lastCheckpoint", activeCheckpoint.title);
-    elements.checkpointProfileSelect.value = getCheckpointProfileSelection(activeCheckpoint);
-    const profile = resolveCheckpointProfile(activeCheckpoint);
+    selectedCheckpoint = nextCheckpoint;
+    if (!neoSelection) activeCheckpoint = nextCheckpoint;
+    localStorage.setItem("localImageChat.lastCheckpoint", selectedCheckpoint.title);
+    elements.checkpointProfileSelect.value = getCheckpointProfileSelection(selectedCheckpoint);
+    const profile = resolveCheckpointProfile(selectedCheckpoint);
     if (elements.checkpointAutoApply.checked && profile.settings) applyCheckpointSettings(profile);
     renderCheckpointProfileSummary();
     renderLoras();
     renderSelectedLoraSummary();
     renderCheckpointSetSelect();
-    elements.checkpointStatus.textContent = `切替完了: ${activeCheckpoint.title}`;
+    elements.checkpointStatus.textContent = neoSelection
+      ? `次回生成で切替: ${selectedCheckpoint.title}${activeCheckpoint ? `（現在の使用中: ${activeCheckpoint.title}）` : ""}`
+      : `切替完了: ${selectedCheckpoint.title}`;
     // 自動適用ONのLoRAセットがあれば読み込む（編集中なら確認する）。
     await applyAutoCheckpointSet();
     void checkHealth();
     void loadIpAdapterOptions();
   } catch (error) {
-    activeCheckpoint = previous;
-    elements.checkpointSelect.value = previous?.title ?? "";
+    selectedCheckpoint = previousSelected;
+    elements.checkpointSelect.value = selectedCheckpoint?.title ?? "";
     elements.checkpointStatus.textContent = `Checkpoint切替に失敗: ${error.message}`;
   } finally {
     elements.checkpointSelect.disabled = false;
-    elements.refreshCheckpointsButton.disabled = false;
+    elements.refreshCheckpointsButton.disabled = generationBusy || runtimeSwitching || checkpointRefreshInFlight;
   }
 }
 
 function handleCheckpointProfileChange() {
-  if (!activeCheckpoint) return;
+  if (!selectedCheckpoint) return;
   const selection = elements.checkpointProfileSelect.value;
-  if (selection === "auto") checkpointProfileAssignments.delete(activeCheckpoint.title);
-  else checkpointProfileAssignments.set(activeCheckpoint.title, selection);
+  if (selection === "auto") checkpointProfileAssignments.delete(selectedCheckpoint.title);
+  else checkpointProfileAssignments.set(selectedCheckpoint.title, selection);
   localStorage.setItem(
     "localImageChat.checkpointProfileAssignments",
     JSON.stringify(Object.fromEntries(checkpointProfileAssignments))
   );
-  const profile = resolveCheckpointProfile(activeCheckpoint);
+  const profile = resolveCheckpointProfile(selectedCheckpoint);
   if (elements.checkpointAutoApply.checked && profile.settings) applyCheckpointSettings(profile);
   renderCheckpointProfileSummary();
   renderLoras();
@@ -1933,7 +2403,7 @@ function handleCheckpointProfileChange() {
 }
 
 function renderCheckpointProfileSummary() {
-  const profile = resolveCheckpointProfile(activeCheckpoint);
+  const profile = resolveCheckpointProfile(selectedCheckpoint);
   const familyLabels = {
     illustrious: "Illustrious",
     noobai: "NoobAI",
@@ -1973,7 +2443,7 @@ function getCheckpointProfileSelection(checkpoint) {
   return checkpointProfileAssignments.get(checkpoint?.title) ?? "auto";
 }
 
-function resolveCheckpointProfile(checkpoint = activeCheckpoint) {
+function resolveCheckpointProfile(checkpoint = selectedCheckpoint) {
   const assigned = checkpointProfileAssignments.get(checkpoint?.title);
   return getCheckpointProfile(assigned) ?? inferCheckpointProfile(checkpoint);
 }
@@ -2028,7 +2498,7 @@ async function loadCheckpointSets() {
 }
 
 function setsForActiveCheckpoint() {
-  const identity = checkpointIdentity(activeCheckpoint?.title);
+  const identity = checkpointIdentity(selectedCheckpoint?.title);
   return checkpointSets.filter((set) => checkpointIdentity(set.checkpoint) === identity);
 }
 
@@ -2089,7 +2559,7 @@ function currentSetPayload(name) {
   const settings = readSettings({ candidateCount: elements.candidateCount.value });
   return {
     name,
-    checkpoint: activeCheckpoint?.title ?? "",
+    checkpoint: selectedCheckpoint?.title ?? "",
     autoApply: elements.checkpointSetAutoApply.checked,
     loras: readSelectedLoras(),
     settings: {
@@ -2112,8 +2582,8 @@ function currentSetPayload(name) {
 }
 
 async function saveCurrentCheckpointSet() {
-  if (!activeCheckpoint?.title) return toast.warning("Checkpointを選択してから保存してください");
-  const name = await promptModal("LoRAセットの名前", `${formatCheckpointBadge(activeCheckpoint.title)} 基本セット`, {
+  if (!selectedCheckpoint?.title) return toast.warning("Checkpointを選択してから保存してください");
+  const name = await promptModal("LoRAセットの名前", `${formatCheckpointBadge(selectedCheckpoint.title)} 基本セット`, {
     placeholder: "例: NoobAI 基本セット",
     confirmText: "保存"
   });
@@ -2236,7 +2706,7 @@ async function toggleCheckpointSetAutoApply() {
 
 // Checkpoint切替後に、自動適用ONのセットがあれば適用する。
 async function applyAutoCheckpointSet() {
-  const identity = checkpointIdentity(activeCheckpoint?.title);
+  const identity = checkpointIdentity(selectedCheckpoint?.title);
   const set = checkpointSets.find((item) => item.autoApply && checkpointIdentity(item.checkpoint) === identity);
   if (!set) return;
   elements.checkpointSetSelect.value = set.id;
@@ -2268,6 +2738,161 @@ function findLoraByName(name) {
   return installedLoras.find((item) => item.name === name) ?? null;
 }
 
+function expandLoraFolderPath(folder, expandedFolders) {
+  if (!folder || folder === LORA_ROOT_FOLDER) return;
+  const segments = String(folder).replaceAll("\\", "/").split("/").filter(Boolean);
+  let path = "";
+  for (const segment of segments) {
+    path = path ? `${path}/${segment}` : segment;
+    expandedFolders.add(path);
+  }
+}
+
+// 設定画面とLoRA選択モーダルで共用するフォルダツリー。
+// selectedFolderは空文字=すべて、(ルート)=folder未指定を表す。
+function renderLoraFolderTree(container, items, {
+  selectedFolder = "",
+  expandedFolders = new Set(),
+  onSelect = () => {},
+  onToggle = () => {}
+} = {}) {
+  if (!container) return;
+  const tree = buildLoraFolderTree(items);
+  container.replaceChildren();
+
+  const appendRow = (parent, {
+    value,
+    label,
+    count,
+    depth = 0,
+    node = null,
+    rootFolder = false
+  }) => {
+    const row = document.createElement("div");
+    row.className = "loraFolderTreeRow";
+    row.style.setProperty("--folder-depth", String(depth));
+    row.setAttribute("role", "treeitem");
+    row.setAttribute("aria-selected", String(selectedFolder === value));
+    if (node) row.setAttribute("aria-expanded", String(expandedFolders.has(node.value)));
+
+    if (node?.children?.length) {
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "loraFolderTreeToggle";
+      toggle.textContent = expandedFolders.has(node.value) ? "▾" : "▸";
+      toggle.setAttribute("aria-label", `${label}${expandedFolders.has(node.value) ? "を折りたたむ" : "を展開"}`);
+      toggle.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onToggle(node.value, node);
+      });
+      row.append(toggle);
+    } else {
+      const spacer = document.createElement("span");
+      spacer.className = "loraFolderTreeToggle loraFolderTreeToggleSpacer";
+      spacer.setAttribute("aria-hidden", "true");
+      row.append(spacer);
+    }
+
+    const select = document.createElement("button");
+    select.type = "button";
+    select.className = "loraFolderTreeSelect";
+    select.classList.toggle("active", selectedFolder === value);
+    select.dataset.loraFolder = value;
+    select.title = rootFolder ? LORA_ROOT_FOLDER : (node?.value || label);
+    const labelText = document.createElement("span");
+    labelText.className = "loraFolderTreeLabel";
+    labelText.textContent = label;
+    const countText = document.createElement("span");
+    countText.className = "loraFolderTreeCount";
+    countText.textContent = `${count}個`;
+    select.append(labelText, countText);
+    select.addEventListener("click", () => onSelect(value, node));
+    row.append(select);
+    parent.append(row);
+
+    if (node?.children?.length && expandedFolders.has(node.value)) {
+      const children = document.createElement("div");
+      children.className = "loraFolderTreeChildren";
+      children.setAttribute("role", "group");
+      for (const child of node.children) {
+        appendRow(children, {
+          value: child.value,
+          label: child.label,
+          count: getFolderDescendantCount(child),
+          depth: depth + 1,
+          node: child
+        });
+      }
+      parent.append(children);
+    }
+  };
+
+  appendRow(container, {
+    value: "",
+    label: "すべて",
+    count: getFolderDescendantCount(tree),
+    rootFolder: true
+  });
+  appendRow(container, {
+    value: LORA_ROOT_FOLDER,
+    label: LORA_ROOT_FOLDER,
+    count: tree.directCount,
+    rootFolder: true
+  });
+  for (const child of tree.children) {
+    appendRow(container, {
+      value: child.value,
+      label: child.label,
+      count: getFolderDescendantCount(child),
+      node: child
+    });
+  }
+}
+
+function selectLoraFolder(folder) {
+  selectedLoraFolder = folder;
+  expandLoraFolderPath(folder, expandedLoraFolders);
+  renderLoras();
+}
+
+function toggleLoraFolder(folder) {
+  if (expandedLoraFolders.has(folder)) expandedLoraFolders.delete(folder);
+  else expandedLoraFolders.add(folder);
+  renderLoras();
+}
+
+function openLoraFolderModal() {
+  openModal({
+    title: "LoRAフォルダ",
+    subtitle: "表示する保存場所を選択",
+    size: "small",
+    build: (body, close) => {
+      body.classList.add("loraFolderDrawerBody");
+      const rootButton = document.createElement("button");
+      rootButton.type = "button";
+      rootButton.className = "ghost loraFolderDrawerRoot";
+      rootButton.textContent = "LoRAフォルダを開く";
+      rootButton.addEventListener("click", openLoraRootFolder);
+      const tree = document.createElement("div");
+      tree.className = "loraFolderTree loraFolderDrawerTree";
+      tree.setAttribute("role", "tree");
+      tree.setAttribute("aria-label", "LoRAフォルダ一覧");
+      body.append(rootButton, tree);
+      renderLoraFolderTree(tree, installedLoras, {
+        selectedFolder: selectedLoraFolder,
+        expandedFolders: expandedLoraFolders,
+        onToggle: toggleLoraFolder,
+        onSelect: (folder) => {
+          selectLoraFolder(folder);
+          close();
+        }
+      });
+    },
+    actions: [{ label: "閉じる", value: true, variant: "ghost" }]
+  });
+}
+
 // ホバー・フォーカス時は一時表示。lora未指定なら固定中へ戻す。
 function showTransientLoraPreview(lora) {
   if (!lora) return restorePinnedLoraPreview();
@@ -2292,10 +2917,12 @@ function refreshLoraPreviewPane() {
   restorePinnedLoraPreview();
 }
 
-function renderLoraPreview(lora, { pinned = false } = {}) {
-  const pane = elements.loraPreview;
+function renderLoraPreview(lora, { pinned = false, container = elements.loraPreview } = {}) {
+  const pane = container;
+  if (!pane) return;
+  const isMainPane = pane === elements.loraPreview;
   pane.replaceChildren();
-  displayedLoraName = lora?.name ?? null;
+  if (isMainPane) displayedLoraName = lora?.name ?? null;
   if (!lora) {
     const hint = document.createElement("p");
     hint.className = "loraPreviewHint";
@@ -2360,9 +2987,10 @@ function renderLoraPreview(lora, { pinned = false } = {}) {
   list.className = "loraPreviewFields";
   const addField = addFieldTo(list);
 
+  addField("保存場所", formatLoraRelativeLocation(lora));
   const baseModel = registry?.baseModel ?? profile?.baseModel;
   addField("Base Model", baseModel);
-  if (baseModel && activeCheckpoint) {
+  if (baseModel && selectedCheckpoint) {
     const badge = document.createElement("span");
     badge.className = `loraCompatibility ${compatibility.level}`;
     badge.textContent = compatibility.label;
@@ -2416,7 +3044,10 @@ function renderLoraPreview(lora, { pinned = false } = {}) {
   const isSelected = selectedLoras.has(lora.name);
   toggle.className = isSelected ? "secondary" : "primary";
   toggle.textContent = isSelected ? "LoRAを解除" : "LoRAを選択";
-  toggle.addEventListener("click", () => toggleLoraSelectionFromPreview(lora));
+  toggle.addEventListener("click", () => {
+    toggleLoraSelectionFromPreview(lora);
+    if (!isMainPane) renderLoraPreview(lora, { pinned, container: pane });
+  });
   actions.append(toggle);
 
   const edit = document.createElement("button");
@@ -2450,6 +3081,27 @@ function renderLoraPreview(lora, { pinned = false } = {}) {
     actions.append(link);
   }
   pane.append(actions);
+}
+
+function shouldUseLoraDetailModal() {
+  return window.matchMedia?.("(max-width: 1099px)")?.matches ?? false;
+}
+
+function openLoraDetailModal(lora) {
+  openModal({
+    title: lora.displayName || lora.name,
+    subtitle: formatLoraRelativeLocation(lora),
+    size: "medium",
+    build: (body) => {
+      const pane = document.createElement("div");
+      pane.className = "loraPreview loraPreviewModal";
+      pane.setAttribute("aria-live", "polite");
+      pane.setAttribute("aria-label", "LoRA詳細");
+      body.append(pane);
+      renderLoraPreview(lora, { pinned: true, container: pane });
+    },
+    actions: [{ label: "閉じる", value: true, variant: "ghost" }]
+  });
 }
 
 // LoRAメタデータ編集。未登録のLoRAは編集時にregistryへ登録してから扱う。
@@ -2599,13 +3251,14 @@ function applyRecommendedWeight(lora) {
   renderLoras();
 }
 
-async function loadLoras(refresh = false) {
-  elements.loraStatus.textContent = refresh ? "ReForgeでLoRAを再読込中…" : "LoRAを取得中…";
+async function loadLoras(refresh = false, context = runtimeRequestContext()) {
+  elements.loraStatus.textContent = refresh ? `${activeRuntime?.label ?? "Runtime"}でLoRAを再読込中…` : "LoRAを取得中…";
   elements.refreshLorasButton.disabled = true;
   try {
     const data = refresh
-      ? await postJson("/api/loras/refresh", {})
-      : await getJson("/api/loras");
+      ? await postJson(runtimeApiUrl("/api/loras/refresh"), runtimePayload())
+      : await getJson(runtimeApiUrl("/api/loras"));
+    if (!isRuntimeContextCurrent(context)) return false;
     installedLoras = data.loras ?? [];
     registerDetectedProfiles();
     registerCivitaiDefaults();
@@ -2622,17 +3275,22 @@ async function loadLoras(refresh = false) {
     renderSelectedLoraSummary();
     // AI共有CSVはLoRA一覧に追随させる（失敗しても操作は止めない）。
     scheduleShareCsvSync();
+    return true;
   } catch (error) {
+    if (!isRuntimeContextCurrent(context)) return false;
     elements.loraStatus.textContent = `LoRA一覧を取得できません: ${error.message}`;
+    return false;
   } finally {
-    elements.refreshLorasButton.disabled = false;
+    if (isRuntimeContextCurrent(context)) {
+      elements.refreshLorasButton.disabled = generationBusy || runtimeSwitching;
+    }
   }
 }
 
 function renderLoras() {
   const query = elements.loraSearch.value.trim().toLowerCase();
   const compatibilityFilter = elements.loraCompatibilityFilter.value;
-  const matches = installedLoras
+  const matches = filterItemsByFolder(installedLoras, selectedLoraFolder)
     .filter((item) => {
       const category = getLoraCategory(item);
       const matchesCategory = activeLoraCategory === "all"
@@ -2655,6 +3313,14 @@ function renderLoras() {
     });
 
   updateLoraCategoryButtons();
+  renderLoraFolderTree(elements.loraFolderTree, installedLoras, {
+    selectedFolder: selectedLoraFolder,
+    expandedFolders: expandedLoraFolders,
+    onToggle: toggleLoraFolder,
+    onSelect: selectLoraFolder
+  });
+  elements.loraListBreadcrumb.textContent = `LoRA / ${selectedLoraFolder || "すべて"}`;
+  elements.loraListCount.textContent = `${matches.length}件`;
   elements.loraList.replaceChildren();
 
   const groups = new Map();
@@ -2702,6 +3368,7 @@ function createLoraRow(lora) {
   const weight = loraWeights.get(lora.name) ?? registry?.recommendedWeight ?? loraConfig.defaultWeight;
   const row = document.createElement("div");
   row.className = "loraRow";
+  row.classList.toggle("selected", selectedLoras.has(lora.name));
   if (registry?.baseModel && ["caution", "incompatible"].includes(compatibility.level)) {
     row.classList.add(`compatibility-${compatibility.level}`);
   }
@@ -2716,11 +3383,16 @@ function createLoraRow(lora) {
   const title = document.createElement("strong");
   title.textContent = lora.displayName;
   names.append(title);
+  const location = document.createElement("small");
+  location.className = "loraRelativeLocation";
+  location.textContent = formatLoraRelativeLocation(lora);
+  location.title = location.textContent;
+  names.append(location);
   // カードはサムネイル・名前・互換性・推奨Weight・追加チェックのみ表示し、
   // プロフィール名や正式名などの補足はプレビュー欄へ集約する。
   const badges = document.createElement("div");
   badges.className = "loraBadges";
-  if (registry?.baseModel && activeCheckpoint) {
+  if (registry?.baseModel && selectedCheckpoint) {
     const compatibilityBadge = document.createElement("small");
     compatibilityBadge.className = `loraCompatibility ${compatibility.level}`;
     compatibilityBadge.textContent = `${compatibility.label}・${registry.baseModel}`;
@@ -2927,7 +3599,18 @@ function createLoraRow(lora) {
   const thumb = createLoraThumb(lora);
   const main = document.createElement("div");
   main.className = "loraMain";
-  main.append(thumb, choice);
+  const detailButton = document.createElement("button");
+  detailButton.type = "button";
+  detailButton.className = "ghost smallButton loraDetailButton";
+  detailButton.textContent = "詳細";
+  detailButton.setAttribute("aria-label", `${lora.displayName}の詳細を表示`);
+  detailButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (shouldUseLoraDetailModal()) openLoraDetailModal(lora);
+    else pinLoraPreview(lora);
+  });
+  main.append(thumb, choice, detailButton);
 
   row.append(main, weightWrap, advanced);
   // カードへのホバー・フォーカスで一時プレビュー、外れたら固定中へ戻す。
@@ -2985,9 +3668,7 @@ function getLoraCategory(lora) {
 }
 
 function getLoraFolderLabel(lora) {
-  const folder = String(lora.folder ?? "").replaceAll("\\", "/").replace(/^\/+|\/+$/g, "");
-  if (folder) return folder;
-  return getLoraCategory(lora) === "character" ? "登録キャラクター" : "未分類（画風など）";
+  return loraFolderKey(lora);
 }
 
 function countLoraCategories() {
@@ -3231,20 +3912,38 @@ function renderSelectedLoraSummary() {
 }
 
 async function checkHealth() {
-  elements.health.innerHTML = '<span class="status waiting">Ollama 確認中</span><span class="status waiting">ReForge 確認中</span>';
+  const runtimeLabel = activeRuntime?.label ?? "Runtime";
+  elements.health.innerHTML = `<span class="status waiting">Ollama 確認中</span><span class="status waiting">${escapeHtml(runtimeLabel)} 確認中</span>`;
   syncSettingsConnectionSummary();
   try {
     const response = await fetch("/api/health");
     const data = await response.json();
+    await applyRuntimeHealth(data.runtimes);
     const ollamaText = data.ollama.ok
       ? `Ollama 接続OK${data.ollama.installed ? "" : "・モデル未検出"}`
       : "Ollama 接続失敗";
-    const reforgeText = data.reforge.ok
-      ? `ReForge 接続OK・${shorten(data.reforge.checkpoint, 28)}`
-      : "ReForge 接続失敗";
+    const runtimeHealth = data.runtimes?.[activeRuntimeId] ?? (activeRuntimeId === "reforge" ? data.reforge : null);
+    if (isForgeNeoRuntime() && response.ok !== false
+      && runtimeHealth && typeof runtimeHealth === "object" && !Array.isArray(runtimeHealth)) {
+      const healthCheckpoint = typeof runtimeHealth.checkpoint === "string"
+        ? runtimeHealth.checkpoint.trim()
+        : "";
+      activeCheckpoint = healthCheckpoint
+        ? findCheckpoint(healthCheckpoint) ?? {
+            title: healthCheckpoint,
+            modelName: healthCheckpoint,
+            filename: ""
+          }
+        : null;
+      renderCheckpointControls();
+      renderCheckpointStatus();
+    }
+    const runtimeText = runtimeHealth?.ok
+      ? `${activeRuntime?.label ?? activeRuntimeId} 接続OK${runtimeHealth.checkpoint ? `・${shorten(runtimeHealth.checkpoint, 28)}` : ""}`
+      : `${activeRuntime?.label ?? activeRuntimeId} 接続失敗`;
     elements.health.innerHTML = [
       status(ollamaText, data.ollama.ok && data.ollama.installed, data.ollama.error),
-      status(reforgeText, data.reforge.ok, data.reforge.error)
+      status(runtimeText, runtimeHealth?.ok === true, runtimeHealth?.error)
     ].join("");
   } catch (error) {
     elements.health.innerHTML = status("接続確認に失敗", false, error.message);
@@ -3276,7 +3975,8 @@ async function loadIpAdapterFile(file) {
   }
 }
 
-async function loadIpAdapterOptions() {
+async function loadIpAdapterOptions(context = runtimeRequestContext()) {
+  if (!isRuntimeContextCurrent(context)) return false;
   ipAdapterOptions = {
     available: false,
     family: null,
@@ -3286,7 +3986,8 @@ async function loadIpAdapterOptions() {
   };
   syncIpAdapterUi();
   try {
-    const data = await getJson("/api/reforge/ip-adapter/options");
+    const data = await getJson(runtimeApiUrl("/api/reforge/ip-adapter/options"));
+    if (!isRuntimeContextCurrent(context)) return false;
     ipAdapterOptions = {
       available: data.available === true,
       family: typeof data.family === "string" ? data.family : null,
@@ -3295,6 +3996,7 @@ async function loadIpAdapterOptions() {
       message: String(data.message ?? "IP-Adapterを利用できません")
     };
   } catch (error) {
+    if (!isRuntimeContextCurrent(context)) return false;
     ipAdapterOptions = {
       available: false,
       family: null,
@@ -3305,6 +4007,7 @@ async function loadIpAdapterOptions() {
   }
   if (!ipAdapterOptions.available) ipAdapterState.enabled = false;
   syncIpAdapterUi();
+  return ipAdapterOptions.available || Boolean(ipAdapterOptions.message);
 }
 
 function setIpAdapterReference(reference, { focus = false, silent = false } = {}) {
@@ -3423,7 +4126,7 @@ function hasIpAdapterReference() {
 function syncIpAdapterUi() {
   const hasReference = hasIpAdapterReference();
   const available = ipAdapterOptions.available === true;
-  const disabled = generationBusy || !available;
+  const disabled = generationBusy || runtimeSwitching || !available;
   elements.ipAdapterModel.textContent = available
     ? shorten(ipAdapterOptions.model || ipAdapterOptions.module || "利用可能", 28)
     : "利用不可";
@@ -3456,18 +4159,18 @@ function syncIpAdapterUi() {
   }
   elements.ipAdapterStatus.textContent = !available
     ? ipAdapterOptions.message
-    : generationBusy
+    : generationBusy || runtimeSwitching
       ? "生成中はIP-Adapterを変更できません"
       : ipAdapterState.enabled && hasReference
         ? `この画像を参照中: ${shorten(ipAdapterState.label, 42)}`
         : hasReference
           ? `参照画像を設定済み（OFF）: ${shorten(ipAdapterState.label, 42)}`
           : "参照画像を選択してください";
-  elements.studioMainIpAdapterButton.disabled = generationBusy
+  elements.studioMainIpAdapterButton.disabled = generationBusy || runtimeSwitching
     || !available
     || !studioInspection?.image?.id;
   elements.studioMainIpAdapterButton.classList.toggle("hidden", !studioInspection?.image?.id);
-  elements.finalIpAdapterButton.disabled = generationBusy || !available || !finalImage?.id;
+  elements.finalIpAdapterButton.disabled = generationBusy || runtimeSwitching || !available || !finalImage?.id;
   elements.finalIpAdapterButton.classList.toggle("hidden", !finalImage?.id);
 }
 
@@ -3590,7 +4293,9 @@ async function generateCandidates() {
 
     elements.loadingText.textContent = `${count}枚の${modeLabel}を1枚ずつ生成中…`;
     const data = await submitGeneration({
+      ...runtimePayload(),
       mode: generationMode,
+      contentRating: selectedContentRating(),
       description,
       ...readTitlePayload(),
       ...readPromptPayload(),
@@ -3604,11 +4309,13 @@ async function generateCandidates() {
     });
 
     lastGeneration = {
+      runtime: data.runtime ?? activeRuntime,
       mode: data.mode,
       sourceImageId: data.sourceImageId,
       sourceImageUrl: data.sourceImageUrl,
       maskImageUrl: data.maskImageUrl,
       ipAdapter: data.ipAdapter ?? null,
+      contentRating: data.contentRating ?? selectedContentRating(),
       title: data.title ?? "",
       description,
       prompt: data.prompt,
@@ -3637,6 +4344,11 @@ async function generateCandidates() {
 
 async function finishSelected() {
   if (!selectedCandidate || !lastGeneration) return;
+  const sourceRuntime = runtimeForGeneration(lastGeneration);
+  if (!sourceRuntime || !runtimeSupports("hires", sourceRuntime)) {
+    showError(`${sourceRuntime?.label ?? "生成元Runtime"}ではHires仕上げを利用できません`);
+    return;
+  }
   clearError();
   const isImg2Img = lastGeneration.mode === "img2img";
   const isInpaint = lastGeneration.mode === "inpaint";
@@ -3649,7 +4361,9 @@ async function finishSelected() {
 
   try {
     const data = await submitGeneration({
+      ...runtimePayloadFor(sourceRuntime),
       mode: usesSource ? lastGeneration.mode : "txt2img",
+      contentRating: lastGeneration.contentRating ?? selectedContentRating(),
       description: lastGeneration.description,
       ...readTitlePayload(),
       prompt: lastGeneration.prompt,
@@ -3703,11 +4417,13 @@ function presentHiresResult(data, description, eyebrow, title) {
   const finished = data.images[0];
   finalImage = finished;
   finalGeneration = {
+    runtime: data.runtime ?? activeRuntime,
     mode: data.mode,
     sourceImageId: data.sourceImageId,
     sourceImageUrl: data.sourceImageUrl,
     maskImageUrl: data.maskImageUrl,
     ipAdapter: data.ipAdapter ?? null,
+    contentRating: data.contentRating ?? selectedContentRating(),
     title: data.title ?? "",
     description,
     prompt: data.prompt,
@@ -3752,6 +4468,11 @@ function presentHiresResult(data, description, eyebrow, title) {
 const GALLERY_HIRES_DEFAULTS = { scale: 1.5, steps: 12, denoising: 0.28 };
 
 async function hiresFromGallery(generation, image) {
+  const sourceRuntime = runtimeForGeneration(generation);
+  if (!sourceRuntime || !runtimeSupports("hires", sourceRuntime)) {
+    showError(`${sourceRuntime?.label ?? "生成元Runtime"}ではHires仕上げを利用できません`);
+    return;
+  }
   const settings = generation.settings ?? {};
   const scale = GALLERY_HIRES_DEFAULTS.scale;
   const steps = GALLERY_HIRES_DEFAULTS.steps;
@@ -3769,7 +4490,9 @@ async function hiresFromGallery(generation, image) {
   setBusy(true, `Seed ${image.seed} を高解像度仕上げ中…`);
   try {
     const data = await submitGeneration({
+      ...runtimePayloadFor(sourceRuntime),
       mode: "img2img",
+      contentRating: generation.contentRating === "nsfw" ? "nsfw" : "general",
       description: generation.description ?? "",
       ...readTitlePayload(),
       prompt: generation.prompt ?? "",
@@ -3926,7 +4649,9 @@ async function runExperiment() {
         await requestPrompt(description);
       }
       const baseRequest = {
+        ...runtimePayload(),
         mode: generationMode,
+        contentRating: selectedContentRating(),
         description,
         ...readTitlePayload(),
         ...readPromptPayload(),
@@ -5006,7 +5731,8 @@ function selectCandidate(candidate, card) {
   selectedCandidate = candidate;
   for (const item of elements.candidateGrid.children) item.classList.remove("selected");
   card.classList.add("selected");
-  elements.finishButton.disabled = false;
+  const sourceRuntime = lastGeneration ? runtimeForGeneration(lastGeneration) : null;
+  elements.finishButton.disabled = !sourceRuntime || !runtimeSupports("hires", sourceRuntime);
   elements.lockCompositionButton.disabled = false;
   if (lastGeneration) {
     elements.studioMainImage.src = originalImageUrl(candidate);
@@ -5026,6 +5752,7 @@ function selectCandidate(candidate, card) {
     : "仕上げ";
   elements.finishButton.title = finishLabel;
   elements.finishButton.setAttribute("aria-label", finishLabel);
+  syncRuntimeUi();
 }
 
 async function submitGeneration(payload, { allowRecovery = true } = {}) {
@@ -5419,12 +6146,13 @@ function lockSelectedComposition() {
   if (lastGeneration && selectedCandidate) activateCompositionLock(lastGeneration, selectedCandidate);
 }
 
-function activateCompositionLock(recipe, image) {
-  loadRecipeFields(recipe, image);
+async function activateCompositionLock(recipe, image) {
+  if (!await loadRecipeFields(recipe, image)) return false;
   compositionLock = { recipe, image };
   elements.compositionLockStatus.querySelector("span").textContent = `構図・Seed固定中: ${image.seed}`;
   elements.compositionLockStatus.classList.remove("hidden");
   elements.promptDetails.scrollIntoView({ behavior: "smooth", block: "center" });
+  return true;
 }
 
 function unlockComposition() {
@@ -5435,9 +6163,30 @@ function unlockComposition() {
   syncSeedClearButton();
 }
 
-function loadRecipeFields(recipe, image) {
+async function ensureRuntimeForRecipe(recipe) {
+  const targetId = safeRuntimeId(recipe?.runtime?.id) || "reforge";
+  const target = runtimeOptions.find((item) => item.id === targetId && isRuntimeSelectable(item));
+  if (!target) {
+    showError("履歴のRuntimeは現在利用できません");
+    return false;
+  }
+  if (target.id === activeRuntimeId) {
+    return runtimeSwitching ? runtimeSwitchPromise : true;
+  }
+  elements.runtimeSelect.value = target.id;
+  return handleRuntimeChange(target.id);
+}
+
+async function loadRecipeFields(recipe, image) {
+  if (!await ensureRuntimeForRecipe(recipe)) return false;
   promptDescription = recipe.description ?? "";
   elements.generationTitle.value = normalizeManualTitle(recipe.title);
+  setContentRating(recipe.contentRating === "nsfw" ? "nsfw" : "general");
+  if (recipe?.runtime?.id && recipe.runtime.id !== activeRuntimeId
+    && runtimeOptions.some((item) => item.id === recipe.runtime.id && isRuntimeSelectable(item))) {
+    elements.runtimeSelect.value = recipe.runtime.id;
+    void handleRuntimeChange();
+  }
   restorePromptFieldsFromRecipe(recipe);
   restoreIpAdapterFromRecipe(recipe);
   const settings = recipe.settings ?? {};
@@ -5481,6 +6230,7 @@ function loadRecipeFields(recipe, image) {
   renderSelectedLoraSummary();
   // 復元直後からプロンプト表示とUI表示を一致させる。
   syncLorasFromPrompt();
+  return true;
 }
 
 // 履歴からのプロンプト復元。
@@ -5868,7 +6618,10 @@ async function loadHistory({ append = false } = {}) {
   try {
     const cursor = append && historyCursor ? `&cursor=${encodeURIComponent(historyCursor)}` : "";
     const favoriteQuery = galleryFilter.kind === "favorite" ? "&favorites=1" : "";
-    const historyRequest = getJson(`/api/history?limit=${HISTORY_PAGE_SIZE}${favoriteQuery}${cursor}`);
+    const ratingQuery = galleryFilter.rating === "all"
+      ? ""
+      : `&rating=${encodeURIComponent(galleryFilter.rating)}`;
+    const historyRequest = getJson(`/api/history?limit=${HISTORY_PAGE_SIZE}${favoriteQuery}${ratingQuery}${cursor}`);
     const [historyData, preferences] = append
       ? [await historyRequest, null]
       : await Promise.all([historyRequest, getJson("/api/history/preferences")]);
@@ -6300,12 +7053,14 @@ function setStudioInspection(generation, image, { showOnCanvas = false } = {}) {
 
 function hasGalleryFilter() {
   return galleryFilter.kind !== "all"
+    || galleryFilter.rating !== "all"
     || Boolean(galleryFilter.checkpoint || galleryFilter.lora || galleryFilter.period || galleryFilter.query)
     || galleryFilter.tags.length > 0;
 }
 
 function setGalleryFilter(patch) {
   const wasFavorite = galleryFilter.kind === "favorite";
+  const previousRating = galleryFilter.rating;
   galleryFilter = {
     ...galleryFilter,
     ...patch,
@@ -6315,7 +7070,7 @@ function setGalleryFilter(patch) {
   };
   syncGalleryFilterState();
   // Favoriteだけはサーバー側でも絞り込み、未取得ページ内のお気に入りを取りこぼさない。
-  if (wasFavorite !== (galleryFilter.kind === "favorite")) {
+  if (wasFavorite !== (galleryFilter.kind === "favorite") || previousRating !== galleryFilter.rating) {
     historyCursor = null;
     historyHasMore = true;
     void loadHistory();
@@ -6332,7 +7087,7 @@ function resetGalleryFilter() {
   elements.gallerySearch.value = "";
   elements.galleryTagSearch.value = "";
   galleryTagQuery = "";
-  setGalleryFilter({ kind: "all", checkpoint: "", lora: "", period: "", query: "", tags: [] });
+  setGalleryFilter({ kind: "all", rating: "all", checkpoint: "", lora: "", period: "", query: "", tags: [] });
 }
 
 // Checkpoint・LoRAの候補は、いま履歴にあるものだけを出す。
@@ -6349,6 +7104,13 @@ function syncGalleryFilterState() {
     const active = button.dataset.galleryKind === galleryFilter.kind;
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
+  }
+  for (const container of [elements.galleryRatingFilter, elements.galleryRatingDialogFilter]) {
+    for (const button of container.querySelectorAll("[data-gallery-rating]")) {
+      const active = button.dataset.galleryRating === galleryFilter.rating;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+    }
   }
   const favoriteActive = galleryFilter.kind === "favorite";
   for (const [button, active] of [[elements.galleryAllButton, !favoriteActive], [elements.galleryFavoriteButton, favoriteActive]]) {
@@ -6440,19 +7202,22 @@ function writeOptionList(storageKey, values) {
   localStorage.setItem(storageKey, JSON.stringify(values));
 }
 
-async function loadSamplerOptions() {
+async function loadSamplerOptions(context = runtimeRequestContext()) {
   try {
-    const data = await getJson("/api/samplers");
+    const data = await getJson(runtimeApiUrl("/api/samplers"));
+    if (!isRuntimeContextCurrent(context)) return false;
     samplerOptions = {
       samplers: Array.isArray(data.samplers) ? data.samplers : [],
       schedulers: Array.isArray(data.schedulers) ? data.schedulers : []
     };
   } catch {
+    if (!isRuntimeContextCurrent(context)) return false;
     // ReForgeが落ちていても選択UIは使えるようにする（保存済みの値と既定値だけ）。
     samplerOptions = { samplers: [], schedulers: [] };
   }
   renderSamplerPresets();
   syncSamplerLabels();
+  return true;
 }
 
 // 現在値をボタンへ反映する。Checkpointプロフィール適用や履歴復元の後にも呼ぶ。
@@ -6748,19 +7513,23 @@ async function openPresetPicker({
   isApplied = () => false,
   onApply,
   modes = null,
-  emptyMessage = "選択できる項目がありません"
+  emptyMessage = "選択できる項目がありません",
+  folderBrowser = false
 }) {
   if (!items.length) return toast.warning(emptyMessage);
   let query = "";
   let group = "";
   let favoriteOnly = false;
   let mode = modes?.[0]?.value ?? null;
+  let selectedFolder = "";
+  const expandedFolders = new Set();
 
   await openModal({
     title,
     subtitle,
     size: "large",
     build: (body, close) => {
+      if (folderBrowser) body.classList.add("loraPickerBody");
       const toolbar = document.createElement("div");
       toolbar.className = "pickerToolbar";
       const search = document.createElement("input");
@@ -6784,12 +7553,42 @@ async function openPresetPicker({
         });
         favoriteToggle.append(button);
       }
-      toolbar.append(search, favoriteToggle);
+      let folderButton = null;
+      if (folderBrowser) {
+        folderButton = document.createElement("button");
+        folderButton.type = "button";
+        folderButton.className = "ghost smallButton loraPickerFolderButton";
+        folderButton.textContent = "フォルダ";
+        toolbar.append(search, folderButton, favoriteToggle);
+      } else {
+        toolbar.append(search, favoriteToggle);
+      }
 
       const groupBar = document.createElement("div");
       groupBar.className = "pickerGroups";
       const grid = document.createElement("div");
       grid.className = "pickerGrid";
+      let folderPane = null;
+      let folderContent = null;
+      let folderBreadcrumb = null;
+      let folderResultCount = null;
+      let browser = null;
+
+      if (folderBrowser) {
+        folderPane = document.createElement("aside");
+        folderPane.className = "loraPickerFolderPane";
+        folderPane.setAttribute("aria-label", "LoRAフォルダ");
+        folderContent = document.createElement("div");
+        folderContent.className = "loraPickerContent";
+        folderBreadcrumb = document.createElement("div");
+        folderBreadcrumb.className = "loraPickerBreadcrumb";
+        folderResultCount = document.createElement("p");
+        folderResultCount.className = "loraPickerResultCount";
+        folderContent.append(folderBreadcrumb, folderResultCount, grid);
+        browser = document.createElement("div");
+        browser.className = "loraPickerBrowser";
+        browser.append(folderPane, folderContent);
+      }
 
       const renderGroups = () => {
         groupBar.replaceChildren();
@@ -6808,13 +7607,37 @@ async function openPresetPicker({
         }
       };
 
+      const renderFolderBrowser = () => {
+        if (!folderBrowser) return;
+        renderLoraFolderTree(folderPane, items, {
+          selectedFolder,
+          expandedFolders,
+          onToggle: (folder) => {
+            if (expandedFolders.has(folder)) expandedFolders.delete(folder);
+            else expandedFolders.add(folder);
+            renderFolderBrowser();
+          },
+          onSelect: (folder) => {
+            selectedFolder = folder;
+            expandLoraFolderPath(folder, expandedFolders);
+            renderFolderBrowser();
+            render();
+          }
+        });
+        folderBreadcrumb.textContent = `LoRA / ${selectedFolder || "すべて"}`;
+      };
+
       const render = () => {
         grid.replaceChildren();
-        const matches = filterPresets(items, {
+        const scopedItems = folderBrowser
+          ? filterItemsByFolder(items, selectedFolder)
+          : items;
+        const matches = filterPresets(scopedItems, {
           query,
           favoriteOnly,
-          [groupKey]: group
+          [groupKey]: folderBrowser ? "" : group
         });
+        if (folderResultCount) folderResultCount.textContent = `${matches.length}件`;
         if (!matches.length) {
           const empty = document.createElement("p");
           empty.className = "hint";
@@ -6827,7 +7650,7 @@ async function openPresetPicker({
 
       const createPickerCard = (item, refresh, closeModal) => {
         const card = document.createElement("article");
-        card.className = "pickerCard";
+        card.className = folderBrowser ? "pickerCard loraPickerCard" : "pickerCard";
 
         const thumb = document.createElement("div");
         thumb.className = "pickerThumb";
@@ -6876,8 +7699,22 @@ async function openPresetPicker({
 
         const meta = document.createElement("p");
         meta.className = "pickerMeta";
-        meta.textContent = [item.subtitle || item.folder, PRESET_CATEGORY_LABELS[item.category] ?? item.category]
+        const sourceLora = folderBrowser ? findLoraByName(item.loraName) : null;
+        const compatibilityLabel = sourceLora?.registry?.baseModel && selectedCheckpoint
+          ? `${getLoraCompatibility(sourceLora).label}・${sourceLora.registry.baseModel}`
+          : "";
+        meta.textContent = (folderBrowser
+          ? [compatibilityLabel, PRESET_CATEGORY_LABELS[item.category] ?? item.category, item.baseModel]
+          : [item.subtitle || item.folder, PRESET_CATEGORY_LABELS[item.category] ?? item.category])
           .filter(Boolean).join(" / ");
+
+        let location = null;
+        if (folderBrowser) {
+          location = document.createElement("p");
+          location.className = "pickerLocation";
+          location.textContent = formatLoraRelativeLocation(item);
+          location.title = location.textContent;
+        }
 
         const trigger = document.createElement("p");
         trigger.className = "pickerTrigger";
@@ -6892,11 +7729,18 @@ async function openPresetPicker({
         action.className = applied ? "secondary smallButton" : "primary smallButton";
         action.textContent = applied ? "追加済み" : applyLabel;
         action.addEventListener("click", async () => {
+          if (folderBrowser) {
+            selectedFolder = item.folder || LORA_ROOT_FOLDER;
+            expandLoraFolderPath(selectedFolder, expandedFolders);
+            renderFolderBrowser();
+          }
           await onApply(item, { mode, close: closeModal });
           refresh();
         });
 
-        card.append(thumb, name, meta, trigger, action);
+        card.append(thumb, name);
+        if (location) card.append(location);
+        card.append(meta, trigger, action);
         return card;
       };
 
@@ -6905,8 +7749,8 @@ async function openPresetPicker({
         render();
       });
 
-      body.append(toolbar, groupBar);
-      if (modes) {
+      if (!folderBrowser) body.append(toolbar, groupBar);
+      if (modes && !folderBrowser) {
         const modeRow = document.createElement("div");
         modeRow.className = "importModeRow";
         for (const option of modes) {
@@ -6923,11 +7767,51 @@ async function openPresetPicker({
         }
         body.append(modeRow);
       }
-      body.append(grid);
-      renderGroups();
+      if (folderBrowser) {
+        body.append(toolbar, browser);
+        folderButton.addEventListener("click", () => {
+          openModal({
+            title: "LoRAフォルダ",
+            subtitle: "表示する保存場所を選択",
+            size: "small",
+            build: (drawerBody, drawerClose) => {
+              drawerBody.classList.add("loraFolderDrawerBody");
+              const drawerTree = document.createElement("div");
+              drawerTree.className = "loraFolderTree loraFolderDrawerTree";
+              drawerTree.setAttribute("role", "tree");
+              drawerTree.setAttribute("aria-label", "LoRAフォルダ一覧");
+              drawerBody.append(drawerTree);
+              const renderDrawerTree = () => renderLoraFolderTree(drawerTree, items, {
+                selectedFolder,
+                expandedFolders,
+                onToggle: (folder) => {
+                  if (expandedFolders.has(folder)) expandedFolders.delete(folder);
+                  else expandedFolders.add(folder);
+                  renderDrawerTree();
+                },
+                onSelect: (folder) => {
+                  selectedFolder = folder;
+                  expandLoraFolderPath(folder, expandedFolders);
+                  renderFolderBrowser();
+                  render();
+                  drawerClose();
+                }
+              });
+              renderDrawerTree();
+            },
+            actions: [{ label: "閉じる", value: true, variant: "ghost" }]
+          });
+        });
+        renderFolderBrowser();
+      } else {
+        body.append(grid);
+        renderGroups();
+      }
       render();
     },
-    actions: [{ label: "閉じる", value: true, primary: true }]
+    actions: folderBrowser
+      ? [{ label: "閉じる", value: true, variant: "ghost" }]
+      : [{ label: "閉じる", value: true, primary: true }]
   }).promise;
 }
 
@@ -6961,12 +7845,17 @@ function loraThumbnail(lora) {
 
 // LoRA選択（フォルダ・分類・検索・Favorite絞り込み・サムネイル付き）
 async function openLoraPicker() {
+  if (runtimeSwitching) {
+    toast.info("Runtimeの一覧を更新中です。完了してからLoRAを選択してください");
+    return;
+  }
   const items = buildLoraCatalog(installedLoras, { resolveThumbnail: loraThumbnail });
   await openPresetPicker({
     title: "LoRAを追加",
     subtitle: `最大${loraConfig.maxSelected}個まで。★はLoRAのお気に入り（画像のFavoriteとは別です）`,
     items,
     groupKey: "folder",
+    folderBrowser: true,
     isApplied: (item) => selectedLoras.has(item.loraName),
     onApply: (item) => {
       if (selectedLoras.has(item.loraName)) {
@@ -6997,6 +7886,10 @@ function addLoraToForm(loraName) {
 
 // キャラクター選択。キャラ欄へタグを反映し、関連LoRAがあれば生成フォームへ追加する。
 async function openCharacterPicker() {
+  if (runtimeSwitching) {
+    toast.info("Runtimeの一覧を更新中です。完了してからLoRAを選択してください");
+    return;
+  }
   const items = buildCharacterPresets(installedLoras, {
     resolveProfile,
     resolveThumbnail: loraThumbnail
@@ -7019,6 +7912,10 @@ async function openCharacterPicker() {
 
 // 衣装選択。容姿・衣装欄へ反映する（キャラクター欄は触らない）。
 async function openOutfitPicker() {
+  if (runtimeSwitching) {
+    toast.info("Runtimeの一覧を更新中です。完了してからLoRAを選択してください");
+    return;
+  }
   const items = buildOutfitPresets(installedLoras, {
     resolveProfile,
     resolveThumbnail: loraThumbnail
@@ -7604,6 +8501,15 @@ function createHistoryCard(generation, image, index = 0) {
 
   // カード右上の星（画像のFavorite）。一覧・詳細・最新結果で状態を共有する。
   previewWrap.append(preview, createFavoriteButton(image, { className: "cardFavorite" }));
+  const contentRating = generation.contentRating === "nsfw"
+    ? "nsfw"
+    : generation.contentRating === "general" ? "general" : "unrated";
+  if (contentRating !== "general") {
+    const ratingBadge = document.createElement("span");
+    ratingBadge.className = `historyContentRatingBadge ${contentRating}`;
+    ratingBadge.textContent = contentRating === "nsfw" ? "NSFW" : "未分類";
+    previewWrap.append(ratingBadge);
+  }
   const compareCheck = document.createElement("input");
   compareCheck.type = "checkbox";
   compareCheck.className = "historyCompareCheck";
@@ -7663,6 +8569,12 @@ function createHistoryCard(generation, image, index = 0) {
   });
   menuBody.append(compare);
   addMenuAction("詳細", "ghost", () => openHistoryDetail(generation, image), "生成情報を表示");
+  addMenuAction(
+    contentRating === "nsfw" ? "一般に分類" : "NSFWに分類",
+    "ghost",
+    () => void updateHistoryContentRating(image, contentRating === "nsfw" ? "general" : "nsfw"),
+    "同じ生成の候補画像をまとめて分類"
+  );
   addMenuAction("削除", "historyDelete", (button) => void deleteHistoryImage(image, button), "この画像を削除する");
 
   menu.append(menuSummary, menuBody);
@@ -7680,6 +8592,18 @@ function createHistoryCard(generation, image, index = 0) {
   body.append(meta, menu);
   card.append(previewWrap, body);
   return card;
+}
+
+async function updateHistoryContentRating(image, contentRating) {
+  try {
+    await patchJson(`/api/history/${encodeURIComponent(image.id)}/content-rating`, { contentRating });
+    toast.info(contentRating === "nsfw" ? "NSFWに分類しました" : "一般に分類しました");
+    historyCursor = null;
+    historyHasMore = true;
+    await loadHistory();
+  } catch (error) {
+    toast.error(`分類を変更できませんでした: ${error.message}`);
+  }
 }
 
 // 一覧表示専用のCheckpoint短縮名。内部データには正式名を保存する。
@@ -7848,6 +8772,8 @@ function openHistoryDetail(generation, image) {
   prompts.append(buildPromptDetails("Prompt", generation.prompt));
   prompts.append(buildPromptDetails("Negative Prompt", generation.negativePrompt));
   for (const details of buildStructuredPromptDetails(generation)) prompts.append(details);
+  const sourceRuntime = runtimeForGeneration(generation);
+  const hiresAvailable = Boolean(sourceRuntime && runtimeSupports("hires", sourceRuntime));
 
   const footer = document.createElement("div");
   footer.className = "detailActions";
@@ -7882,8 +8808,9 @@ function openHistoryDetail(generation, image) {
   });
   detailCompare.dataset.compareImageId = String(image.id);
   syncCompareControl(detailCompare, image.id);
-  addAction("Hiresする", "primary", () => { closeDetail(); void hiresFromGallery(generation, image); },
-    "この画像を元に高解像度仕上げ");
+  const hiresAction = addAction("Hiresする", "primary", () => { closeDetail(); void hiresFromGallery(generation, image); },
+    hiresAvailable ? "この画像を元に高解像度仕上げ" : "生成元RuntimeではHiresを利用できません");
+  hiresAction.disabled = !hiresAvailable;
 
   overlay.addEventListener("click", (event) => { if (event.target === overlay) closeDetail(); });
   document.addEventListener("keydown", onKey);
@@ -7927,26 +8854,28 @@ const DERIVATION_LABELS = {
 };
 
 // 元レシピをそのまま読み込み、Seedも固定して再生成できる状態にする。
-function regenerateWithSameSeed(generation, image) {
-  activateCompositionLock(generation, image);
+async function regenerateWithSameSeed(generation, image) {
+  if (!await activateCompositionLock(generation, image)) return false;
   pendingDerivation = { type: "same-seed", instruction: "", parentGenerationId: generation.id };
   toast.success(`Seed ${image.seed} の設定を読み込みました。「候補を生成」で再生成できます`);
+  return true;
 }
 
 // Seedは固定せず設定だけ複製する。
-function duplicateRecipe(generation, image) {
-  loadRecipeFields(generation, image);
+async function duplicateRecipe(generation, image) {
+  if (!await loadRecipeFields(generation, image)) return false;
   elements.seed.value = RANDOM_SEED;
   syncSeedClearButton();
   compositionLock = null;
   elements.compositionLockStatus.classList.add("hidden");
   pendingDerivation = { type: "duplicate", instruction: "", parentGenerationId: generation.id };
   toast.success("設定を複製しました（Seedはランダム）");
+  return true;
 }
 
 // 元レシピを読み込んだうえで、LoRAの付け外し・weight変更だけを行う。
 async function changeLoraOnly(generation, image) {
-  loadRecipeFields(generation, image);
+  if (!await loadRecipeFields(generation, image)) return;
   pendingDerivation = { type: "lora", instruction: "", parentGenerationId: generation.id };
   const working = new Map(selectedLoras);
 
@@ -8019,13 +8948,14 @@ async function changeLoraOnly(generation, image) {
 // 何を追加したかは履歴（derivationInstruction）へ残す。
 async function deriveWithInstruction(generation, image, type) {
   const definition = DERIVATION_LABELS[type];
+  if (!await ensureRuntimeForRecipe(generation)) return;
   const instruction = await promptModal(definition.title, "", {
     placeholder: definition.placeholder,
     confirmText: "読み込む"
   });
   if (!instruction) return;
 
-  loadRecipeFields(generation, image);
+  if (!await loadRecipeFields(generation, image)) return;
   const addition = `${definition.prefix}${instruction}`;
   elements.outfitOverride.value = type === "outfit" ? instruction : elements.outfitOverride.value;
   if (type !== "outfit") {
@@ -8467,7 +9397,8 @@ async function installCivitai() {
       folder,
       mode: choice.mode,
       filename: choice.filename,
-      confirmMove: choice.confirmMove
+      confirmMove: choice.confirmMove,
+      ...runtimePayload()
     });
     rememberCivitaiFolder(category, result.folder ?? folder);
     const message = describeInstallResult(result, folder);
@@ -8734,10 +9665,10 @@ function readSettings(overrides = {}) {
     samplerName: elements.samplerName.value,
     scheduler: elements.scheduler.value,
     noiseSchedule: elements.noiseSchedule.value,
-    checkpoint: activeCheckpoint?.title ?? "",
-    checkpointHash: activeCheckpoint?.hash ?? "",
-    checkpointModelName: activeCheckpoint?.modelName ?? "",
-    checkpointFilename: activeCheckpoint?.filename ?? "",
+    checkpoint: selectedCheckpoint?.title ?? "",
+    checkpointHash: selectedCheckpoint?.hash ?? "",
+    checkpointModelName: selectedCheckpoint?.modelName ?? "",
+    checkpointFilename: selectedCheckpoint?.filename ?? "",
     candidateCount: elements.candidateCount.value,
     img2imgDenoising: elements.img2imgDenoising.value,
     img2imgResizeMode: elements.img2imgResizeMode.value,
@@ -9001,6 +9932,7 @@ function setBusy(busy, message = "") {
   elements.finishButton.disabled = busy || !selectedCandidate;
   elements.lockCompositionButton.disabled = busy || !selectedCandidate;
   syncIpAdapterUi();
+  syncRuntimeUi();
   elements.loading.classList.toggle("hidden", !busy);
   if (message) elements.loadingText.textContent = message;
   updateStudioGenerationState(busy, message);

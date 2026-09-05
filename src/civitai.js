@@ -54,7 +54,9 @@ export function createCivitaiService({
     const defaultFolder = CATEGORY_FOLDERS[category];
     if (!defaultFolder) throw new Error("LoRAの分類が不正です");
     const rawLoras = await fetchRawLoras(reforgeConfig).catch((error) => {
-      if (allowMissingRoot) return [];
+      // 明示された共有rootがある場合は、ReForgeの一覧APIが停止中でも
+      // Civitaiの保存先を安全に確定できる。重複判定はregistryと実ファイルで続行する。
+      if (allowMissingRoot || String(loraConfig?.installDir ?? "").trim()) return [];
       throw error;
     });
     const { root: installRoot } = await resolveRoot(rawLoras);
@@ -291,14 +293,16 @@ export function createCivitaiService({
 
     async mergeWithInstalled(loras) {
       const data = await registry.read();
-      return loras.map((lora) => {
-        const entry = findRegistryEntry(data.entries, lora);
+      const installedLoras = Array.isArray(loras) ? loras : [];
+      const installedBasenameCounts = buildInstalledBasenameIndex(installedLoras);
+      return installedLoras.map((lora) => {
+        const entry = findRegistryEntry(data.entries, lora, { installedBasenameCounts });
         if (!entry) return lora;
         return {
           ...lora,
           // 手動編集した表示名・分類を一覧へ反映する。
           displayName: entry.displayName || lora.displayName,
-          category: entry.category,
+          category: entry.category || lora.category,
           registry: entry
         };
       });
@@ -844,18 +848,49 @@ function uniqueStrings(values) {
     });
 }
 
-function findRegistryEntry(entries, lora) {
-  const candidates = [lora.name, lora.displayName, lora.alias]
-    .filter(Boolean)
-    .map(normalizeName);
-  return entries.find((entry) => {
-    const registered = [
-      entry.relativeName,
-      entry.filename,
-      entry.filename?.replace(/\.(?:safetensors|ckpt|pt)$/i, "")
-    ].filter(Boolean).map(normalizeName);
-    return registered.some((name) => candidates.includes(name) || candidates.some((candidate) => candidate.endsWith(`/${name}`)));
+function findRegistryEntry(entries, lora, { installedBasenameCounts } = {}) {
+  const registryEntries = Array.isArray(entries) ? entries : [];
+  const relativeCandidates = uniqueStrings([
+    loraRelativeName(lora),
+    lora?.name
+  ]).map(normalizeName).filter(Boolean);
+  const exact = registryEntries.find((entry) => {
+    const relativeName = normalizeName(entry?.relativeName);
+    return relativeName && relativeCandidates.includes(relativeName);
   });
+  if (exact) return exact;
+
+  // basenameだけのfallbackは、同名が一意に解決できる場合に限定する。
+  const basenameCandidates = new Set(relativeCandidates.map(lastPathSegment));
+  const unambiguousBasenames = [...basenameCandidates]
+    .filter((basename) => !installedBasenameCounts || installedBasenameCounts.get(basename) === 1);
+  if (!unambiguousBasenames.length) return null;
+  const fallback = registryEntries.filter((entry) => registryEntryNames(entry)
+    .some((name) => unambiguousBasenames.includes(lastPathSegment(name))));
+  return fallback.length === 1 ? fallback[0] : null;
+}
+
+function buildInstalledBasenameIndex(loras) {
+  const counts = new Map();
+  for (const lora of loras) {
+    const basenames = new Set(uniqueStrings([
+      loraRelativeName(lora),
+      lora?.name
+    ]).map(normalizeName).filter(Boolean).map(lastPathSegment));
+    for (const basename of basenames) counts.set(basename, (counts.get(basename) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function registryEntryNames(entry) {
+  return [entry?.relativeName, entry?.filename]
+    .filter(Boolean)
+    .map(normalizeName)
+    .filter(Boolean);
+}
+
+function lastPathSegment(value) {
+  return String(value ?? "").split("/").at(-1) ?? "";
 }
 
 function normalizeName(value) {
@@ -894,10 +929,23 @@ async function exists(filePath) {
 
 // ReForgeのLoRA名（サブフォルダ込み）から拡張子を除いた相対名を得る。
 function loraRelativeName(lora) {
-  return String(lora?.name ?? "")
+  const name = normalizeRelativeLoraValue(lora?.name);
+  if (!name) return "";
+  if (name.includes("/")) return name;
+  const folder = normalizeRelativeLoraValue(lora?.folder);
+  return folder ? `${folder}/${name}` : name;
+}
+
+function normalizeRelativeLoraValue(value) {
+  const normalized = String(value ?? "")
+    .trim()
     .replaceAll("\\", "/")
     .replace(/^\/+/, "")
+    .replace(/\/+/g, "/")
     .replace(/\.(?:safetensors|ckpt|pt)$/i, "");
+  if (!normalized || /^[a-z]:\//i.test(normalized)
+    || normalized.split("/").some((segment) => segment === "." || segment === "..")) return "";
+  return normalized.slice(0, 400);
 }
 
 // 末尾セグメントが分類名に一致する実在フォルダ（例 Anime/Character）を推奨候補にする。

@@ -12,3 +12,8 @@ favorites/
 config.local.json
 data/
 .updates/
+.env
+.env.local
+
+.obsidian-memory/
+workbench/

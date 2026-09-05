@@ -7,6 +7,16 @@ import { normalizeManualTitle } from "../public/history-title.js";
 import { normalizeIpAdapter } from "./ip-adapter.js";
 
 export const UNTITLED_DESCRIPTION = "無題";
+export const CONTENT_RATINGS = Object.freeze(["general", "nsfw"]);
+export const HISTORY_CONTENT_RATINGS = Object.freeze([...CONTENT_RATINGS, "unrated"]);
+
+export class HistoryGenerationNotFoundError extends Error {
+  constructor(generationId) {
+    super(`指定された生成履歴がありません: ${generationId}`);
+    this.name = "HistoryGenerationNotFoundError";
+    this.code = "HISTORY_NOT_FOUND";
+  }
+}
 
 const IGNORED_TAGS = new Set([
   "masterpiece", "best quality", "amazing quality", "newest", "absurdres", "highres",
@@ -39,9 +49,10 @@ export function createHistoryService(dataDir, { limit = 500 } = {}) {
       return generation;
     },
 
-    async list({ favoritesOnly = false, limit: requestedLimit = 80 } = {}) {
+    async list({ favoritesOnly = false, contentRating = "all", limit: requestedLimit = 80 } = {}) {
       const data = await store.read();
       const maximum = Math.max(1, Math.min(Number(requestedLimit) || 80, 500));
+      const rating = requireHistoryContentRatingFilter(contentRating);
       return data.generations
         .map((generation) => {
           const normalized = normalizeStoredGeneration(generation);
@@ -52,16 +63,24 @@ export function createHistoryService(dataDir, { limit = 500 } = {}) {
             : normalized.images
           };
         })
+        .filter((generation) => rating === "all" || generation.contentRating === rating)
         .filter((generation) => generation.images.length)
         .slice(0, maximum);
     },
 
-    async listPage({ favoritesOnly = false, limit: requestedLimit = 20, cursor = 0 } = {}) {
+    async listPage({
+      favoritesOnly = false,
+      contentRating = "all",
+      limit: requestedLimit = 20,
+      cursor = 0
+    } = {}) {
       const data = await store.read();
       const maximum = Math.max(1, Math.min(Number(requestedLimit) || 20, 100));
+      const rating = requireHistoryContentRatingFilter(contentRating);
       const entries = [];
       for (const generation of data.generations) {
         const normalized = normalizeStoredGeneration(generation);
+        if (rating !== "all" && normalized.contentRating !== rating) continue;
         for (const image of normalized.images) {
           if (favoritesOnly && !image.favorite) continue;
           entries.push({ generation: normalized, image });
@@ -92,6 +111,13 @@ export function createHistoryService(dataDir, { limit = 500 } = {}) {
       };
     },
 
+    async getGeneration(generationId) {
+      const data = await store.read();
+      const generation = data.generations.find((item) => item?.id === generationId);
+      if (!generation) throw new HistoryGenerationNotFoundError(generationId);
+      return structuredClone(normalizeStoredGeneration(generation));
+    },
+
     async getImage(imageId) {
       const data = await store.read();
       const found = findImage(data, imageId);
@@ -116,6 +142,23 @@ export function createHistoryService(dataDir, { limit = 500 } = {}) {
         return data;
       });
       return matched;
+    },
+
+    async setContentRating(imageId, contentRating) {
+      const rating = requireNewContentRating(contentRating);
+      let matched = null;
+      await store.update((data) => {
+        const found = findImage(data, imageId);
+        if (!found) throw new Error("指定された画像が履歴にありません");
+        found.generation.contentRating = rating;
+        matched = {
+          generationId: found.generation.id,
+          contentRating: rating,
+          imageIds: (found.generation.images ?? []).map((image) => image.id)
+        };
+        return data;
+      });
+      return structuredClone(matched);
     },
 
     // ---- Discord送信状態 ----
@@ -363,8 +406,12 @@ export function createHistoryService(dataDir, { limit = 500 } = {}) {
 
 function normalizeStoredGeneration(generation) {
   if (!generation || typeof generation !== "object") return generation;
+  const runtime = normalizeRuntimeMetadata(generation.runtime);
+  const { runtime: _unsafeRuntime, ...rest } = generation;
   return {
-    ...generation,
+    ...rest,
+    contentRating: normalizeStoredContentRating(generation.contentRating),
+    ...(runtime ? { runtime } : {}),
     ipAdapter: normalizeIpAdapter(generation.ipAdapter),
     images: Array.isArray(generation.images) ? generation.images : []
   };
@@ -459,10 +506,12 @@ export function analyzePreferences(generations) {
 function normalizeGeneration(input) {
   const id = input.id ?? crypto.randomUUID();
   const mode = ["img2img", "inpaint"].includes(input.mode) ? input.mode : "txt2img";
+  const runtime = normalizeRuntimeMetadata(input.runtime);
   return {
     id,
     createdAt: input.createdAt ?? new Date().toISOString(),
     kind: input.kind === "hires" ? "hires" : "candidates",
+    contentRating: normalizeNewContentRating(input.contentRating),
     mode,
     parentImageId: input.parentImageId ?? null,
     // 実験グループ・派生生成のメタデータ（未使用時はnull）
@@ -494,6 +543,7 @@ function normalizeGeneration(input) {
     rawPromptOverride: input.rawPromptOverride === true,
     rawPrompt: String(input.rawPrompt ?? "").slice(0, 16000),
     appliedTriggerWords: normalizeAppliedTriggerWords(input.appliedTriggerWords),
+    ...(runtime ? { runtime } : {}),
     settings: structuredClone(input.settings ?? {}),
     // 実効LoRA一覧（Weightは実際に生成へ送った値、sourceは選択元）。
     loras: normalizeLoras(input.loras),
@@ -517,6 +567,36 @@ function normalizeGeneration(input) {
       discordGeneration: normalizeDiscordState(image.discordGeneration)
     }))
   };
+}
+
+export function normalizeNewContentRating(value) {
+  return CONTENT_RATINGS.includes(value) ? value : "general";
+}
+
+export function normalizeStoredContentRating(value) {
+  return CONTENT_RATINGS.includes(value) ? value : "unrated";
+}
+
+export function requireNewContentRating(value) {
+  if (!CONTENT_RATINGS.includes(value)) throw new Error("contentRatingが不正です");
+  return value;
+}
+
+export function requireHistoryContentRatingFilter(value = "all") {
+  const normalized = value === undefined || value === null || value === "" ? "all" : String(value);
+  if (normalized !== "all" && !HISTORY_CONTENT_RATINGS.includes(normalized)) {
+    throw new Error("ratingが不正です");
+  }
+  return normalized;
+}
+
+export function normalizeRuntimeMetadata(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const id = typeof value.id === "string" ? value.id.trim() : "";
+  const provider = typeof value.provider === "string" ? value.provider.trim() : "";
+  if (!/^[a-z0-9][a-z0-9._-]{0,79}$/i.test(id)
+    || !/^[a-z0-9][a-z0-9._-]{0,79}$/i.test(provider)) return null;
+  return { id, provider };
 }
 
 // 古い履歴にはsourceが無い。UI選択だけで使っていた時代のものなので "ui" として読む。

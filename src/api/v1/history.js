@@ -6,13 +6,24 @@ export function registerHistoryRoutes(router, { service, wrap }) {
       generations: page.generations.map(serializeHistoryGeneration)
     });
   }));
+
+  router.get("/history/:id", wrap(async (request, response) => {
+    const generation = await service.getHistoryItem(request.params.id);
+    response.json(serializeHistoryGeneration(generation, { includeDerivation: true }));
+  }));
+
+  router.post("/history/:id/regenerations", wrap(async (request, response) => {
+    const job = await service.createV1Regeneration(request.params.id, request.body ?? {});
+    response.status(202).json({ id: job.id, status: "queued" });
+  }));
 }
 
-export function serializeHistoryGeneration(generation) {
+export function serializeHistoryGeneration(generation, { includeDerivation = false } = {}) {
   const settings = generation?.settings ?? {};
-  return {
+  const dto = {
     id: safeString(generation?.id),
     createdAt: safeString(generation?.createdAt),
+    contentRating: serializeContentRating(generation?.contentRating),
     title: safeString(generation?.title || generation?.description),
     kind: safeString(generation?.kind),
     mode: safeString(generation?.mode),
@@ -47,6 +58,38 @@ export function serializeHistoryGeneration(generation) {
     images: Array.isArray(generation?.images)
       ? generation.images.map(serializeHistoryImage).filter(Boolean)
       : []
+  };
+  if (includeDerivation) {
+    dto.settings.noiseSchedule = safeString(settings.noiseSchedule);
+    dto.settings.candidateCount = finiteNumber(settings.candidateCount);
+    dto.parentGenerationId = safeIdentifier(generation?.parentGenerationId);
+    dto.parentImageId = safeIdentifier(generation?.parentImageId);
+    dto.derivation = serializeDerivation(generation);
+    dto.ipAdapter = serializeIpAdapter(generation?.ipAdapter);
+    dto.runtime = serializeRuntime(generation?.runtime);
+  }
+  return dto;
+}
+
+function serializeContentRating(value) {
+  return ["general", "nsfw", "unrated"].includes(value) ? value : "unrated";
+}
+
+function serializeRuntime(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const id = safeIdentifier(value.id);
+  const provider = safeIdentifier(value.provider);
+  if (!id || !provider || !/^[a-z0-9][a-z0-9._-]{0,79}$/i.test(id)
+    || !/^[a-z0-9][a-z0-9._-]{0,79}$/i.test(provider)) return null;
+  return { id, provider };
+}
+
+function serializeDerivation(generation) {
+  const type = safeIdentifier(generation?.derivationType);
+  if (!type) return null;
+  return {
+    type,
+    instruction: safeString(generation?.derivationInstruction).slice(0, 500)
   };
 }
 
@@ -86,6 +129,20 @@ function serializeHistoryImage(image) {
   };
 }
 
+function serializeIpAdapter(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.enabled !== true) return null;
+  const referenceImageId = safePublicId(value.referenceImageId);
+  const weight = publicFiniteNumber(value.weight);
+  const guidanceStart = publicFiniteNumber(value.guidanceStart);
+  const guidanceEnd = publicFiniteNumber(value.guidanceEnd);
+  if (!referenceImageId || weight === null || guidanceStart === null || guidanceEnd === null
+    || weight < 0 || weight > 2 || guidanceStart < 0 || guidanceStart > 1
+    || guidanceEnd < 0 || guidanceEnd > 1 || guidanceStart >= guidanceEnd) {
+    return null;
+  }
+  return { referenceImageId, weight, guidanceStart, guidanceEnd };
+}
+
 function safeString(value) {
   return typeof value === "string" ? value.slice(0, 12000) : "";
 }
@@ -98,6 +155,14 @@ function safeIdentifier(value) {
   return normalized.slice(0, 400);
 }
 
+function safePublicId(value) {
+  return typeof value === "string" && /^[a-z0-9-]{8,80}$/i.test(value) ? value : null;
+}
+
 function finiteNumber(value) {
   return Number.isFinite(Number(value)) ? Number(value) : null;
+}
+
+function publicFiniteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }

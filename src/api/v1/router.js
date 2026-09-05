@@ -1,14 +1,16 @@
 import express from "express";
+import { registerAssetRoutes } from "./assets.js";
 import { registerCapabilityRoutes } from "./capabilities.js";
 import { registerGenerationRoutes } from "./generations.js";
 import { registerHistoryRoutes } from "./history.js";
 
-export function createV1Router({ generationService }) {
+export function createV1Router({ generationService, referenceAssets }) {
   const router = express.Router();
   const wrap = (handler) => (request, response, next) => {
     Promise.resolve(handler(request, response)).catch(next);
   };
 
+  if (referenceAssets) registerAssetRoutes(router, { referenceAssets, wrap });
   registerCapabilityRoutes(router, { service: generationService, wrap });
   registerGenerationRoutes(router, { service: generationService, wrap });
   registerHistoryRoutes(router, { service: generationService, wrap });
@@ -31,15 +33,19 @@ export function createV1ErrorMiddleware() {
       next(error);
       return;
     }
-    const mapped = mapV1Error(error);
+    const mapped = mapV1Error(error, request);
     console.error(`[API v1] ${request.method} ${request.originalUrl} ${mapped.code}: ${error?.message ?? error}`);
     sendV1Error(response, mapped);
   };
 }
 
-function mapV1Error(error) {
+function mapV1Error(error, request) {
   if (error?.type === "entity.parse.failed") {
     return { status: 400, code: "INVALID_REQUEST", message: "リクエストJSONを解析できません" };
+  }
+  if (error?.type === "entity.too.large"
+    && assetUploadPath(request)) {
+    return { status: 413, code: "ASSET_TOO_LARGE", message: "参照画像は12MiB以下にしてください" };
   }
   if (error?.apiCode) {
     return {
@@ -53,6 +59,11 @@ function mapV1Error(error) {
     code: "INTERNAL_ERROR",
     message: "API v1の処理に失敗しました"
   };
+}
+
+function assetUploadPath(request) {
+  const path = String(request?.originalUrl ?? request?.url ?? "").split("?", 1)[0];
+  return path === "/api/v1/assets/images";
 }
 
 function publicMessage(code, message) {

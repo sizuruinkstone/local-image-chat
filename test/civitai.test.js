@@ -9,6 +9,39 @@ import {
   parseCivitaiUrl,
   resolveLoraInstallRoot
 } from "../src/civitai.js";
+import { createCivitaiTokenResolver } from "../src/civitai-token.js";
+
+test("Civitai tokenはrequest入力、起動時環境変数、空文字の順で解決する", () => {
+  const withEnvironment = createCivitaiTokenResolver("  environment-token  ");
+  assert.equal(withEnvironment("  request-token  "), "request-token");
+  assert.equal(withEnvironment("   "), "environment-token");
+  assert.equal(withEnvironment(undefined), "environment-token");
+
+  const withoutEnvironment = createCivitaiTokenResolver(undefined);
+  assert.equal(withoutEnvironment(undefined), "");
+  assert.equal(withoutEnvironment("  trimmed-token  "), "trimmed-token");
+  assert.equal(withoutEnvironment("x".repeat(501)).length, 500);
+});
+
+test("4つのCivitai routeが共通resolverを使い、env exampleと起動scriptに秘密値を持たない", async () => {
+  const [serverSource, packageSource, envExample] = await Promise.all([
+    fs.readFile(new URL("../src/server.js", import.meta.url), "utf8"),
+    fs.readFile(new URL("../package.json", import.meta.url), "utf8"),
+    fs.readFile(new URL("../.env.example", import.meta.url), "utf8")
+  ]);
+  const routeNames = ["inspect", "check-duplicate", "install", "refresh-registrations"];
+  for (const routeName of routeNames) {
+    const routeStart = serverSource.indexOf(`app.post("/api/civitai/${routeName}"`);
+    assert.notEqual(routeStart, -1, `${routeName} routeが存在する`);
+    const nextRoute = serverSource.indexOf("app.", routeStart + 10);
+    const routeSource = serverSource.slice(routeStart, nextRoute === -1 ? undefined : nextRoute);
+    assert.match(routeSource, /resolveCivitaiToken\(request\.body\.token\)/, `${routeName}が共通resolverを使う`);
+  }
+  assert.match(serverSource, /createCivitaiTokenResolver\(\s*process\.env\.LOCAL_IMAGE_CHAT_CIVITAI_TOKEN\s*\)/);
+  assert.equal(envExample, "LOCAL_IMAGE_CHAT_CIVITAI_TOKEN=\n");
+  assert.equal(JSON.parse(packageSource).scripts.start, "node --env-file-if-exists=.env src/server.js");
+  assert.match(JSON.parse(packageSource).scripts.check, /node --check src\/civitai-token\.js/);
+});
 
 test("CivitaiモデルURLからモデルIDとバージョンIDを取得する", () => {
   assert.deepEqual(
@@ -285,4 +318,52 @@ test("Civitaiインストールで指定フォルダへ保存し、不正フォ�
     category: "character",
     folder: "../escape"
   }), /ルート外/);
+});
+
+test("明示した共有LoRA rootがあればReForge停止中でもCivitai LoRAを保存する", async (t) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "local-image-chat-civitai-neo-"));
+  const loraRoot = await fs.mkdtemp(path.join(os.tmpdir(), "local-image-chat-lora-neo-"));
+  const originalFetch = global.fetch;
+  t.after(() => {
+    global.fetch = originalFetch;
+    return Promise.all([
+      fs.rm(dataDir, { recursive: true, force: true }),
+      fs.rm(loraRoot, { recursive: true, force: true })
+    ]);
+  });
+
+  global.fetch = async (url) => {
+    const target = String(url);
+    if (target.includes("/sdapi/v1/loras")) {
+      const error = new Error("ReForge is offline");
+      error.cause = { code: "ECONNREFUSED" };
+      throw error;
+    }
+    if (target.includes("download")) return new Response("fake-neo-lora-bytes");
+    return new Response("not found", { status: 404 });
+  };
+
+  const metadata = {
+    modelId: 10, versionId: 20, modelName: "Neo LoRA", versionName: "v1", modelType: "LORA",
+    baseModel: "Anima", sourceUrl: "https://civitai.com/models/10?modelVersionId=20",
+    trainedWords: [], outfitPresets: [], recommendedWeight: 0.7, recommendedWeightMin: null,
+    recommendedWeightMax: null, recommendedWeightLabel: null, recommendedWeightSource: "fallback",
+    previewUrl: "", file: { name: "neo-lora.safetensors", sizeKB: 1, downloadUrl: "https://download/models/20" }
+  };
+  const service = createCivitaiService({
+    dataDir,
+    loraConfig: { installDir: loraRoot },
+    reforgeConfig: { url: "http://127.0.0.1:7861" },
+    inspectCivitai: async () => metadata
+  });
+
+  const result = await service.install({
+    url: "https://civitai.com/models/10?modelVersionId=20",
+    category: "style",
+    folder: "Anima/Style"
+  });
+  assert.equal(result.reusedExisting, false);
+  await fs.access(path.join(loraRoot, "Anima", "Style", "neo-lora.safetensors"));
+  const registry = JSON.parse(await fs.readFile(path.join(dataDir, "lora-registry.json"), "utf8"));
+  assert.equal(registry.entries[0].relativeName, "Anima/Style/neo-lora");
 });

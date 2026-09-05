@@ -48,6 +48,31 @@ function lower(value) {
   return text(value).toLowerCase();
 }
 
+export const LORA_ROOT_FOLDER = "(ルート)";
+
+// UIへ表示するフォルダは、既存DTOの相対値だけを正規化する。
+// 絶対パスや親ディレクトリ指定は表示へ持ち込まない。
+function normalizeFolderPath(value) {
+  const raw = text(value).replaceAll("\\", "/").trim();
+  if (!raw || raw === LORA_ROOT_FOLDER) return "";
+  if (raw.startsWith("/") || /^[A-Za-z]:\//.test(raw)) return "";
+  const segments = raw.split("/").map((segment) => segment.trim()).filter(Boolean);
+  if (!segments.length || segments.some((segment) => segment === "." || segment === ".." || /^[A-Za-z]:$/.test(segment))) {
+    return "";
+  }
+  return segments.join("/");
+}
+
+function safeRelativeName(value) {
+  const raw = text(value).replaceAll("\\", "/").trim();
+  if (!raw || raw.startsWith("/") || /^[A-Za-z]:\//.test(raw) || raw.includes("\0")) return "";
+  const segments = raw.split("/").map((segment) => segment.trim()).filter(Boolean);
+  if (!segments.length || segments.some((segment) => segment === "." || segment === ".." || /^[A-Za-z]:$/.test(segment))) {
+    return "";
+  }
+  return segments.join("/");
+}
+
 export function splitTriggerPreview(triggerWords, limit = 3) {
   const tags = text(triggerWords)
     .split(",")
@@ -77,8 +102,90 @@ export function resolvePresetCategory(lora) {
 }
 
 export function loraFolderKey(lora) {
-  const folder = text(lora?.folder).replaceAll("\\", "/").replace(/^\/+|\/+$/g, "");
-  return folder || "(ルート)";
+  return normalizeFolderPath(lora?.folder) || LORA_ROOT_FOLDER;
+}
+
+function createFolderNode(value, label, segments = []) {
+  return {
+    value,
+    label,
+    segments,
+    children: [],
+    directCount: 0,
+    descendantCount: 0
+  };
+}
+
+// LoRAのfolder値を、表示用の入れ子ツリーへ変換する。
+// rootは実フォルダではなくツリーのコンテナで、直下のLoRAはdirectCountへ集計する。
+export function buildLoraFolderTree(items = []) {
+  const root = createFolderNode("", LORA_ROOT_FOLDER);
+  const nodes = new Map();
+  for (const item of items) {
+    const folder = normalizeFolderPath(item?.folder);
+    const segments = folder ? folder.split("/") : [];
+    let parent = root;
+    let value = "";
+    for (const segment of segments) {
+      value = value ? `${value}/${segment}` : segment;
+      let node = nodes.get(value);
+      if (!node) {
+        node = createFolderNode(value, segment, [...parent.segments, segment]);
+        nodes.set(value, node);
+        parent.children.push(node);
+      }
+      parent = node;
+    }
+    parent.directCount += 1;
+  }
+
+  const countDescendants = (node) => {
+    node.children.sort((left, right) => left.label.localeCompare(right.label, "ja", { numeric: true }));
+    node.descendantCount = node.directCount
+      + node.children.reduce((count, child) => count + countDescendants(child), 0);
+    return node.descendantCount;
+  };
+  countDescendants(root);
+  return root;
+}
+
+export function getFolderDescendantCount(node) {
+  if (!node || typeof node !== "object") return 0;
+  if (Number.isFinite(node.descendantCount)) return node.descendantCount;
+  const directCount = Number.isFinite(node.directCount) ? node.directCount : 0;
+  return directCount + (Array.isArray(node.children)
+    ? node.children.reduce((count, child) => count + getFolderDescendantCount(child), 0)
+    : 0);
+}
+
+// 選択フォルダ自身と、その配下のフォルダを含めて絞り込む。
+// 空文字は「すべて」、(ルート)はフォルダ未指定のLoRAだけを表す。
+export function filterItemsByFolder(items = [], selectedFolder = "") {
+  if (!selectedFolder) return [...items];
+  if (selectedFolder === LORA_ROOT_FOLDER) {
+    return items.filter((item) => !normalizeFolderPath(item?.folder));
+  }
+  const target = normalizeFolderPath(selectedFolder);
+  if (!target) return [];
+  return items.filter((item) => {
+    const folder = normalizeFolderPath(item?.folder);
+    return folder === target || folder.startsWith(`${target}/`);
+  });
+}
+
+// relativeNameを優先し、無い場合は既存LoRA名を使う。絶対パスは候補から除外する。
+export function formatLoraRelativeLocation(item) {
+  const folder = normalizeFolderPath(item?.folder);
+  const candidates = [
+    item?.relativeName,
+    item?.registry?.relativeName,
+    item?.loraName,
+    item?.name
+  ];
+  const relativeName = candidates.map(safeRelativeName).find(Boolean) ?? "";
+  if (!relativeName) return folder || LORA_ROOT_FOLDER;
+  if (!folder || relativeName === folder || relativeName.startsWith(`${folder}/`)) return relativeName;
+  return `${folder}/${relativeName}`;
 }
 
 // LoRA選択UIの1件分。thumbnailUrlは呼び出し側（画面）が解決して渡す。
