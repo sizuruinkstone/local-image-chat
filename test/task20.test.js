@@ -1200,22 +1200,24 @@ test("MCPのgenerate_image／regenerate_imageはruntimeIdをBackendへ渡す", a
 
 test("Task20 UIはRuntime切替完了後に履歴を復元し、生成元RuntimeでHiresを判定する", async () => {
   const app = await fs.readFile("public/app.js", "utf8");
+  const loraLibrary = await fs.readFile("public/features/lora-library.js", "utf8");
+  const runtimeController = await fs.readFile("public/features/runtime-controller.js", "utf8");
   const studio = await fs.readFile("public/features/studio-controller.js", "utf8");
   const historyController = await fs.readFile("public/features/history-controller.js", "utf8");
   const server = await fs.readFile("src/server.js", "utf8");
-  assert.match(app, /let runtimeSelectionToken = 0/);
-  assert.match(app, /function isRuntimeContextCurrent\(context\)/);
-  assert.match(app, /if \(!isRuntimeContextCurrent\(context\)\) return false/);
-  assert.match(app, /function runtimeApiUrl\(pathname\)[\s\S]*?if \(!activeRuntimeId\) return pathname/);
-  assert.match(app, /elements\.refreshCheckpointsButton\.addEventListener\("click", \(\) => void refreshCheckpoints\(\)\)/);
-  assert.match(app, /async function refreshCheckpoints\(\)[\s\S]*?postJson\(runtimeApiUrl\("\/api\/checkpoints\/refresh"\)/);
-  assert.match(app, /async function loadCheckpoints\(context = runtimeRequestContext\(\)\)[\s\S]*?getJson\(runtimeApiUrl\("\/api\/checkpoints"\)/);
-  assert.doesNotMatch(app.match(/async function loadCheckpoints[\s\S]*?\n\}/)?.[0] ?? "", /refresh-checkpoints/);
+  assert.match(runtimeController, /let selectionToken = 0/);
+  assert.match(runtimeController, /const isRuntimeContextCurrent = \(context\)/);
+  assert.match(runtimeController, /if \(!isRuntimeContextCurrent\(context\)\) return false/);
+  assert.match(runtimeController, /const runtimeApiUrl = \(pathname\)[\s\S]*?if \(!activeRuntimeId\) return pathname/);
+  assert.match(runtimeController, /elements\.refreshCheckpointsButton\.addEventListener\("click", onRefresh\)/);
+  assert.match(runtimeController, /async function refreshCheckpoints\(\)[\s\S]*?postJson\(runtimeApiUrl\("\/api\/checkpoints\/refresh"\)/);
+  assert.match(runtimeController, /async function loadCheckpoints\(context = runtimeRequestContext\(\)\)[\s\S]*?getJson\(runtimeApiUrl\("\/api\/checkpoints"\)/);
+  assert.doesNotMatch(runtimeController.match(/async function loadCheckpoints[\s\S]*?\n  \}/)?.[0] ?? "", /refresh-checkpoints/);
   assert.match(app, /const liveResponse = await fetch\("\/api\/runtimes"\)/);
-  assert.match(app, /async function applyRuntimeHealth\(health\)/);
-  assert.match(app, /option\.disabled = !isRuntimeSelectable\(item\)/);
-  assert.match(app, /\$\{label\}（未接続）/);
-  assert.match(app, /await applyRuntimeHealth\(data\.runtimes\)/);
+  assert.match(runtimeController, /async function applyHealth\(health/);
+  assert.match(runtimeController, /option\.disabled = !isRuntimeSelectable\(item\)/);
+  assert.match(runtimeController, /\$\{label\}（未接続）/);
+  assert.match(app, /await runtimeController\.applyHealth\(data\.runtimes, healthRequest\);[\s\S]*?if \(!runtimeController\.isHealthRequestCurrent\(healthRequest\)\) return false/);
   assert.match(app, /const runtimeText = runtimeHealth\?\.ok/);
   assert.match(app, /form: captureRuntimeFormState\(\)/);
   assert.match(app, /function captureRuntimeFormState\(\)[\s\S]*?candidateCount/);
@@ -1232,6 +1234,8 @@ test("Task20 UIはRuntime切替完了後に履歴を復元し、生成元Runtime
   assert.match(server, /const loras = provider\.descriptor\.id === "reforge"[\s\S]*?typeof provider\.refreshLoras === "function"[\s\S]*?await provider\.refreshLoras\(\)/);
   assert.doesNotMatch(server, /Forge Neo \/ AnimaのLoRA再読込は対応していません/);
   assert.match(app, /async function loadRecipeFields\(recipe, image\)[\s\S]*?await ensureRuntimeForRecipe\(recipe\)/);
+  const recipeRestore = app.match(/async function loadRecipeFields\(recipe, image\)[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.doesNotMatch(recipeRestore, /\bactiveRuntimeId\b|\bruntimeOptions\b/);
   assert.match(app, /async function ensureRuntimeForRecipe\(recipe\)[\s\S]*?return handleRuntimeChange\(target\.id\)/);
   assert.match(app, /isHiresAvailable:[\s\S]*?runtimeForGeneration\(generation\)/);
   const candidate = studio.match(/function selectCandidate\([\s\S]*?\n  \}/)?.[0] ?? "";
@@ -1245,5 +1249,5 @@ test("Task20 UIはRuntime切替完了後に履歴を復元し、生成元Runtime
   const detail = historyController.match(/function openDetail\([\s\S]*?(?=\n  function createCopyButton)/)?.[0] ?? "";
   assert.match(detail, /const hiresAction = addAction\("Hiresする"/);
   assert.match(detail, /hiresAction\.disabled = !hiresAvailable/);
-  assert.match(app, /async function openLoraPicker\(\)[\s\S]*?if \(runtimeSwitching\)/);
+  assert.match(loraLibrary, /async function openPicker\(\)[\s\S]*?runtime\.getState\?\.\(\)\.switching/);
 });

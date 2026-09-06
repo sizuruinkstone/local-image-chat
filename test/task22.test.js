@@ -510,9 +510,9 @@ test("Task 22のqueued jobは実行時のProfileを各Jobごとに適用し、�
 });
 
 test("Task 22の既存Checkpoint selectorは選択時にLocal APIだけを呼び、Neo options POSTはqueue側に残す", async () => {
-  const app = await fs.readFile("public/app.js", "utf8");
+  const controller = await fs.readFile("public/features/runtime-controller.js", "utf8");
   const server = await fs.readFile("src/server.js", "utf8");
-  const selection = app.match(/async function switchSelectedCheckpoint\(\)[\s\S]*?\n\}/)?.[0] ?? "";
+  const selection = controller.match(/async function selectCheckpoint\(\)[\s\S]*?\n  \}/)?.[0] ?? "";
   assert.match(selection, /postJson\("\/api\/checkpoints\/select", \{ checkpoint: selectedTitle, \.\.\.runtimePayload\(\) \}\)/);
   assert.doesNotMatch(selection, /sdapi\/v1\/options|forge_preset|forge_additional_modules/);
   assert.match(server, /if \(provider\.descriptor\.id !== "reforge"\)[\s\S]*?provider\.resolveV1Checkpoint\(selected\)/);
@@ -520,29 +520,33 @@ test("Task 22の既存Checkpoint selectorは選択時にLocal APIだけを呼び
 
 test("Task 22のNeo selectorはselectedとactiveを分離し、次回生成へ選択値を渡す", async () => {
   const app = await fs.readFile("public/app.js", "utf8");
-  const selection = app.match(/async function switchSelectedCheckpoint\(\)[\s\S]*?\n\}/)?.[0] ?? "";
+  const controller = await fs.readFile("public/features/runtime-controller.js", "utf8");
+  const selection = controller.match(/async function selectCheckpoint\(\)[\s\S]*?\n  \}/)?.[0] ?? "";
   const settings = app.match(/function readSettings\(overrides = \{\}\)[\s\S]*?\n\}/)?.[0] ?? "";
-  assert.match(app, /let activeCheckpoint = null;[\s\S]*?let selectedCheckpoint = null;/);
+  assert.match(controller, /let activeCheckpoint = null;[\s\S]*?let selectedCheckpoint = null;/);
   assert.match(selection, /const nextCheckpoint = selected \?\? findCheckpoint\(data\.checkpoint\)/);
   assert.match(selection, /selectedCheckpoint = nextCheckpoint/);
   assert.match(selection, /neoSelection\s*\? `次回生成で切替:/);
   assert.doesNotMatch(selection, /切替完了: \$\{activeCheckpoint\.title\}/);
   assert.match(settings, /checkpoint: selectedCheckpoint\?\.title/);
   assert.match(settings, /checkpointHash: selectedCheckpoint\?\.hash/);
-  assert.match(app, /function renderCheckpointStatus\(statusPrefix = ""\)/);
-  assert.match(app, /使用中: \$\{activeCheckpoint\.title\}（次回生成で切替: \$\{selectedCheckpoint\.title\}）/);
-  assert.match(app, /if \(isForgeNeoRuntime\(\) && response\.ok !== false[\s\S]*?activeCheckpoint = healthCheckpoint[\s\S]*?: null/);
-  assert.match(app, /\? `次回生成用のCheckpointを確認中: \$\{selectedTitle\}`/);
-  assert.match(app, /: `切替中: \$\{selectedTitle\}（モデル読込に時間がかかる場合があります）`/);
+  assert.match(controller, /function renderCheckpointStatus\(prefix = ""\)/);
+  assert.match(controller, /使用中: \$\{activeCheckpoint\.title\}（次回生成で切替: \$\{selectedCheckpoint\.title\}）/);
+  assert.match(app, /runtimeController\.updateActiveCheckpoint\(healthCheckpoint, healthRequest\)/);
+  assert.match(controller, /\? `次回生成用のCheckpointを確認中: \$\{selectedTitle\}`/);
+  assert.match(controller, /: `切替中: \$\{selectedTitle\}（モデル読込に時間がかかる場合があります）`/);
   assert.match(selection, /if \(!neoSelection\) activeCheckpoint = nextCheckpoint/);
   assert.match(selection, /: `切替完了: \$\{selectedCheckpoint\.title\}`/);
 });
 
 test("Task 22のCivitai追加は選択RuntimeのLoRA一覧を再取得する", async () => {
   const app = await fs.readFile("public/app.js", "utf8");
+  const controller = await fs.readFile("public/features/civitai-controller.js", "utf8");
   const server = await fs.readFile("src/server.js", "utf8");
-  const install = app.match(/async function installCivitai\(\)[\s\S]*?\n\}/)?.[0] ?? "";
-  assert.match(install, /confirmMove: choice\.confirmMove,[\s\S]*\.\.\.runtimePayload\(\)/);
+  assert.match(app, /createCivitaiController\(\{[\s\S]*?runtimePayload,[\s\S]*?library:/);
+  const install = controller.match(/async function install\(\)[\s\S]*?(?=\n  function describeInstallResult)/)?.[0] ?? "";
+  assert.match(install, /const capturedRuntimePayload = runtimePayload\(\)[\s\S]*?confirmMove: choice\.confirmMove,[\s\S]*\.\.\.capturedRuntimePayload/);
+  assert.match(install, /await loadFolders\(\);[\s\S]*?await library\.load\?\.\(\)/);
   assert.match(server, /async function listLorasForRuntime\(runtimeId = runtimeRegistry\.defaultRuntimeId\)/);
   assert.match(server, /provider\.descriptor\.id === "reforge"[\s\S]*?refreshLoras\(config\.reforge\)[\s\S]*?: await provider\.listLoras\(\)/);
   assert.match(server, /loras: await listLorasForRuntime\(runtimeId\)/);

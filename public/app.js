@@ -1,6 +1,9 @@
 import { getJson, postJson, patchJson, deleteJson } from "./core/http-client.js";
+import { createRuntimeController } from "./features/runtime-controller.js";
+import { createCheckpointSetController } from "./features/checkpoint-sets.js";
+import { createLoraLibrary } from "./features/lora-library.js";
+import { createCivitaiController } from "./features/civitai-controller.js";
 import {
-  LORA_PROFILES,
   createRegistryProfile,
   findProfileForLora,
   getPreset,
@@ -18,25 +21,7 @@ import {
   configureThumbnailImage,
   originalImageUrl
 } from "./image-delivery.js";
-import {
-  NEW_FOLDER_VALUE,
-  buildFolderGroups,
-  isFavoriteFolder,
-  normalizeFavorites,
-  normalizeFolder,
-  normalizeFolderMemory,
-  pickInitialFolder,
-  rememberRecentFolder,
-  toggleFavoriteFolder
-} from "./civitai-folders.js";
-import {
-  compatibilityFilterAllows,
-  getRecommendedWeight,
-  hasLoraPreview,
-  isCompatibilityFilter,
-  resolveLoraPreviewUrl,
-  shouldApplyRecommendedWeight
-} from "./lora-preview.js";
+import { resolveLoraPreviewUrl, shouldApplyRecommendedWeight } from "./lora-preview.js";
 import { createNavigation } from "./features/navigation.js";
 import { createSamplerPicker } from "./features/sampler-picker.js";
 import { createSettingsNavigation } from "./features/settings-navigation.js";
@@ -56,17 +41,13 @@ import {
   MIN_CANDIDATE_COUNT,
   PRESET_CATEGORY_LABELS,
   buildCharacterPresets,
-  buildLoraFolderTree,
   buildGroups,
-  buildLoraCatalog,
   buildOutfitPresets,
   clampCandidateCount,
   filterItemsByFolder,
   filterPresets,
   formatLoraRelativeLocation,
-  getFolderDescendantCount,
   isValidCandidateCount,
-  loraFolderKey,
   splitTriggerPreview
 } from "./preset-catalog.js";
 import {
@@ -280,24 +261,12 @@ let appliedTriggerWords = [];
 let rawPromptOverride = false;
 let rawPromptOverrideSource = "manual";
 let promptMode = "structured";
-let installedLoras = [];
 let loraConfig = { defaultWeight: 0.7, maxSelected: 4 };
 let activeJobId = null;
 let compositionLock = null;
 let preferenceData = { favoriteCount: 0, topTags: [], topLoras: [], topSettings: [] };
 let preferenceBoosts = [];
-let inspectedCivitai = null;
-let civitaiFolders = [];
-let civitaiFolderDefaults = { character: "Characters", style: "Style", body: "Body", pose: "Pose" };
-let civitaiRecommendedFolders = {};
-let civitaiRecentFolders = normalizeFolderMemory(readJsonStorage("localImageChat.civitaiRecentFolders"));
-let civitaiFavoriteFolders = normalizeFavorites(readJsonStorage("localImageChat.civitaiFavoriteFolders", []));
-const CIVITAI_NEW_FOLDER = NEW_FOLDER_VALUE;
 let updateInfo = null;
-let loraRootInfo = { root: "", source: "", label: "", warning: "" };
-let checkpointSets = [];
-// 「ユーザーが編集中か」を判定するための、最後に適用した設定のスナップショット。
-let appliedSettingsFingerprint = null;
 // 表示中のトップレベル画面。生成の進行状況はサーバー側のジョブが持つので、
 // ここを切り替えても生成は止まらない。
 const navigation = createNavigation({
@@ -661,28 +630,10 @@ const experimentController = createExperimentController({
   sleep
 });
 const { loadOptions: loadSamplerOptions, syncLabels: syncSamplerLabels } = samplerPicker;
-let runtimeOptions = [];
-let activeRuntimeId = "reforge";
-let activeRuntime = null;
-let configuredDefaultRuntimeId = "reforge";
-let runtimeSelectionToken = 0;
-let runtimeSwitching = false;
-let runtimeSwitchPromise = Promise.resolve(true);
-let runtimeSwitchSnapshot = null;
-let checkpointRefreshInFlight = false;
 // 選択したまま「今回は使わない」LoRA（ON/OFF）。選択自体は保持する。
 const disabledLoras = new Set();
 // 次の生成が「どの派生操作から来たか」を履歴へ残すための一時情報。
 let pendingDerivation = null;
-let installedCheckpoints = [];
-// Backendが現在ロードしているCheckpointと、次回生成で使う選択値を分離する。
-let activeCheckpoint = null;
-let selectedCheckpoint = null;
-let activeLoraCategory = loadLoraCategory();
-let selectedLoraFolder = "";
-const expandedLoraFolders = new Set();
-let pinnedLoraName = null;
-let displayedLoraName = null;
 // Seedの「ランダム」はアプリ全体で-1。空欄と同じ扱いにはしない。
 const RANDOM_SEED = "-1";
 // Clear PromptsのUndo用スナップショット。
@@ -733,6 +684,237 @@ const loraAddonSelections = loadStringMap("localImageChat.loraAddonSelections");
 const loraOutfitSelections = loadLoraOutfitSelections();
 const checkpointProfileAssignments = loadStringMap("localImageChat.checkpointProfileAssignments");
 
+let checkpointSetController;
+let loraLibrary;
+let civitaiController;
+const runtimeController = createRuntimeController({
+  elements: {
+    runtimeSelect: elements.runtimeSelect,
+    checkpointSelect: elements.checkpointSelect,
+    refreshCheckpointsButton: elements.refreshCheckpointsButton,
+    checkpointStatus: elements.checkpointStatus
+  },
+  getJson,
+  postJson,
+  getGenerationBusy: () => generationBusy,
+  showError,
+  captureExternalSnapshot: captureRuntimeState,
+  restoreExternalSnapshot: restoreRuntimeState,
+  finalizeExternalRestore: finalizeRuntimeStateRestore,
+  loadExternalResources: (context) => [
+    loadLoras(false, context),
+    loadSamplerOptions(context),
+    loadIpAdapterOptions(context)
+  ],
+  onRuntimeUiChange: syncRuntimeState,
+  onCheckpointCatalogChange: syncCheckpointState,
+  onCheckpointSelectionSync: (state) => {
+    const profile = resolveCheckpointProfile(state.selectedCheckpoint);
+    if (elements.checkpointAutoApply.checked && profile.settings) applyCheckpointSettings(profile);
+    syncCheckpointState(state);
+  },
+  onCheckpointSelectionChange: async (state, context, isCurrent) => {
+    await checkpointSetController.applyAuto(state, context, isCurrent);
+    if (!isCurrent()) return;
+    void checkHealth();
+    void loadIpAdapterOptions();
+  }
+});
+
+checkpointSetController = createCheckpointSetController({
+  elements: {
+    checkpointSetSelect: elements.checkpointSetSelect,
+    checkpointSetAutoApply: elements.checkpointSetAutoApply,
+    saveCheckpointSetButton: elements.saveCheckpointSetButton,
+    applyCheckpointSetButton: elements.applyCheckpointSetButton,
+    renameCheckpointSetButton: elements.renameCheckpointSetButton,
+    duplicateCheckpointSetButton: elements.duplicateCheckpointSetButton,
+    deleteCheckpointSetButton: elements.deleteCheckpointSetButton,
+    checkpointSetStatus: elements.checkpointSetStatus
+  },
+  document,
+  getJson,
+  postJson,
+  patchJson,
+  deleteJson,
+  confirmModal,
+  promptModal,
+  toast,
+  withBusy,
+  formatCheckpointBadge,
+  shorten,
+  runtime: {
+    getState: () => runtimeController.getState(),
+    getContext: () => runtimeController.runtimeRequestContext(),
+    isCurrent: (context) => runtimeController.isRuntimeContextCurrent(context)
+  },
+  settings: {
+    read: () => readSettings({ candidateCount: elements.candidateCount.value }),
+    apply: applyCheckpointSetSettings
+  },
+  loras: {
+    fingerprintEntries: () => selectedLoras.entries(),
+    readForSet: readSelectedLoras,
+    restore: restoreCheckpointSetLoras,
+    render: renderCheckpointSetLoras
+  },
+  prompt: {
+    read: () => ({
+      prompt: elements.prompt.value,
+      negativePrompt: elements.negativePrompt.value,
+      promptBoosts: readPromptBoosts()
+    }),
+    apply: (prompt, negativePrompt) => setPromptFields(prompt, negativePrompt, promptDescription)
+  }
+});
+
+loraLibrary = createLoraLibrary({
+  elements: {
+    loraSearch: elements.loraSearch,
+    loraCompatibilityFilter: elements.loraCompatibilityFilter,
+    refreshLorasButton: elements.refreshLorasButton,
+    loraFolderButton: elements.loraFolderButton,
+    loraFolderTree: elements.loraFolderTree,
+    loraListBreadcrumb: elements.loraListBreadcrumb,
+    loraListCount: elements.loraListCount,
+    loraList: elements.loraList,
+    loraStatus: elements.loraStatus,
+    loraCategories: elements.loraCategories,
+    loraPreview: elements.loraPreview,
+    loraRootPath: elements.loraRootPath,
+    loraRootBadge: elements.loraRootBadge,
+    openLoraRootButton: elements.openLoraRootButton
+  },
+  document,
+  window,
+  storage: localStorage,
+  getJson,
+  postJson,
+  patchJson,
+  runtime: {
+    getState: () => runtimeController.getState(),
+    getContext: runtimeRequestContext,
+    isCurrent: isRuntimeContextCurrent,
+    apiUrl: runtimeApiUrl,
+    payload: runtimePayload,
+    getGenerationBusy: () => generationBusy
+  },
+  controls: {
+    isSelected: (name) => selectedLoras.has(name),
+    selectedCount: () => selectedLoras.size,
+    setSelected: setLoraSelected,
+    getWeight: (name) => loraWeights.get(name),
+    setWeight: (name, weight, { syncPrompt = false } = {}) => {
+      loraWeights.set(name, weight);
+      saveLoraWeights();
+      if (selectedLoras.has(name)) {
+        selectedLoras.set(name, weight);
+        if (syncPrompt) applyLoraWeightToPrompt(name, weight);
+      }
+    },
+    getTrigger: resolveLoraTriggerText,
+    setTrigger: (name, value) => {
+      if (value) loraTriggers.set(name, value);
+      else loraTriggers.delete(name);
+      saveLoraTriggers();
+    },
+    getNegative: (name) => loraNegativeWords.get(name) ?? "",
+    setNegative: (name, value) => {
+      if (value) loraNegativeWords.set(name, value);
+      else loraNegativeWords.delete(name);
+      saveLoraNegativeWords();
+    },
+    getPresetSelection: (name) => loraPresetSelections.get(name),
+    getAddonSelection: (name) => loraAddonSelections.get(name),
+    clearProfile: (name) => {
+      loraProfileAssignments.delete(name);
+      loraPresetSelections.delete(name);
+      loraAddonSelections.delete(name);
+      saveProfileSettings();
+    },
+    selectProfile: (name, profile, preset, addon) => {
+      loraProfileAssignments.set(name, profile.id);
+      loraPresetSelections.set(name, preset.id);
+      if (addon) loraAddonSelections.set(name, addon.id);
+      else loraAddonSelections.delete(name);
+      applyProfileSelection(name, profile, preset, addon);
+    },
+    selectPreset: (name, profile, preset, addon) => {
+      loraPresetSelections.set(name, preset.id);
+      applyProfileSelection(name, profile, preset, addon);
+    },
+    selectAddon: (name, profile, preset, addon) => {
+      loraAddonSelections.set(name, addon.id);
+      applyProfileSelection(name, profile, preset, addon);
+    },
+    renderSummary: renderSelectedLoraSummary,
+    scheduleShare: scheduleShareCsvSync,
+    addToForm: addLoraToForm
+  },
+  resolveProfile,
+  getCompatibility: (lora) => assessLoraCompatibility(resolveCheckpointProfile(), lora?.registry?.baseModel),
+  getConfig: () => loraConfig,
+  getInstallFolders: () => civitaiController?.getFolders() ?? [],
+  reloadInstallFolders: () => civitaiController?.loadFolders(),
+  onCatalogPublished: publishLoraCatalog,
+  openModal,
+  openPresetPicker,
+  openImageModal,
+  openEditor: openLoraEditor,
+  withBusy,
+  toast,
+  showError,
+  clearError
+});
+
+civitaiController = createCivitaiController({
+  elements: {
+    civitaiUrl: elements.civitaiUrl,
+    civitaiCategory: elements.civitaiCategory,
+    civitaiFolder: elements.civitaiFolder,
+    civitaiFolderFavorite: elements.civitaiFolderFavorite,
+    civitaiFolderPath: elements.civitaiFolderPath,
+    civitaiNewFolder: elements.civitaiNewFolder,
+    civitaiNewFolderRow: elements.civitaiNewFolderRow,
+    civitaiToken: elements.civitaiToken,
+    inspectCivitaiButton: elements.inspectCivitaiButton,
+    installCivitaiButton: elements.installCivitaiButton,
+    refreshCivitaiRegistrationsButton: elements.refreshCivitaiRegistrationsButton,
+    civitaiPreview: elements.civitaiPreview,
+    civitaiStatus: elements.civitaiStatus
+  },
+  document,
+  storage: localStorage,
+  sessionStorage,
+  getJson,
+  postJson,
+  openModal,
+  confirmModal,
+  toast,
+  showError,
+  clearError,
+  formatFileSize,
+  runtimePayload,
+  getLoraRoot: () => loraLibrary.getRootInfo(),
+  library: { load: (...args) => loraLibrary.load(...args) }
+});
+
+function syncRuntimeState(state) {
+  syncRuntimeUi();
+}
+
+function syncCheckpointState(state) {
+  elements.checkpointProfileSelect.value = getCheckpointProfileSelection(state.selectedCheckpoint);
+  renderCheckpointProfileSummary();
+  checkpointSetController.render();
+  renderLoras();
+  renderSelectedLoraSummary();
+}
+
+runtimeController.init();
+checkpointSetController.init();
+loraLibrary.init();
+civitaiController.init();
 await loadConfig();
 loadTitleSettings();
 initializeCheckpointControls();
@@ -747,11 +929,11 @@ renderTriggerLists();
 renderPromptModeState();
 syncRawPromptFromSections();
 await Promise.all([
-  checkHealth(), loadCheckpoints(), loadLoras(), loadHistory(), loadCivitaiFolders(), loadLoraRoot(),
-  loadExperiments(), loadCheckpointSets(), loadDiscordSettings(), loadPromptTemplate(),
+  checkHealth(), runtimeController.loadCheckpoints(), loadLoras(), loadHistory(), loadCivitaiFolders(), loadLoraRoot(),
+  loadExperiments(), checkpointSetController.load(), loadDiscordSettings(), loadPromptTemplate(),
   loadShareState(), loadSamplerOptions(), loadStorageSettings(), loadIpAdapterOptions()
 ]);
-markSettingsApplied();
+checkpointSetController.markSettingsApplied();
 setGenerationMode("txt2img");
 updateGenerateButton();
 studioController.syncOutputStats();
@@ -761,7 +943,6 @@ syncIpAdapterUi();
 queueController.startPolling();
 
 elements.healthButton.addEventListener("click", checkHealth);
-elements.runtimeSelect.addEventListener("change", () => void handleRuntimeChange());
 elements.titleGenerationMode.addEventListener("change", saveTitleSettings);
 elements.titleTemplate.addEventListener("input", saveTitleSettings);
 elements.generateButton.addEventListener("click", generateCandidates);
@@ -887,39 +1068,10 @@ elements.appendTriggersToRawButton.addEventListener("click", appendTriggersToRaw
 for (const field of PROMPT_FIELDS) {
   promptFieldElement(field).addEventListener("input", handleStructuredPromptInput);
 }
-elements.loraSearch.addEventListener("input", renderLoras);
-elements.loraCompatibilityFilter.value = loadLoraCompatibilityFilter();
-elements.loraCompatibilityFilter.addEventListener("change", () => {
-  saveLoraCompatibilityFilter();
-  renderLoras();
-});
-elements.refreshLorasButton.addEventListener("click", () => loadLoras(true));
-elements.loraFolderButton.addEventListener("click", openLoraFolderModal);
-elements.refreshCheckpointsButton.addEventListener("click", () => void refreshCheckpoints());
-elements.checkpointSelect.addEventListener("change", switchSelectedCheckpoint);
 elements.checkpointProfileSelect.addEventListener("change", handleCheckpointProfileChange);
-elements.checkpointSetSelect.addEventListener("change", syncCheckpointSetControls);
-elements.checkpointSetAutoApply.addEventListener("change", toggleCheckpointSetAutoApply);
-elements.saveCheckpointSetButton.addEventListener("click", saveCurrentCheckpointSet);
-elements.applyCheckpointSetButton.addEventListener("click", () => void applyCheckpointSet(selectedCheckpointSet()));
-elements.renameCheckpointSetButton.addEventListener("click", renameCheckpointSet);
-elements.duplicateCheckpointSetButton.addEventListener("click", duplicateCheckpointSet);
-elements.deleteCheckpointSetButton.addEventListener("click", deleteCheckpointSet);
 elements.checkpointAutoApply.addEventListener("change", () => {
   localStorage.setItem("localImageChat.checkpointAutoApply", String(elements.checkpointAutoApply.checked));
 });
-elements.openLoraRootButton.addEventListener("click", openLoraRootFolder);
-elements.inspectCivitaiButton.addEventListener("click", inspectCivitai);
-elements.installCivitaiButton.addEventListener("click", installCivitai);
-elements.refreshCivitaiRegistrationsButton.addEventListener("click", refreshCivitaiRegistrations);
-elements.civitaiUrl.addEventListener("input", () => {
-  inspectedCivitai = null;
-  elements.installCivitaiButton.disabled = true;
-});
-elements.civitaiCategory.addEventListener("change", () => applyCategoryFolder(elements.civitaiCategory.value));
-elements.civitaiFolder.addEventListener("change", onCivitaiFolderChange);
-elements.civitaiFolderFavorite.addEventListener("click", toggleCivitaiFolderFavorite);
-elements.civitaiNewFolder.addEventListener("input", refreshCivitaiFolderHint);
 elements.importAiPromptButton.addEventListener("click", openAiPromptImport);
 elements.checkUpdateButton.addEventListener("click", checkForUpdate);
 elements.applyUpdateButton.addEventListener("click", applyUpdate);
@@ -941,7 +1093,7 @@ elements.compareShortcutValues.addEventListener("input", () => {
   elements.experimentValues.value = elements.compareShortcutValues.value;
 });
 elements.cancelGenerateButton.addEventListener("click", cancelActiveJob);
-elements.addLoraButton.addEventListener("click", () => void openLoraPicker());
+elements.addLoraButton.addEventListener("click", () => void loraLibrary.openPicker());
 elements.candidateCountDown.addEventListener("click", () => stepCandidateCount(-1));
 elements.candidateCountUp.addEventListener("click", () => stepCandidateCount(1));
 elements.candidateCount.addEventListener("input", handleCandidateCountChange);
@@ -961,13 +1113,6 @@ for (const element of [
 ]) {
   element.addEventListener(element.tagName === "INPUT" ? "input" : "change", handlePromptPartChange);
 }
-elements.loraCategories.addEventListener("click", (event) => {
-  const button = event.target.closest("[data-lora-category]");
-  if (!button) return;
-  activeLoraCategory = button.dataset.loraCategory;
-  localStorage.setItem("localImageChat.loraCategory", activeLoraCategory);
-  renderLoras();
-});
 
 async function loadConfig() {
   const response = await fetch("/api/config");
@@ -1007,36 +1152,7 @@ async function loadConfig() {
 }
 
 function configureRuntimeOptions(options, defaultRuntimeId) {
-  runtimeOptions = Array.isArray(options)
-    ? options.filter((item) => item && typeof item.id === "string" && typeof item.label === "string")
-    : [];
-  if (!runtimeOptions.some((item) => item.id === "reforge")) {
-    runtimeOptions.unshift({
-      id: "reforge",
-      label: "ReForge",
-      provider: "reforge",
-      available: true,
-      supportedModes: ["txt2img", "img2img", "inpaint"],
-      features: { txt2img: true, img2img: true, inpaint: true, hires: true, ipAdapter: true }
-    });
-  }
-  configuredDefaultRuntimeId = safeRuntimeId(defaultRuntimeId) || "reforge";
-  const saved = localStorage.getItem("localImageChat.runtimeId");
-  const preferred = saved || configuredDefaultRuntimeId || "reforge";
-  const selected = runtimeOptions.find((item) => item.id === preferred && isRuntimeSelectable(item))
-    ?? runtimeOptions.find((item) => item.id === configuredDefaultRuntimeId && isRuntimeSelectable(item))
-    ?? runtimeOptions.find((item) => isRuntimeSelectable(item))
-    ?? runtimeOptions.find((item) => item.id === preferred)
-    ?? runtimeOptions[0];
-  activeRuntimeId = selected?.id ?? "reforge";
-  activeRuntime = selected ?? null;
-  if (activeRuntimeId) localStorage.setItem("localImageChat.runtimeId", activeRuntimeId);
-  runtimeSelectionToken += 1;
-  renderRuntimeOptions();
-  elements.runtimeSelect.value = activeRuntimeId;
-  elements.runtimeSelect.disabled = runtimeOptions.length < 2
-    || runtimeOptions.every((runtime) => !isRuntimeSelectable(runtime));
-  syncRuntimeUi();
+  runtimeController.configure(options, defaultRuntimeId);
 }
 
 function selectedContentRating() {
@@ -1052,92 +1168,33 @@ function setContentRating(value, { persist = true } = {}) {
 }
 
 function isRuntimeSelectable(runtime) {
-  if (!runtime || runtime.available === false) return false;
-  return runtime.ok === undefined || runtime.ok === true;
-}
-
-function renderRuntimeOptions() {
-  elements.runtimeSelect.replaceChildren();
-  for (const item of runtimeOptions) {
-    const option = new Option(runtimeOptionLabel(item), item.id);
-    option.disabled = !isRuntimeSelectable(item);
-    if (item.error) option.title = String(item.error);
-    elements.runtimeSelect.append(option);
-  }
-}
-
-function runtimeOptionLabel(runtime) {
-  const label = String(runtime?.label ?? runtime?.id ?? "Runtime");
-  if (runtime?.ok === false) return `${label}（未接続）`;
-  if (runtime?.available === false) return `${label}（無効）`;
-  return label;
-}
-
-async function applyRuntimeHealth(health) {
-  if (!health || typeof health !== "object" || Array.isArray(health)) return false;
-  runtimeOptions = runtimeOptions.map((runtime) => {
-    const live = health[runtime.id];
-    if (!live || typeof live !== "object" || Array.isArray(live)) return runtime;
-    return {
-      ...runtime,
-      available: live.ok === true && live.available !== false,
-      ok: live.ok === true,
-      ...(typeof live.error === "string" && live.error.trim()
-        ? { error: live.error.trim().slice(0, 200) }
-        : {})
-    };
-  });
-  activeRuntime = runtimeOptions.find((runtime) => runtime.id === activeRuntimeId) ?? activeRuntime;
-  renderRuntimeOptions();
-  const fallback = runtimeOptions.find((runtime) => runtime.id === configuredDefaultRuntimeId && isRuntimeSelectable(runtime))
-    ?? runtimeOptions.find((runtime) => isRuntimeSelectable(runtime));
-  if (activeRuntime && !isRuntimeSelectable(activeRuntime)
-    && fallback && fallback.id !== activeRuntimeId && !generationBusy && !runtimeSwitching) {
-    elements.runtimeSelect.value = fallback.id;
-    await handleRuntimeChange(fallback.id);
-  } else {
-    elements.runtimeSelect.value = activeRuntimeId;
-    syncRuntimeUi();
-  }
-  return true;
+  return runtimeController.isRuntimeSelectable(runtime);
 }
 
 function runtimeRequestContext() {
-  return { token: runtimeSelectionToken, runtimeId: activeRuntimeId };
+  return runtimeController.runtimeRequestContext();
 }
 
 function isRuntimeContextCurrent(context) {
-  return context?.token === runtimeSelectionToken && context.runtimeId === activeRuntimeId;
+  return runtimeController.isRuntimeContextCurrent(context);
 }
 
 function captureRuntimeState() {
   return {
-    activeRuntimeId,
-    activeRuntime,
     form: captureRuntimeFormState(),
-    installedCheckpoints,
-    activeCheckpoint,
-    selectedCheckpoint,
-    installedLoras,
+    installedLoras: loraLibrary.getItems(),
     samplerOptions: samplerPicker.getOptions(),
     ipAdapterOptions,
     ipAdapterState: { ...ipAdapterState },
     selectedLoras: new Map(selectedLoras),
     loraSelectionSources: new Map(loraSelectionSources),
-    disabledLoras: new Set(disabledLoras),
-    lastCheckpoint: localStorage.getItem("localImageChat.lastCheckpoint")
+    disabledLoras: new Set(disabledLoras)
   };
 }
 
 function restoreRuntimeState(snapshot) {
   if (!snapshot) return;
-  activeRuntimeId = snapshot.activeRuntimeId;
-  activeRuntime = snapshot.activeRuntime;
-  localStorage.setItem("localImageChat.runtimeId", activeRuntimeId);
-  installedCheckpoints = snapshot.installedCheckpoints;
-  activeCheckpoint = snapshot.activeCheckpoint;
-  selectedCheckpoint = snapshot.selectedCheckpoint;
-  installedLoras = snapshot.installedLoras;
+  loraLibrary.setItems(snapshot.installedLoras, { publish: false, renderNow: false });
   samplerPicker.setOptions(snapshot.samplerOptions);
   ipAdapterOptions = snapshot.ipAdapterOptions;
   ipAdapterState = snapshot.ipAdapterState;
@@ -1147,15 +1204,10 @@ function restoreRuntimeState(snapshot) {
   for (const [name, source] of snapshot.loraSelectionSources) loraSelectionSources.set(name, source);
   disabledLoras.clear();
   for (const name of snapshot.disabledLoras) disabledLoras.add(name);
-  if (snapshot.lastCheckpoint === null) localStorage.removeItem("localImageChat.lastCheckpoint");
-  else localStorage.setItem("localImageChat.lastCheckpoint", snapshot.lastCheckpoint);
-  elements.runtimeSelect.value = activeRuntimeId;
-  renderCheckpointControls();
-  renderCheckpointSetSelect();
-  renderCheckpointProfileSummary();
-  renderLoras();
-  renderSelectedLoraSummary();
-  syncSamplerLabels();
+}
+
+function finalizeRuntimeStateRestore(snapshot) {
+  if (!snapshot) return;
   restoreRuntimeFormState(snapshot.form);
   syncIpAdapterUi();
 }
@@ -1216,43 +1268,37 @@ function restoreRuntimeFormState(snapshot) {
   handleInpaintSettingsChange();
 }
 
-function runtimeSupports(feature, runtime = activeRuntime) {
-  if (!runtime) return feature === "txt2img";
-  return runtime.features?.[feature] === true
-    || (feature === "txt2img" && runtime.supportedModes?.includes("txt2img"));
+function runtimeSupports(feature, runtime = runtimeController.getState().activeRuntime) {
+  return runtimeController.runtimeSupports(feature, runtime);
 }
 
 function safeRuntimeId(value) {
-  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(value.trim())
-    ? value.trim()
-    : "";
+  return runtimeController.safeRuntimeId(value);
 }
 
 function runtimeForGeneration(generation) {
-  const id = safeRuntimeId(generation?.runtime?.id) || "reforge";
-  return runtimeOptions.find((item) => item.id === id && isRuntimeSelectable(item)) ?? null;
+  return runtimeController.runtimeForGeneration(generation);
 }
 
 function runtimePayloadFor(runtime) {
-  return { runtimeId: safeRuntimeId(runtime?.id) || "reforge" };
+  return runtimeController.runtimePayloadFor(runtime);
 }
 
 function runtimeApiUrl(pathname) {
-  // configured defaultと画面上の選択Runtimeが異なっても、選択先へ送る。
-  if (!activeRuntimeId) return pathname;
-  const separator = pathname.includes("?") ? "&" : "?";
-  return `${pathname}${separator}runtimeId=${encodeURIComponent(activeRuntimeId)}`;
+  return runtimeController.runtimeApiUrl(pathname);
 }
 
 function runtimePayload() {
-  return activeRuntimeId ? { runtimeId: activeRuntimeId } : {};
+  return runtimeController.runtimePayload();
 }
 
 function isForgeNeoRuntime() {
-  return activeRuntime?.provider === "forge-neo" || activeRuntime?.id === "forge-neo-anima";
+  return runtimeController.isForgeNeoRuntime();
 }
 
 function syncRuntimeUi() {
+  const { activeRuntime, activeRuntimeId, runtimeOptions, switching: runtimeSwitching,
+    refreshInFlight: checkpointRefreshInFlight } = runtimeController.getState();
   const runtimeLabel = activeRuntime?.label ?? activeRuntimeId;
   const supported = activeRuntime?.supportedModes?.join(" / ") || "txt2img";
   const connection = activeRuntime?.ok === undefined
@@ -1300,61 +1346,7 @@ function syncRuntimeUi() {
 }
 
 async function handleRuntimeChange(requestedRuntimeId = elements.runtimeSelect.value) {
-  const selected = runtimeOptions.find((item) => item.id === requestedRuntimeId);
-  if (!selected || !isRuntimeSelectable(selected)) {
-    elements.runtimeSelect.value = activeRuntimeId;
-    return false;
-  }
-  if (generationBusy) {
-    elements.runtimeSelect.value = activeRuntimeId;
-    showError("生成中はRuntimeを切り替えられません");
-    return false;
-  }
-  if (selected.id === activeRuntimeId) {
-    elements.runtimeSelect.value = activeRuntimeId;
-    return runtimeSwitching ? runtimeSwitchPromise : true;
-  }
-  if (!runtimeSwitching) runtimeSwitchSnapshot = captureRuntimeState();
-  activeRuntimeId = selected.id;
-  activeRuntime = selected;
-  runtimeSelectionToken += 1;
-  const context = runtimeRequestContext();
-  runtimeSwitching = true;
-  localStorage.setItem("localImageChat.runtimeId", activeRuntimeId);
-  syncRuntimeUi();
-  const switching = (async () => {
-    if (!runtimeSupports("txt2img")) {
-      if (isRuntimeContextCurrent(context)) {
-        restoreRuntimeState(runtimeSwitchSnapshot);
-        runtimeSelectionToken += 1;
-        runtimeSwitching = false;
-        runtimeSwitchSnapshot = null;
-        syncRuntimeUi();
-      }
-      return false;
-    }
-    const results = await Promise.all([
-      loadCheckpoints(context),
-      loadLoras(false, context),
-      loadSamplerOptions(context),
-      loadIpAdapterOptions(context)
-    ]);
-    if (!isRuntimeContextCurrent(context)) return false;
-    if (!results.every(Boolean)) {
-      restoreRuntimeState(runtimeSwitchSnapshot);
-      runtimeSelectionToken += 1;
-      runtimeSwitching = false;
-      runtimeSwitchSnapshot = null;
-      syncRuntimeUi();
-      return false;
-    }
-    runtimeSwitching = false;
-    runtimeSwitchSnapshot = null;
-    syncRuntimeUi();
-    return true;
-  })();
-  runtimeSwitchPromise = switching;
-  return switching;
+  return runtimeController.selectRuntime(requestedRuntimeId);
 }
 
 async function loadVersionContract(serverVersion, runtime) {
@@ -1473,6 +1465,7 @@ function syncTitleTemplateVisibility() {
 }
 
 function setGenerationMode(mode) {
+  const { activeRuntime } = runtimeController.getState();
   if (mode !== "txt2img" && !runtimeSupports(mode)) {
     showError(`${activeRuntime?.label ?? "選択したRuntime"}では${mode === "inpaint" ? "inpaint" : "img2img"}を利用できません`);
     return;
@@ -1953,156 +1946,8 @@ function initializeCheckpointControls() {
   elements.checkpointAutoApply.checked = savedAutoApply !== "false";
 }
 
-async function loadCheckpoints(context = runtimeRequestContext()) {
-  elements.checkpointStatus.textContent = `${activeRuntime?.label ?? "Runtime"}からCheckpointを取得中…`;
-  elements.checkpointSelect.disabled = true;
-  elements.refreshCheckpointsButton.disabled = true;
-  try {
-    const data = await getJson(runtimeApiUrl("/api/checkpoints"));
-    if (!isRuntimeContextCurrent(context)) return false;
-    applyCheckpointCatalog(data);
-    return true;
-  } catch (error) {
-    if (!isRuntimeContextCurrent(context)) return false;
-    elements.checkpointSelect.replaceChildren(new Option("取得失敗", ""));
-    elements.checkpointStatus.textContent = `Checkpoint一覧を取得できません: ${error.message}`;
-    renderCheckpointProfileSummary();
-    return false;
-  } finally {
-    if (isRuntimeContextCurrent(context)) {
-      elements.checkpointSelect.disabled = !installedCheckpoints.length;
-      elements.refreshCheckpointsButton.disabled = generationBusy || runtimeSwitching || checkpointRefreshInFlight;
-    }
-  }
-}
-
-function applyCheckpointCatalog(data, statusPrefix = "") {
-  installedCheckpoints = data.checkpoints ?? [];
-  activeCheckpoint = findCheckpoint(data.activeCheckpoint) ?? (
-    data.activeCheckpoint
-      ? { title: data.activeCheckpoint, modelName: data.activeCheckpoint, filename: "" }
-      : null
-  );
-  const rememberedSelection = selectedCheckpoint?.title
-    || localStorage.getItem("localImageChat.lastCheckpoint")
-    || "";
-  selectedCheckpoint = findCheckpoint(rememberedSelection) ?? activeCheckpoint;
-  renderCheckpointControls();
-  renderCheckpointSetSelect();
-  localStorage.setItem("localImageChat.lastCheckpoint", selectedCheckpoint?.title ?? "");
-  renderCheckpointStatus(statusPrefix);
-  renderLoras();
-  renderSelectedLoraSummary();
-}
-
-function renderCheckpointStatus(statusPrefix = "") {
-  const prefix = String(statusPrefix ?? "");
-  if (activeCheckpoint && selectedCheckpoint
-    && activeCheckpoint.title !== selectedCheckpoint.title) {
-    elements.checkpointStatus.textContent = `${prefix}使用中: ${activeCheckpoint.title}（次回生成で切替: ${selectedCheckpoint.title}）`;
-  } else if (activeCheckpoint) {
-    elements.checkpointStatus.textContent = `${prefix}使用中: ${activeCheckpoint.title}`;
-  } else if (selectedCheckpoint) {
-    elements.checkpointStatus.textContent = `${prefix}次回生成で切替: ${selectedCheckpoint.title}（使用中のCheckpointを確認できません）`;
-  } else {
-    elements.checkpointStatus.textContent = `${prefix}使用中のCheckpointを判定できません`;
-  }
-}
-
-async function refreshCheckpoints() {
-  if (generationBusy || runtimeSwitching || checkpointRefreshInFlight) return false;
-  const context = runtimeRequestContext();
-  checkpointRefreshInFlight = true;
-  elements.checkpointSelect.disabled = true;
-  elements.refreshCheckpointsButton.disabled = true;
-  elements.checkpointStatus.textContent = `${activeRuntime?.label ?? "Runtime"}でCheckpointを再走査中…`;
-  try {
-    const data = await postJson(runtimeApiUrl("/api/checkpoints/refresh"), {});
-    if (!isRuntimeContextCurrent(context)) return false;
-    applyCheckpointCatalog(data, "Checkpoint一覧を更新しました。 ");
-    return true;
-  } catch (error) {
-    if (!isRuntimeContextCurrent(context)) return false;
-    elements.checkpointStatus.textContent = `Checkpoint一覧の更新に失敗: ${error.message}`;
-    return false;
-  } finally {
-    checkpointRefreshInFlight = false;
-    if (isRuntimeContextCurrent(context)) {
-      elements.checkpointSelect.disabled = !installedCheckpoints.length;
-      elements.refreshCheckpointsButton.disabled = generationBusy || runtimeSwitching;
-    }
-  }
-}
-
-function renderCheckpointControls() {
-  elements.checkpointSelect.replaceChildren();
-  for (const checkpoint of installedCheckpoints) {
-    elements.checkpointSelect.append(new Option(checkpoint.title, checkpoint.title));
-  }
-  if (
-    selectedCheckpoint
-    && !installedCheckpoints.some((checkpoint) => checkpoint.title === selectedCheckpoint.title)
-  ) {
-    elements.checkpointSelect.append(new Option(selectedCheckpoint.title, selectedCheckpoint.title));
-  }
-  if (
-    activeCheckpoint
-    && activeCheckpoint.title !== selectedCheckpoint?.title
-    && !installedCheckpoints.some((checkpoint) => checkpoint.title === activeCheckpoint.title)
-  ) {
-    elements.checkpointSelect.append(new Option(activeCheckpoint.title, activeCheckpoint.title));
-  }
-  elements.checkpointSelect.value = selectedCheckpoint?.title ?? "";
-  elements.checkpointProfileSelect.value = getCheckpointProfileSelection(selectedCheckpoint);
-  renderCheckpointProfileSummary();
-}
-
-async function switchSelectedCheckpoint() {
-  const selectedTitle = elements.checkpointSelect.value;
-  if (!selectedTitle || selectedTitle === selectedCheckpoint?.title) return;
-  const previousSelected = selectedCheckpoint;
-  const selected = installedCheckpoints.find((checkpoint) => checkpoint.title === selectedTitle);
-  const neoSelection = isForgeNeoRuntime();
-  elements.checkpointSelect.disabled = true;
-  elements.refreshCheckpointsButton.disabled = true;
-  elements.checkpointStatus.textContent = neoSelection
-    ? `次回生成用のCheckpointを確認中: ${selectedTitle}`
-    : `切替中: ${selectedTitle}（モデル読込に時間がかかる場合があります）`;
-  try {
-    const data = await postJson("/api/checkpoints/select", { checkpoint: selectedTitle, ...runtimePayload() });
-    const nextCheckpoint = selected ?? findCheckpoint(data.checkpoint) ?? {
-      title: data.checkpoint || selectedTitle,
-      modelName: data.checkpoint || selectedTitle,
-      filename: ""
-    };
-    selectedCheckpoint = nextCheckpoint;
-    if (!neoSelection) activeCheckpoint = nextCheckpoint;
-    localStorage.setItem("localImageChat.lastCheckpoint", selectedCheckpoint.title);
-    elements.checkpointProfileSelect.value = getCheckpointProfileSelection(selectedCheckpoint);
-    const profile = resolveCheckpointProfile(selectedCheckpoint);
-    if (elements.checkpointAutoApply.checked && profile.settings) applyCheckpointSettings(profile);
-    renderCheckpointProfileSummary();
-    renderLoras();
-    renderSelectedLoraSummary();
-    renderCheckpointSetSelect();
-    elements.checkpointStatus.textContent = neoSelection
-      ? `次回生成で切替: ${selectedCheckpoint.title}${activeCheckpoint ? `（現在の使用中: ${activeCheckpoint.title}）` : ""}`
-      : `切替完了: ${selectedCheckpoint.title}`;
-    // 自動適用ONのLoRAセットがあれば読み込む（編集中なら確認する）。
-    await applyAutoCheckpointSet();
-    void checkHealth();
-    void loadIpAdapterOptions();
-  } catch (error) {
-    selectedCheckpoint = previousSelected;
-    elements.checkpointSelect.value = selectedCheckpoint?.title ?? "";
-    elements.checkpointStatus.textContent = `Checkpoint切替に失敗: ${error.message}`;
-  } finally {
-    elements.checkpointSelect.disabled = false;
-    elements.refreshCheckpointsButton.disabled = generationBusy || runtimeSwitching || checkpointRefreshInFlight;
-  }
-}
-
 function handleCheckpointProfileChange() {
+  const { selectedCheckpoint } = runtimeController.getState();
   if (!selectedCheckpoint) return;
   const selection = elements.checkpointProfileSelect.value;
   if (selection === "auto") checkpointProfileAssignments.delete(selectedCheckpoint.title);
@@ -2119,6 +1964,7 @@ function handleCheckpointProfileChange() {
 }
 
 function renderCheckpointProfileSummary() {
+  const { selectedCheckpoint } = runtimeController.getState();
   const profile = resolveCheckpointProfile(selectedCheckpoint);
   const familyLabels = {
     illustrious: "Illustrious",
@@ -2159,184 +2005,29 @@ function getCheckpointProfileSelection(checkpoint) {
   return checkpointProfileAssignments.get(checkpoint?.title) ?? "auto";
 }
 
-function resolveCheckpointProfile(checkpoint = selectedCheckpoint) {
+function resolveCheckpointProfile(checkpoint = runtimeController.getState().selectedCheckpoint) {
   const assigned = checkpointProfileAssignments.get(checkpoint?.title);
   return getCheckpointProfile(assigned) ?? inferCheckpointProfile(checkpoint);
 }
 
 function findCheckpoint(name) {
-  const identity = checkpointIdentity(name);
-  return installedCheckpoints.find((checkpoint) =>
-    [checkpoint.title, checkpoint.modelName, checkpoint.filename]
-      .some((value) => checkpointIdentity(value) === identity)
-  ) ?? installedCheckpoints.find((checkpoint) => {
-    const candidate = checkpointIdentity(checkpoint.title);
-    return identity && candidate && (identity.includes(candidate) || candidate.includes(identity));
-  });
-}
-
-function checkpointIdentity(value) {
-  return String(value ?? "")
-    .replaceAll("\\", "/")
-    .split("/")
-    .at(-1)
-    .replace(/\s*\[[a-f0-9]+\]\s*$/i, "")
-    .replace(/\.(?:safetensors|ckpt|pt)$/i, "")
-    .trim()
-    .toLowerCase();
+  return runtimeController.findCheckpoint(name);
 }
 
 // ---- Checkpoint別LoRAセット ----
 
-function settingsFingerprint() {
-  return JSON.stringify({
-    settings: readSettings({ candidateCount: elements.candidateCount.value }),
-    loras: [...selectedLoras.entries()].sort()
-  });
-}
-
-function markSettingsApplied() {
-  appliedSettingsFingerprint = settingsFingerprint();
-}
-
-function hasUnsavedSettingChanges() {
-  return appliedSettingsFingerprint !== null && appliedSettingsFingerprint !== settingsFingerprint();
-}
-
-async function loadCheckpointSets() {
-  try {
-    const data = await getJson("/api/checkpoint-lora-sets");
-    checkpointSets = data.sets ?? [];
-  } catch {
-    checkpointSets = [];
-  }
-  renderCheckpointSetSelect();
-}
-
-function setsForActiveCheckpoint() {
-  const identity = checkpointIdentity(selectedCheckpoint?.title);
-  return checkpointSets.filter((set) => checkpointIdentity(set.checkpoint) === identity);
-}
-
-function renderCheckpointSetSelect() {
-  const select = elements.checkpointSetSelect;
-  const current = select.value;
-  select.replaceChildren();
-  const own = setsForActiveCheckpoint();
-  const others = checkpointSets.filter((set) => !own.includes(set));
-  select.append(new Option("セットを選択", ""));
-  if (own.length) {
-    const group = document.createElement("optgroup");
-    group.label = "このCheckpoint";
-    for (const set of own) group.append(new Option(`${set.name}${set.autoApply ? "（自動適用）" : ""}`, set.id));
-    select.append(group);
-  }
-  if (others.length) {
-    const group = document.createElement("optgroup");
-    group.label = "他のCheckpoint";
-    for (const set of others) group.append(new Option(`${set.name} / ${shorten(set.checkpoint, 22)}`, set.id));
-    select.append(group);
-  }
-  if ([...select.options].some((option) => option.value === current)) select.value = current;
-  syncCheckpointSetControls();
-}
-
-function selectedCheckpointSet() {
-  return checkpointSets.find((set) => set.id === elements.checkpointSetSelect.value) ?? null;
-}
-
-function syncCheckpointSetControls() {
-  const set = selectedCheckpointSet();
-  const disabled = !set;
-  for (const key of [
-    "applyCheckpointSetButton", "renameCheckpointSetButton",
-    "duplicateCheckpointSetButton", "deleteCheckpointSetButton"
-  ]) elements[key].disabled = disabled;
-  elements.checkpointSetAutoApply.checked = set?.autoApply === true;
-  elements.checkpointSetAutoApply.disabled = disabled;
-  elements.checkpointSetStatus.textContent = set
-    ? `${set.name}: LoRA ${set.loras.length}個・${describeSetSettings(set.settings)}`
-    : setsForActiveCheckpoint().length
-      ? "セットを選ぶと内容を表示します。"
-      : "現在のCheckpoint用のセットはまだありません。";
-}
-
-function describeSetSettings(settings = {}) {
-  return [
-    settings.width && settings.height ? `${settings.width}×${settings.height}` : null,
-    settings.steps ? `${settings.steps} Steps` : null,
-    settings.cfgScale ? `CFG ${settings.cfgScale}` : null,
-    settings.samplerName,
-    settings.scheduler
-  ].filter(Boolean).join("・") || "設定なし";
-}
-
-function currentSetPayload(name) {
-  const settings = readSettings({ candidateCount: elements.candidateCount.value });
-  return {
-    name,
-    checkpoint: selectedCheckpoint?.title ?? "",
-    autoApply: elements.checkpointSetAutoApply.checked,
-    loras: readSelectedLoras(),
-    settings: {
-      samplerName: settings.samplerName,
-      scheduler: settings.scheduler,
-      noiseSchedule: settings.noiseSchedule,
-      steps: settings.steps,
-      cfgScale: settings.cfgScale,
-      width: settings.width,
-      height: settings.height,
-      hiresScale: settings.hiresScale,
-      hiresSteps: settings.hiresSteps,
-      hiresDenoising: settings.hiresDenoising,
-      hiresUpscaler: settings.hiresUpscaler
-    },
-    prompt: elements.prompt.value,
-    negativePrompt: elements.negativePrompt.value,
-    promptBoosts: readPromptBoosts()
-  };
-}
-
-async function saveCurrentCheckpointSet() {
-  if (!selectedCheckpoint?.title) return toast.warning("Checkpointを選択してから保存してください");
-  const name = await promptModal("LoRAセットの名前", `${formatCheckpointBadge(selectedCheckpoint.title)} 基本セット`, {
-    placeholder: "例: NoobAI 基本セット",
-    confirmText: "保存"
-  });
-  if (!name) return;
-  await withBusy(elements.saveCheckpointSetButton, "保存中…", async () => {
-    try {
-      const { set } = await postJson("/api/checkpoint-lora-sets", currentSetPayload(name));
-      await loadCheckpointSets();
-      elements.checkpointSetSelect.value = set.id;
-      syncCheckpointSetControls();
-      markSettingsApplied();
-      toast.success(`${set.name} を保存しました`);
-    } catch (error) {
-      toast.error(error.message);
-    }
-  });
-}
-
-// セット適用。ユーザーが編集中の設定を勝手に上書きしない。
-async function applyCheckpointSet(set, { silent = false } = {}) {
-  if (!set) return false;
-  if (!silent && hasUnsavedSettingChanges()) {
-    const confirmed = await confirmModal(
-      `現在の設定を「${set.name}」で上書きします。編集中の内容は失われます。`,
-      { title: "LoRAセットの適用", confirmText: "適用する" }
-    );
-    if (!confirmed) return false;
-  }
-
-  for (const [key, value] of Object.entries(set.settings ?? {})) {
+function applyCheckpointSetSettings(settings = {}) {
+  for (const [key, value] of Object.entries(settings)) {
     if (elements[key] && value !== undefined && value !== "") elements[key].value = value;
   }
   syncSamplerLabels();
+}
+
+function restoreCheckpointSetLoras(loras = []) {
   selectedLoras.clear();
   const missing = [];
-  for (const lora of set.loras ?? []) {
-    if (!installedLoras.some((item) => item.name === lora.name)) {
+  for (const lora of loras) {
+    if (!loraLibrary.getItems().some((item) => item.name === lora.name)) {
       missing.push(lora.name);
       continue;
     }
@@ -2348,1009 +2039,52 @@ async function applyCheckpointSet(set, { silent = false } = {}) {
   saveLoraWeights();
   saveLoraTriggers();
   saveLoraNegativeWords();
-  if (set.prompt || set.negativePrompt) {
-    setPromptFields(set.prompt ?? "", set.negativePrompt ?? "", promptDescription);
-  }
+  return missing;
+}
+
+function renderCheckpointSetLoras() {
   renderLoras();
   renderSelectedLoraSummary();
-  markSettingsApplied();
-  toast.success(`${set.name}を適用しました${missing.length ? `（未導入のLoRA: ${missing.join(", ")}）` : ""}`);
-  if (missing.length) toast.warning(`未導入のLoRAはスキップしました: ${missing.join(", ")}`);
-  return true;
-}
-
-async function renameCheckpointSet() {
-  const set = selectedCheckpointSet();
-  if (!set) return;
-  const name = await promptModal("セット名を変更", set.name);
-  if (!name) return;
-  try {
-    await patchJson(`/api/checkpoint-lora-sets/${set.id}`, { name });
-    await loadCheckpointSets();
-    elements.checkpointSetSelect.value = set.id;
-    syncCheckpointSetControls();
-    toast.success("セット名を変更しました");
-  } catch (error) {
-    toast.error(error.message);
-  }
-}
-
-async function duplicateCheckpointSet() {
-  const set = selectedCheckpointSet();
-  if (!set) return;
-  try {
-    const { set: created } = await patchJson(`/api/checkpoint-lora-sets/${set.id}`, { duplicate: true });
-    await loadCheckpointSets();
-    elements.checkpointSetSelect.value = created.id;
-    syncCheckpointSetControls();
-    toast.success(`${created.name} を作成しました`);
-  } catch (error) {
-    toast.error(error.message);
-  }
-}
-
-async function deleteCheckpointSet() {
-  const set = selectedCheckpointSet();
-  if (!set) return;
-  const confirmed = await confirmModal(`LoRAセット「${set.name}」を削除しますか？`, {
-    title: "LoRAセットの削除",
-    confirmText: "削除する",
-    danger: true
-  });
-  if (!confirmed) return;
-  try {
-    await deleteJson(`/api/checkpoint-lora-sets/${set.id}`);
-    await loadCheckpointSets();
-    toast.success("LoRAセットを削除しました");
-  } catch (error) {
-    toast.error(error.message);
-  }
-}
-
-async function toggleCheckpointSetAutoApply() {
-  const set = selectedCheckpointSet();
-  if (!set) return;
-  try {
-    await patchJson(`/api/checkpoint-lora-sets/${set.id}`, { autoApply: elements.checkpointSetAutoApply.checked });
-    await loadCheckpointSets();
-    elements.checkpointSetSelect.value = set.id;
-    syncCheckpointSetControls();
-  } catch (error) {
-    toast.error(error.message);
-  }
-}
-
-// Checkpoint切替後に、自動適用ONのセットがあれば適用する。
-async function applyAutoCheckpointSet() {
-  const identity = checkpointIdentity(selectedCheckpoint?.title);
-  const set = checkpointSets.find((item) => item.autoApply && checkpointIdentity(item.checkpoint) === identity);
-  if (!set) return;
-  elements.checkpointSetSelect.value = set.id;
-  syncCheckpointSetControls();
-  await applyCheckpointSet(set);
 }
 
 function getLoraCompatibility(lora) {
-  return assessLoraCompatibility(resolveCheckpointProfile(), lora?.registry?.baseModel);
-}
-
-const LORA_SUBCATEGORY_LABELS = {
-  character: "キャラクター",
-  style: "画風",
-  body: "体型",
-  pose: "構図・ポーズ"
-};
-
-function loadLoraCompatibilityFilter() {
-  const stored = localStorage.getItem("localImageChat.loraCompatibilityFilter");
-  return isCompatibilityFilter(stored) ? stored : "all";
-}
-
-function saveLoraCompatibilityFilter() {
-  localStorage.setItem("localImageChat.loraCompatibilityFilter", elements.loraCompatibilityFilter.value);
+  return loraLibrary.getCompatibility(lora);
 }
 
 function findLoraByName(name) {
-  return installedLoras.find((item) => item.name === name) ?? null;
+  return loraLibrary.findByName(name);
+}
+
+function renderLoraFolderTree(container, items, options) {
+  return loraLibrary.renderFolderTree(container, items, options);
 }
 
 function expandLoraFolderPath(folder, expandedFolders) {
-  if (!folder || folder === LORA_ROOT_FOLDER) return;
-  const segments = String(folder).replaceAll("\\", "/").split("/").filter(Boolean);
-  let path = "";
-  for (const segment of segments) {
-    path = path ? `${path}/${segment}` : segment;
-    expandedFolders.add(path);
-  }
-}
-
-// 設定画面とLoRA選択モーダルで共用するフォルダツリー。
-// selectedFolderは空文字=すべて、(ルート)=folder未指定を表す。
-function renderLoraFolderTree(container, items, {
-  selectedFolder = "",
-  expandedFolders = new Set(),
-  onSelect = () => {},
-  onToggle = () => {}
-} = {}) {
-  if (!container) return;
-  const tree = buildLoraFolderTree(items);
-  container.replaceChildren();
-
-  const appendRow = (parent, {
-    value,
-    label,
-    count,
-    depth = 0,
-    node = null,
-    rootFolder = false
-  }) => {
-    const row = document.createElement("div");
-    row.className = "loraFolderTreeRow";
-    row.style.setProperty("--folder-depth", String(depth));
-    row.setAttribute("role", "treeitem");
-    row.setAttribute("aria-selected", String(selectedFolder === value));
-    if (node) row.setAttribute("aria-expanded", String(expandedFolders.has(node.value)));
-
-    if (node?.children?.length) {
-      const toggle = document.createElement("button");
-      toggle.type = "button";
-      toggle.className = "loraFolderTreeToggle";
-      toggle.textContent = expandedFolders.has(node.value) ? "▾" : "▸";
-      toggle.setAttribute("aria-label", `${label}${expandedFolders.has(node.value) ? "を折りたたむ" : "を展開"}`);
-      toggle.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        onToggle(node.value, node);
-      });
-      row.append(toggle);
-    } else {
-      const spacer = document.createElement("span");
-      spacer.className = "loraFolderTreeToggle loraFolderTreeToggleSpacer";
-      spacer.setAttribute("aria-hidden", "true");
-      row.append(spacer);
-    }
-
-    const select = document.createElement("button");
-    select.type = "button";
-    select.className = "loraFolderTreeSelect";
-    select.classList.toggle("active", selectedFolder === value);
-    select.dataset.loraFolder = value;
-    select.title = rootFolder ? LORA_ROOT_FOLDER : (node?.value || label);
-    const labelText = document.createElement("span");
-    labelText.className = "loraFolderTreeLabel";
-    labelText.textContent = label;
-    const countText = document.createElement("span");
-    countText.className = "loraFolderTreeCount";
-    countText.textContent = `${count}個`;
-    select.append(labelText, countText);
-    select.addEventListener("click", () => onSelect(value, node));
-    row.append(select);
-    parent.append(row);
-
-    if (node?.children?.length && expandedFolders.has(node.value)) {
-      const children = document.createElement("div");
-      children.className = "loraFolderTreeChildren";
-      children.setAttribute("role", "group");
-      for (const child of node.children) {
-        appendRow(children, {
-          value: child.value,
-          label: child.label,
-          count: getFolderDescendantCount(child),
-          depth: depth + 1,
-          node: child
-        });
-      }
-      parent.append(children);
-    }
-  };
-
-  appendRow(container, {
-    value: "",
-    label: "すべて",
-    count: getFolderDescendantCount(tree),
-    rootFolder: true
-  });
-  appendRow(container, {
-    value: LORA_ROOT_FOLDER,
-    label: LORA_ROOT_FOLDER,
-    count: tree.directCount,
-    rootFolder: true
-  });
-  for (const child of tree.children) {
-    appendRow(container, {
-      value: child.value,
-      label: child.label,
-      count: getFolderDescendantCount(child),
-      node: child
-    });
-  }
-}
-
-function selectLoraFolder(folder) {
-  selectedLoraFolder = folder;
-  expandLoraFolderPath(folder, expandedLoraFolders);
-  renderLoras();
-}
-
-function toggleLoraFolder(folder) {
-  if (expandedLoraFolders.has(folder)) expandedLoraFolders.delete(folder);
-  else expandedLoraFolders.add(folder);
-  renderLoras();
-}
-
-function openLoraFolderModal() {
-  openModal({
-    title: "LoRAフォルダ",
-    subtitle: "表示する保存場所を選択",
-    size: "small",
-    build: (body, close) => {
-      body.classList.add("loraFolderDrawerBody");
-      const rootButton = document.createElement("button");
-      rootButton.type = "button";
-      rootButton.className = "ghost loraFolderDrawerRoot";
-      rootButton.textContent = "LoRAフォルダを開く";
-      rootButton.addEventListener("click", openLoraRootFolder);
-      const tree = document.createElement("div");
-      tree.className = "loraFolderTree loraFolderDrawerTree";
-      tree.setAttribute("role", "tree");
-      tree.setAttribute("aria-label", "LoRAフォルダ一覧");
-      body.append(rootButton, tree);
-      renderLoraFolderTree(tree, installedLoras, {
-        selectedFolder: selectedLoraFolder,
-        expandedFolders: expandedLoraFolders,
-        onToggle: toggleLoraFolder,
-        onSelect: (folder) => {
-          selectLoraFolder(folder);
-          close();
-        }
-      });
-    },
-    actions: [{ label: "閉じる", value: true, variant: "ghost" }]
-  });
-}
-
-// ホバー・フォーカス時は一時表示。lora未指定なら固定中へ戻す。
-function showTransientLoraPreview(lora) {
-  if (!lora) return restorePinnedLoraPreview();
-  renderLoraPreview(lora, { pinned: pinnedLoraName === lora.name });
-}
-
-// クリック時はプレビューを固定する（LoRAの有効化は行わない）。
-function pinLoraPreview(lora) {
-  if (!lora) return;
-  pinnedLoraName = lora.name;
-  renderLoraPreview(lora, { pinned: true });
-}
-
-function restorePinnedLoraPreview() {
-  const pinned = pinnedLoraName ? findLoraByName(pinnedLoraName) : null;
-  if (!pinned) pinnedLoraName = null;
-  renderLoraPreview(pinned, { pinned: Boolean(pinned) });
-}
-
-// 一覧再描画後にプレビュー欄を最新の状態へ同期する。
-function refreshLoraPreviewPane() {
-  restorePinnedLoraPreview();
-}
-
-function renderLoraPreview(lora, { pinned = false, container = elements.loraPreview } = {}) {
-  const pane = container;
-  if (!pane) return;
-  const isMainPane = pane === elements.loraPreview;
-  pane.replaceChildren();
-  if (isMainPane) displayedLoraName = lora?.name ?? null;
-  if (!lora) {
-    const hint = document.createElement("p");
-    hint.className = "loraPreviewHint";
-    hint.textContent = "LoRAにカーソルを合わせるか選ぶと、作例画像と詳細をここに表示します。";
-    pane.append(hint);
-    return;
-  }
-
-  const profile = resolveProfile(lora);
-  const registry = lora.registry;
-  const compatibility = getLoraCompatibility(lora);
-
-  const figure = document.createElement("div");
-  figure.className = "loraPreviewImage";
-  const url = resolveLoraPreviewUrl(lora);
-  if (url) {
-    const img = document.createElement("img");
-    img.loading = "lazy";
-    img.decoding = "async";
-    img.alt = `${lora.displayName}の作例`;
-    img.src = url;
-    img.title = "クリックで拡大";
-    img.addEventListener("error", () => {
-      figure.replaceChildren(createThumbPlaceholder(lora));
-      figure.classList.add("noPreview");
-    });
-    figure.classList.add("clickable");
-    figure.addEventListener("click", () => openImageModal(url, `${lora.displayName}の作例`));
-    figure.append(img);
-  } else {
-    figure.classList.add("noPreview");
-    figure.append(createThumbPlaceholder(lora));
-  }
-  pane.append(figure);
-
-  const header = document.createElement("div");
-  header.className = "loraPreviewHeader";
-  const title = document.createElement("strong");
-  title.className = "loraPreviewTitle";
-  title.textContent = lora.displayName;
-  header.append(title);
-  if (pinned) {
-    const badge = document.createElement("span");
-    badge.className = "loraPreviewPinned";
-    badge.textContent = "固定中";
-    header.append(badge);
-  }
-  pane.append(header);
-
-  const addFieldTo = (target) => (label, value) => {
-    if (value === null || value === undefined || value === "") return;
-    const dt = document.createElement("dt");
-    dt.textContent = label;
-    const dd = document.createElement("dd");
-    if (value instanceof Node) dd.append(value);
-    else dd.textContent = String(value);
-    target.append(dt, dd);
-  };
-
-  // 画像優先のため、主要情報だけを既定で表示する。
-  const list = document.createElement("dl");
-  list.className = "loraPreviewFields";
-  const addField = addFieldTo(list);
-
-  addField("保存場所", formatLoraRelativeLocation(lora));
-  const baseModel = registry?.baseModel ?? profile?.baseModel;
-  addField("Base Model", baseModel);
-  if (baseModel && selectedCheckpoint) {
-    const badge = document.createElement("span");
-    badge.className = `loraCompatibility ${compatibility.level}`;
-    badge.textContent = compatibility.label;
-    badge.title = compatibility.message;
-    addField("互換性", badge);
-  }
-  // Civitaiから実際に抽出できた推奨値だけを表示する（fallbackは推奨扱いしない）。
-  const recommended = getRecommendedWeight(registry);
-  const currentWeight = loraWeights.get(lora.name)
-    ?? recommended?.weight ?? profile?.recommendedWeight ?? loraConfig.defaultWeight;
-  if (recommended) {
-    addField("Recommended Weight", recommended.weight.toFixed(2));
-    if (recommended.min != null) addField("Recommended Range", recommended.label);
-  }
-  addField("現在値", Number(currentWeight).toFixed(2));
-  // 実際に生成へ使う現在値（ユーザー編集後）を優先し、無ければ登録時の値。
-  const triggerWords = resolveLoraTriggerText(lora.name);
-  if (triggerWords) {
-    addField(
-      typeof registry?.characterTriggerWords === "string" ? "基本セット" : "Trigger Words",
-      createTriggerWordsNode(triggerWords)
-    );
-  }
-  if (list.childElementCount) pane.append(list);
-
-  // 補足情報は既定で折りたたみ、情報量を抑える。
-  const moreList = document.createElement("dl");
-  moreList.className = "loraPreviewFields";
-  const addMore = addFieldTo(moreList);
-  addMore("Category", getLoraCategory(lora) === "character" ? "キャラクター" : "画風・体型・構図");
-  addMore("Subcategory", LORA_SUBCATEGORY_LABELS[registry?.subcategory] ?? registry?.subcategory);
-  const presetCount = profile?.presets
-    ? profile.presets.filter((preset) => preset.id !== "identity").length
-    : (registry?.outfitPresets?.length ?? 0);
-  if (presetCount > 0) addMore("衣装プリセット", `${presetCount}種`);
-  addMore("Civitaiモデル", registry?.modelName);
-  addMore("Civitaiバージョン", registry?.versionName);
-  if (moreList.childElementCount) {
-    const more = document.createElement("details");
-    more.className = "loraPreviewMore";
-    const summary = document.createElement("summary");
-    summary.textContent = "詳細情報";
-    more.append(summary, moreList);
-    pane.append(more);
-  }
-
-  const actions = document.createElement("div");
-  actions.className = "loraPreviewActions";
-  const toggle = document.createElement("button");
-  toggle.type = "button";
-  const isSelected = selectedLoras.has(lora.name);
-  toggle.className = isSelected ? "secondary" : "primary";
-  toggle.textContent = isSelected ? "LoRAを解除" : "LoRAを選択";
-  toggle.addEventListener("click", () => {
-    toggleLoraSelectionFromPreview(lora);
-    if (!isMainPane) renderLoraPreview(lora, { pinned, container: pane });
-  });
-  actions.append(toggle);
-
-  const edit = document.createElement("button");
-  edit.type = "button";
-  edit.className = "secondary";
-  edit.textContent = "編集";
-  edit.title = "表示名・分類・Trigger Words・推奨Weightなどを編集";
-  edit.addEventListener("click", () => void editLoraMetadata(lora, edit));
-  actions.append(edit);
-
-  // 推奨値へ戻すボタン（Civitai推奨がある場合だけ）。
-  if (recommended && Number(currentWeight).toFixed(2) !== recommended.weight.toFixed(2)) {
-    const reset = document.createElement("button");
-    reset.type = "button";
-    reset.className = "ghost loraResetWeight";
-    reset.textContent = recommended.min != null
-      ? `中央値${recommended.weight.toFixed(2)}へ戻す`
-      : `推奨${recommended.weight.toFixed(2)}へ戻す`;
-    reset.addEventListener("click", () => applyRecommendedWeight(lora));
-    actions.append(reset);
-  }
-
-  const sourceUrl = profile?.sourceUrl || registry?.sourceUrl;
-  if (sourceUrl && sourceUrl !== "#") {
-    const link = document.createElement("a");
-    link.className = "loraPreviewLink";
-    link.href = sourceUrl;
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
-    link.textContent = "Civitai";
-    actions.append(link);
-  }
-  pane.append(actions);
-}
-
-function shouldUseLoraDetailModal() {
-  return window.matchMedia?.("(max-width: 1099px)")?.matches ?? false;
-}
-
-function openLoraDetailModal(lora) {
-  openModal({
-    title: lora.displayName || lora.name,
-    subtitle: formatLoraRelativeLocation(lora),
-    size: "medium",
-    build: (body) => {
-      const pane = document.createElement("div");
-      pane.className = "loraPreview loraPreviewModal";
-      pane.setAttribute("aria-live", "polite");
-      pane.setAttribute("aria-label", "LoRA詳細");
-      body.append(pane);
-      renderLoraPreview(lora, { pinned: true, container: pane });
-    },
-    actions: [{ label: "閉じる", value: true, variant: "ghost" }]
-  });
-}
-
-// LoRAメタデータ編集。未登録のLoRAは編集時にregistryへ登録してから扱う。
-async function editLoraMetadata(lora, button) {
-  await withBusy(button, "準備中…", async () => {
-    try {
-      const relativeName = String(lora.name ?? "").replaceAll("\\", "/");
-      const { entry } = await postJson("/api/loras/registry/ensure", {
-        relativeName,
-        displayName: lora.displayName ?? ""
-      });
-      await openLoraEditor({
-        lora,
-        entry,
-        folders: civitaiFolders,
-        onSave: async (patch) => {
-          const result = await patchJson(`/api/loras/${entry.uid}`, patch);
-          if (Array.isArray(result.loras) && result.loras.length) installedLoras = result.loras;
-          toast.success(`${result.entry.displayName || result.entry.modelName || "LoRA"} の情報を保存しました`);
-        },
-        onMove: async (folder) => {
-          const result = await postJson(`/api/loras/${entry.uid}/move`, { folder, confirm: true });
-          if (Array.isArray(result.loras) && result.loras.length) installedLoras = result.loras;
-          toast.success(`${folder} へ移動しました（${result.moved.length}ファイル）`);
-        }
-      });
-      await loadLoras();
-      await loadCivitaiFolders();
-    } catch (error) {
-      toast.error(error.message);
-    }
-  });
-}
-
-// Trigger Wordsは長い場合に折り返しつつ、展開できるようdetailsへ収める。
-function createTriggerWordsNode(triggerWords) {
-  if (triggerWords.length <= 60) {
-    const span = document.createElement("span");
-    span.textContent = triggerWords;
-    return span;
-  }
-  const details = document.createElement("details");
-  details.className = "loraTriggerWords";
-  const summary = document.createElement("summary");
-  summary.textContent = `${triggerWords.slice(0, 48)}…`;
-  const body = document.createElement("span");
-  body.textContent = triggerWords;
-  details.append(summary, body);
-  return details;
-}
-
-function toggleLoraSelectionFromPreview(lora) {
-  const isSelected = selectedLoras.has(lora.name);
-  if (!isSelected && selectedLoras.size >= loraConfig.maxSelected) {
-    showError(`LoRAは最大${loraConfig.maxSelected}個までです`);
-    return;
-  }
-  if (isSelected) {
-    setLoraSelected(lora.name, false);
-  } else {
-    const weight = loraWeights.get(lora.name) ?? lora.registry?.recommendedWeight ?? loraConfig.defaultWeight;
-    setLoraSelected(lora.name, true, weight);
-  }
-  clearError();
-  // 操作したLoRAを固定して詳細を表示したまま一覧を再描画する。
-  pinnedLoraName = lora.name;
-  renderSelectedLoraSummary();
-  renderLoras();
-}
-
-// Civitai推奨Weight（範囲なら中央値）へ、スライダー・保存値・選択中の値を同時に戻す。
-function applyRecommendedWeight(lora) {
-  const recommended = getRecommendedWeight(lora.registry);
-  if (!recommended) return;
-  loraWeights.set(lora.name, recommended.weight);
-  saveLoraWeights();
-  if (selectedLoras.has(lora.name)) {
-    selectedLoras.set(lora.name, recommended.weight);
-    applyLoraWeightToPrompt(lora.name, recommended.weight);
-    renderSelectedLoraSummary();
-  }
-  pinnedLoraName = lora.name;
-  renderLoras();
+  return loraLibrary.expandFolderPath(folder, expandedFolders);
 }
 
 async function loadLoras(refresh = false, context = runtimeRequestContext()) {
-  elements.loraStatus.textContent = refresh ? `${activeRuntime?.label ?? "Runtime"}でLoRAを再読込中…` : "LoRAを取得中…";
-  elements.refreshLorasButton.disabled = true;
-  try {
-    const data = refresh
-      ? await postJson(runtimeApiUrl("/api/loras/refresh"), runtimePayload())
-      : await getJson(runtimeApiUrl("/api/loras"));
-    if (!isRuntimeContextCurrent(context)) return false;
-    installedLoras = data.loras ?? [];
-    registerDetectedProfiles();
-    registerCivitaiDefaults();
-    migrateCharacterProfileDefaults();
-    const available = new Set(installedLoras.map((item) => item.name));
-    for (const name of selectedLoras.keys()) {
-      if (!available.has(name)) selectedLoras.delete(name);
-    }
-    const counts = countLoraCategories();
-    elements.loraStatus.textContent = installedLoras.length
-      ? `${installedLoras.length}個を検出・キャラ${counts.character}・画風系${counts.direction}`
-      : "LoRAが見つかりません。追加後に「再読込」を押してください。";
-    renderLoras();
-    renderSelectedLoraSummary();
-    // AI共有CSVはLoRA一覧に追随させる（失敗しても操作は止めない）。
-    scheduleShareCsvSync();
-    return true;
-  } catch (error) {
-    if (!isRuntimeContextCurrent(context)) return false;
-    elements.loraStatus.textContent = `LoRA一覧を取得できません: ${error.message}`;
-    return false;
-  } finally {
-    if (isRuntimeContextCurrent(context)) {
-      elements.refreshLorasButton.disabled = generationBusy || runtimeSwitching;
-    }
-  }
+  return loraLibrary.load(refresh, context);
 }
 
 function renderLoras() {
-  const query = elements.loraSearch.value.trim().toLowerCase();
-  const compatibilityFilter = elements.loraCompatibilityFilter.value;
-  const matches = filterItemsByFolder(installedLoras, selectedLoraFolder)
-    .filter((item) => {
-      const category = getLoraCategory(item);
-      const matchesCategory = activeLoraCategory === "all"
-        || activeLoraCategory === category
-        || (activeLoraCategory === "selected" && selectedLoras.has(item.name));
-      const matchesSearch = `${item.displayName} ${item.name} ${item.alias} ${item.folder ?? ""}`
-        .toLowerCase()
-        .includes(query);
-      const matchesCompatibility = compatibilityFilterAllows(compatibilityFilter, {
-        level: getLoraCompatibility(item).level,
-        hasPreview: hasLoraPreview(item)
-      });
-      return matchesCategory && matchesSearch && matchesCompatibility;
-    })
-    .sort((left, right) => {
-      const leftSelected = selectedLoras.has(left.name) ? 0 : 1;
-      const rightSelected = selectedLoras.has(right.name) ? 0 : 1;
-      return leftSelected - rightSelected
-        || left.displayName.localeCompare(right.displayName, "ja", { numeric: true });
-    });
-
-  updateLoraCategoryButtons();
-  renderLoraFolderTree(elements.loraFolderTree, installedLoras, {
-    selectedFolder: selectedLoraFolder,
-    expandedFolders: expandedLoraFolders,
-    onToggle: toggleLoraFolder,
-    onSelect: selectLoraFolder
-  });
-  elements.loraListBreadcrumb.textContent = `LoRA / ${selectedLoraFolder || "すべて"}`;
-  elements.loraListCount.textContent = `${matches.length}件`;
-  elements.loraList.replaceChildren();
-
-  const groups = new Map();
-  for (const lora of matches) {
-    const label = getLoraFolderLabel(lora);
-    if (!groups.has(label)) groups.set(label, []);
-    groups.get(label).push(lora);
-  }
-
-  for (const [folder, loras] of groups) {
-    const group = document.createElement("details");
-    group.className = "loraFolderGroup";
-    group.open = true;
-
-    const heading = document.createElement("summary");
-    heading.className = "loraFolderHeader";
-    const folderName = document.createElement("strong");
-    folderName.textContent = folder;
-    const count = document.createElement("span");
-    count.textContent = `${loras.length}個`;
-    heading.append(folderName, count);
-
-    const rows = document.createElement("div");
-    rows.className = "loraFolderRows";
-    for (const lora of loras) rows.append(createLoraRow(lora));
-    group.append(heading, rows);
-    elements.loraList.append(group);
-  }
-
-  if (!matches.length && installedLoras.length) {
-    const empty = document.createElement("p");
-    empty.className = "hint";
-    empty.textContent = "一致するLoRAがありません";
-    elements.loraList.append(empty);
-  }
-
-  refreshLoraPreviewPane();
+  return loraLibrary.render();
 }
 
-function createLoraRow(lora) {
-  const profile = resolveProfile(lora);
-  const registry = lora.registry;
-  const compatibility = getLoraCompatibility(lora);
-  const isCharacter = getLoraCategory(lora) === "character";
-  const weight = loraWeights.get(lora.name) ?? registry?.recommendedWeight ?? loraConfig.defaultWeight;
-  const row = document.createElement("div");
-  row.className = "loraRow";
-  row.classList.toggle("selected", selectedLoras.has(lora.name));
-  if (registry?.baseModel && ["caution", "incompatible"].includes(compatibility.level)) {
-    row.classList.add(`compatibility-${compatibility.level}`);
+function publishLoraCatalog() {
+  registerDetectedProfiles();
+  registerCivitaiDefaults();
+  migrateCharacterProfileDefaults();
+  const available = new Set(loraLibrary.getItems().map((item) => item.name));
+  for (const name of selectedLoras.keys()) {
+    if (!available.has(name)) selectedLoras.delete(name);
   }
-
-  const choice = document.createElement("label");
-  choice.className = "loraChoice";
-  const checkbox = document.createElement("input");
-  checkbox.type = "checkbox";
-  checkbox.checked = selectedLoras.has(lora.name);
-  const names = document.createElement("span");
-  names.className = "loraNames";
-  const title = document.createElement("strong");
-  title.textContent = lora.displayName;
-  names.append(title);
-  const location = document.createElement("small");
-  location.className = "loraRelativeLocation";
-  location.textContent = formatLoraRelativeLocation(lora);
-  location.title = location.textContent;
-  names.append(location);
-  // カードはサムネイル・名前・互換性・推奨Weight・追加チェックのみ表示し、
-  // プロフィール名や正式名などの補足はプレビュー欄へ集約する。
-  const badges = document.createElement("div");
-  badges.className = "loraBadges";
-  if (registry?.baseModel && selectedCheckpoint) {
-    const compatibilityBadge = document.createElement("small");
-    compatibilityBadge.className = `loraCompatibility ${compatibility.level}`;
-    compatibilityBadge.textContent = `${compatibility.label}・${registry.baseModel}`;
-    compatibilityBadge.title = compatibility.message;
-    badges.append(compatibilityBadge);
-  }
-  const recommended = getRecommendedWeight(registry);
-  if (recommended) {
-    const recommendedBadge = document.createElement("small");
-    recommendedBadge.className = "loraRecommendedBadge";
-    recommendedBadge.textContent = recommended.badge;
-    recommendedBadge.title = recommended.min != null
-      ? `Civitai推奨Weight範囲 ${recommended.label}`
-      : `Civitai推奨Weight ${recommended.display}`;
-    badges.append(recommendedBadge);
-  }
-  if (badges.childElementCount) names.append(badges);
-  choice.append(checkbox, names);
-
-  const weightWrap = document.createElement("label");
-  weightWrap.className = "loraWeight";
-  const slider = document.createElement("input");
-  slider.type = "range";
-  slider.min = "0.05";
-  // プロンプト内タグ・サーバー側と同じ上限（0.05〜2）に合わせる。
-  slider.max = "2";
-  slider.step = "0.05";
-  slider.value = String(weight);
-  slider.setAttribute("aria-label", `${lora.displayName}の強度`);
-  const output = document.createElement("output");
-  output.textContent = Number(weight).toFixed(2);
-  weightWrap.append(slider, output);
-
-  const triggerInput = document.createElement("input");
-  triggerInput.type = "text";
-  triggerInput.className = "loraTrigger";
-  triggerInput.placeholder = "Trigger Words（例: modern_anime_render）";
-  triggerInput.value = loraTriggers.get(lora.name) ?? "";
-  triggerInput.setAttribute("aria-label", `${lora.displayName}のTrigger Words`);
-
-  const negativeInput = document.createElement("input");
-  negativeInput.type = "text";
-  negativeInput.className = "loraNegative";
-  negativeInput.placeholder = isCharacter
-    ? "標準衣装の抑制タグ（Negativeへ自動追加）"
-    : "このLoRA使用時にNegativeへ追加するタグ";
-  negativeInput.value = loraNegativeWords.get(lora.name) ?? "";
-  negativeInput.setAttribute("aria-label", `${lora.displayName}のNegative追加タグ`);
-
-  const advanced = document.createElement("details");
-  advanced.className = "loraAdvanced";
-  const advancedSummary = document.createElement("summary");
-  advancedSummary.textContent = isCharacter || profile
-    ? "キャラ・衣装・Trigger設定"
-    : "Trigger・Negative設定";
-  const advancedBody = document.createElement("div");
-  advancedBody.className = "loraAdvancedBody";
-
-  const profileControls = document.createElement("div");
-  profileControls.className = "loraProfileControls";
-  const profileSelect = document.createElement("select");
-  profileSelect.className = "loraProfileSelect";
-  profileSelect.setAttribute("aria-label", `${lora.displayName}のプロフィール`);
-  profileSelect.append(new Option("プロフィール未設定", ""));
-  for (const item of LORA_PROFILES) profileSelect.append(new Option(item.name, item.id));
-  if (profile && !getProfile(profile.id)) {
-    profileSelect.append(new Option(profile.name, profile.id));
-  }
-  profileSelect.value = profile?.id ?? "";
-
-  const presetSelect = document.createElement("select");
-  presetSelect.className = "loraPresetSelect";
-  presetSelect.setAttribute("aria-label", `${lora.displayName}の衣装プリセット`);
-  fillPresetSelect(presetSelect, profile, loraPresetSelections.get(lora.name));
-
-  const addonSelect = document.createElement("select");
-  addonSelect.className = "loraAddonSelect";
-  addonSelect.setAttribute("aria-label", `${lora.displayName}の追加衣装`);
-  fillAddonSelect(addonSelect, profile, loraAddonSelections.get(lora.name));
-
-  const sourceLink = document.createElement("a");
-  sourceLink.className = "loraSourceLink";
-  sourceLink.textContent = "配布元";
-  sourceLink.target = "_blank";
-  sourceLink.rel = "noreferrer";
-  sourceLink.href = profile?.sourceUrl ?? registry?.sourceUrl ?? "#";
-  sourceLink.classList.toggle("hidden", !profile && !registry);
-  if (profile) sourceLink.title = `${profile.baseModel}・${profile.note}`;
-  else if (registry) sourceLink.title = `${registry.baseModel}・Civitaiから登録`;
-  profileControls.append(profileSelect, presetSelect, addonSelect, sourceLink);
-
-  if (isCharacter || profile) {
-    advancedBody.append(profileControls);
-  } else if (registry) {
-    profileControls.classList.add("sourceOnly");
-    profileSelect.classList.add("hidden");
-    presetSelect.classList.add("hidden");
-    advancedBody.append(profileControls);
-  }
-  advancedBody.append(triggerInput, negativeInput);
-  advanced.append(advancedSummary, advancedBody);
-
-  checkbox.addEventListener("change", () => {
-    if (checkbox.checked && selectedLoras.size >= loraConfig.maxSelected) {
-      checkbox.checked = false;
-      showError(`LoRAは最大${loraConfig.maxSelected}個までです`);
-      return;
-    }
-    setLoraSelected(lora.name, checkbox.checked, Number(slider.value));
-    clearError();
-    renderSelectedLoraSummary();
-    if (activeLoraCategory === "selected" && !checkbox.checked) {
-      renderLoras();
-    } else {
-      updateLoraCategoryButtons();
-      // 詳細欄がこのLoRAを表示中なら、選択/解除ボタンを現在の状態へ同期する。
-      if (displayedLoraName === lora.name) {
-        renderLoraPreview(lora, { pinned: pinnedLoraName === lora.name });
-      }
-    }
-  });
-
-  slider.addEventListener("input", () => {
-    const nextWeight = Number(slider.value);
-    output.textContent = nextWeight.toFixed(2);
-    loraWeights.set(lora.name, nextWeight);
-    saveLoraWeights();
-    if (selectedLoras.has(lora.name)) {
-      selectedLoras.set(lora.name, nextWeight);
-      // プロンプトに同じLoRAタグがあれば、そのWeightだけを書き換える。
-      applyLoraWeightToPrompt(lora.name, nextWeight);
-      renderSelectedLoraSummary();
-    }
-  });
-
-  triggerInput.addEventListener("input", () => {
-    const triggerWords = triggerInput.value.trim();
-    if (triggerWords) loraTriggers.set(lora.name, triggerWords);
-    else loraTriggers.delete(lora.name);
-    saveLoraTriggers();
-    scheduleShareCsvSync();
-    if (selectedLoras.has(lora.name)) renderSelectedLoraSummary();
-  });
-
-  negativeInput.addEventListener("input", () => {
-    const negativeWords = negativeInput.value.trim();
-    if (negativeWords) loraNegativeWords.set(lora.name, negativeWords);
-    else loraNegativeWords.delete(lora.name);
-    saveLoraNegativeWords();
-    if (selectedLoras.has(lora.name)) renderSelectedLoraSummary();
-  });
-
-  profileSelect.addEventListener("change", () => {
-    const nextProfile = getProfile(profileSelect.value)
-      ?? (profileSelect.value === profile?.id ? profile : null);
-    if (!nextProfile) {
-      loraProfileAssignments.delete(lora.name);
-      loraPresetSelections.delete(lora.name);
-      loraAddonSelections.delete(lora.name);
-      saveProfileSettings();
-      renderLoras();
-      return;
-    }
-    const preset = getPreset(nextProfile, nextProfile.defaultPreset);
-    const addon = getAddon(nextProfile, nextProfile.defaultAddon);
-    loraProfileAssignments.set(lora.name, nextProfile.id);
-    loraPresetSelections.set(lora.name, preset.id);
-    if (addon) loraAddonSelections.set(lora.name, addon.id);
-    else loraAddonSelections.delete(lora.name);
-    applyProfileSelection(lora.name, nextProfile, preset, addon);
-    renderLoras();
-    renderSelectedLoraSummary();
-  });
-
-  presetSelect.addEventListener("change", () => {
-    const currentProfile = getProfile(profileSelect.value)
-      ?? (profileSelect.value === profile?.id ? profile : null);
-    const preset = getPreset(currentProfile, presetSelect.value);
-    if (!currentProfile || !preset) return;
-    const addon = getAddon(currentProfile, addonSelect.value);
-    loraPresetSelections.set(lora.name, preset.id);
-    applyProfileSelection(lora.name, currentProfile, preset, addon);
-    triggerInput.value = combineTriggerWords(preset.triggerWords, addon?.triggerWords);
-    negativeInput.value = addon?.clearNegativeWords ? "" : preset.negativeWords ?? "";
-    const presetWeight = getPresetWeight(currentProfile, preset);
-    slider.value = String(presetWeight);
-    output.textContent = Number(presetWeight).toFixed(2);
-    renderSelectedLoraSummary();
-  });
-
-  addonSelect.addEventListener("change", () => {
-    const currentProfile = getProfile(profileSelect.value)
-      ?? (profileSelect.value === profile?.id ? profile : null);
-    const preset = getPreset(currentProfile, presetSelect.value);
-    const addon = getAddon(currentProfile, addonSelect.value);
-    if (!currentProfile || !preset || !addon) return;
-    loraAddonSelections.set(lora.name, addon.id);
-    applyProfileSelection(lora.name, currentProfile, preset, addon);
-    triggerInput.value = combineTriggerWords(preset.triggerWords, addon.triggerWords);
-    negativeInput.value = addon.clearNegativeWords ? "" : preset.negativeWords ?? "";
-    renderSelectedLoraSummary();
-  });
-
-  const thumb = createLoraThumb(lora);
-  const main = document.createElement("div");
-  main.className = "loraMain";
-  const detailButton = document.createElement("button");
-  detailButton.type = "button";
-  detailButton.className = "ghost smallButton loraDetailButton";
-  detailButton.textContent = "詳細";
-  detailButton.setAttribute("aria-label", `${lora.displayName}の詳細を表示`);
-  detailButton.addEventListener("click", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    if (shouldUseLoraDetailModal()) openLoraDetailModal(lora);
-    else pinLoraPreview(lora);
-  });
-  main.append(thumb, choice, detailButton);
-
-  row.append(main, weightWrap, advanced);
-  // カードへのホバー・フォーカスで一時プレビュー、外れたら固定中へ戻す。
-  // 選択（有効化）はチェックボックスと詳細欄のボタンだけが行う。
-  row.addEventListener("mouseenter", () => showTransientLoraPreview(lora));
-  row.addEventListener("mouseleave", restorePinnedLoraPreview);
-  row.addEventListener("focusin", () => showTransientLoraPreview(lora));
-  // 行の外へフォーカスが移った時だけ固定中プレビューへ戻す。
-  row.addEventListener("focusout", (event) => {
-    if (!row.contains(event.relatedTarget)) restorePinnedLoraPreview();
-  });
-  return row;
+  renderSelectedLoraSummary();
+  scheduleShareCsvSync();
 }
-
-function createLoraThumb(lora) {
-  const thumb = document.createElement("button");
-  thumb.type = "button";
-  thumb.className = "loraThumb";
-  thumb.setAttribute("aria-label", `${lora.displayName}のプレビューを固定`);
-  const url = resolveLoraPreviewUrl(lora);
-  if (url) {
-    const img = document.createElement("img");
-    img.loading = "lazy";
-    img.decoding = "async";
-    img.alt = "";
-    img.src = url;
-    // 読み込み失敗時は壊れた画像アイコンを残さずプレースホルダーへ差し替える。
-    img.addEventListener("error", () => {
-      img.remove();
-      thumb.classList.add("noPreview");
-      thumb.append(createThumbPlaceholder(lora));
-    });
-    thumb.append(img);
-  } else {
-    thumb.classList.add("noPreview");
-    thumb.append(createThumbPlaceholder(lora));
-  }
-  thumb.addEventListener("click", () => pinLoraPreview(lora));
-  return thumb;
-}
-
-function createThumbPlaceholder(lora) {
-  const placeholder = document.createElement("span");
-  placeholder.className = "loraThumbPlaceholder";
-  placeholder.setAttribute("aria-hidden", "true");
-  placeholder.textContent = (lora?.displayName ?? "?").trim().charAt(0) || "?";
-  return placeholder;
-}
-
-function getLoraCategory(lora) {
-  const profile = resolveProfile(lora);
-  if (profile) return profile.category === "direction" ? "direction" : "character";
-  if (lora.registry?.category) return lora.registry.category;
-  return lora.category === "character" ? "character" : "direction";
-}
-
-function getLoraFolderLabel(lora) {
-  return loraFolderKey(lora);
-}
-
-function countLoraCategories() {
-  return installedLoras.reduce((counts, lora) => {
-    counts[getLoraCategory(lora)] += 1;
-    return counts;
-  }, { character: 0, direction: 0 });
-}
-
-function updateLoraCategoryButtons() {
-  const counts = countLoraCategories();
-  const countByCategory = {
-    character: counts.character,
-    direction: counts.direction,
-    selected: selectedLoras.size,
-    all: installedLoras.length
-  };
-  for (const button of elements.loraCategories.querySelectorAll("[data-lora-category]")) {
-    const category = button.dataset.loraCategory;
-    const active = category === activeLoraCategory;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", String(active));
-    const count = button.querySelector("span");
-    if (count) count.textContent = String(countByCategory[category] ?? 0);
-  }
-}
-
 function registerDetectedProfiles() {
   let changed = false;
-  for (const lora of installedLoras) {
+  for (const lora of loraLibrary.getItems()) {
     let profile = getProfile(loraProfileAssignments.get(lora.name));
     if (!profile) {
       profile = findProfileForLora(lora) ?? createRegistryProfile(lora);
@@ -3403,7 +2137,7 @@ function registerDetectedProfiles() {
 
 function registerCivitaiDefaults() {
   let changed = false;
-  for (const lora of installedLoras) {
+  for (const lora of loraLibrary.getItems()) {
     const registry = lora.registry;
     if (!registry) continue;
     // 未設定LoRAだけCivitai推奨Weightを初期適用（ユーザー保存済み・再解析では上書きしない）。
@@ -3426,7 +2160,7 @@ function migrateCharacterProfileDefaults() {
   const currentVersion = Number(localStorage.getItem("localImageChat.loraProfileVersion") ?? 0);
   if (currentVersion >= PROFILE_STORAGE_VERSION) return;
 
-  for (const lora of installedLoras) {
+  for (const lora of loraLibrary.getItems()) {
     const profile = resolveProfile(lora);
     if (!profile?.legacyDefaultPreset) continue;
     const selectedPresetId = loraPresetSelections.get(lora.name);
@@ -3455,42 +2189,6 @@ function resolveProfile(lora) {
   return getProfile(loraProfileAssignments.get(lora.name))
     ?? findProfileForLora(lora)
     ?? registryProfile;
-}
-
-function fillPresetSelect(select, profile, selectedPresetId) {
-  select.replaceChildren();
-  if (!profile) {
-    select.append(new Option("衣装プリセットなし", ""));
-    select.disabled = true;
-    return;
-  }
-  select.disabled = false;
-  const identityGroup = document.createElement("optgroup");
-  identityGroup.label = "キャラのみ";
-  const outfitGroup = document.createElement("optgroup");
-  outfitGroup.label = profile.category === "direction" ? "キャラクター" : "衣装プリセット";
-  for (const preset of profile.presets) {
-    const option = new Option(preset.name, preset.id);
-    if (preset.id === "identity") identityGroup.append(option);
-    else outfitGroup.append(option);
-  }
-  if (identityGroup.children.length) select.append(identityGroup);
-  if (outfitGroup.children.length) select.append(outfitGroup);
-  select.value = getPreset(profile, selectedPresetId)?.id ?? profile.defaultPreset;
-}
-
-function fillAddonSelect(select, profile, selectedAddonId) {
-  select.replaceChildren();
-  if (!profile?.addons?.length) {
-    select.append(new Option("追加衣装なし", ""));
-    select.disabled = true;
-    select.classList.add("hidden");
-    return;
-  }
-  select.disabled = false;
-  select.classList.remove("hidden");
-  for (const addon of profile.addons) select.append(new Option(addon.name, addon.id));
-  select.value = getAddon(profile, selectedAddonId)?.id ?? profile.defaultAddon ?? profile.addons[0].id;
 }
 
 function getAddon(profile, addonId) {
@@ -3548,7 +2246,7 @@ function renderSelectedLoraSummary() {
     return `${name} ${Number(weight).toFixed(2)}${triggerWords ? `・${triggerWords}` : ""}${suppressesOutfit ? "・標準衣装を抑制" : ""}`;
   });
   const compatibilityWarnings = [...selectedLoras.keys()]
-    .map((name) => installedLoras.find((lora) => lora.name === name))
+    .map((name) => loraLibrary.findByName(name))
     .filter(Boolean)
     .map((lora) => ({ lora, compatibility: getLoraCompatibility(lora) }))
     .filter(({ lora, compatibility }) =>
@@ -3564,13 +2262,17 @@ function renderSelectedLoraSummary() {
 }
 
 async function checkHealth() {
-  const runtimeLabel = activeRuntime?.label ?? "Runtime";
+  const healthRequest = runtimeController.beginHealthRequest();
+  const initialRuntime = runtimeController.getState().activeRuntime;
+  const runtimeLabel = initialRuntime?.label ?? "Runtime";
   elements.health.innerHTML = `<span class="status waiting">Ollama 確認中</span><span class="status waiting">${escapeHtml(runtimeLabel)} 確認中</span>`;
   syncSettingsConnectionSummary();
   try {
     const response = await fetch("/api/health");
     const data = await response.json();
-    await applyRuntimeHealth(data.runtimes);
+    await runtimeController.applyHealth(data.runtimes, healthRequest);
+    if (!runtimeController.isHealthRequestCurrent(healthRequest)) return false;
+    const { activeRuntime, activeRuntimeId } = runtimeController.getState();
     const ollamaText = data.ollama.ok
       ? `Ollama 接続OK${data.ollama.installed ? "" : "・モデル未検出"}`
       : "Ollama 接続失敗";
@@ -3580,15 +2282,7 @@ async function checkHealth() {
       const healthCheckpoint = typeof runtimeHealth.checkpoint === "string"
         ? runtimeHealth.checkpoint.trim()
         : "";
-      activeCheckpoint = healthCheckpoint
-        ? findCheckpoint(healthCheckpoint) ?? {
-            title: healthCheckpoint,
-            modelName: healthCheckpoint,
-            filename: ""
-          }
-        : null;
-      renderCheckpointControls();
-      renderCheckpointStatus();
+      runtimeController.updateActiveCheckpoint(healthCheckpoint, healthRequest);
     }
     const runtimeText = runtimeHealth?.ok
       ? `${activeRuntime?.label ?? activeRuntimeId} 接続OK${runtimeHealth.checkpoint ? `・${shorten(runtimeHealth.checkpoint, 28)}` : ""}`
@@ -3597,10 +2291,13 @@ async function checkHealth() {
       status(ollamaText, data.ollama.ok && data.ollama.installed, data.ollama.error),
       status(runtimeText, runtimeHealth?.ok === true, runtimeHealth?.error)
     ].join("");
+    return true;
   } catch (error) {
+    if (!runtimeController.isHealthRequestCurrent(healthRequest)) return false;
     elements.health.innerHTML = status("接続確認に失敗", false, error.message);
+    return false;
   } finally {
-    syncSettingsConnectionSummary();
+    if (runtimeController.isHealthRequestCurrent(healthRequest)) syncSettingsConnectionSummary();
   }
 }
 
@@ -3778,6 +2475,7 @@ function hasIpAdapterReference() {
 function syncIpAdapterUi() {
   const hasReference = hasIpAdapterReference();
   const available = ipAdapterOptions.available === true;
+  const runtimeSwitching = runtimeController.getState().switching;
   const disabled = generationBusy || runtimeSwitching || !available;
   elements.ipAdapterModel.textContent = available
     ? shorten(ipAdapterOptions.model || ipAdapterOptions.module || "利用可能", 28)
@@ -3899,6 +2597,7 @@ async function buildPrompt() {
 }
 
 async function generateCandidates() {
+  const { activeRuntime } = runtimeController.getState();
   clearError();
   const description = promptDescription;
   // 説明文は任意。Promptが空のときだけ、日本語からの自動作成のために必須になる。
@@ -4057,6 +2756,7 @@ function carryStructuredPrompt(source) {
 
 // 高解像度仕上げの結果を「生成結果」タブへ表示する共通処理。
 function presentHiresResult(data, description, eyebrow, title) {
+  const { activeRuntime } = runtimeController.getState();
   const finished = data.images[0];
   const generation = {
     runtime: data.runtime ?? activeRuntime,
@@ -4367,9 +3067,9 @@ function scheduleLoraSync() {
 // プロンプト → UI。プロンプトに書かれたWeightを正としてUI側を合わせる。
 function syncLorasFromPrompt() {
   clearTimeout(loraSyncTimer);
-  if (!installedLoras.length) return;
+  if (!loraLibrary.getItems().length) return;
   const text = positivePromptSources().map((source) => source.value).join("\n");
-  const result = reconcilePromptLoras(parseLoraTags(text), currentSelectionState(), installedLoras);
+  const result = reconcilePromptLoras(parseLoraTags(text), currentSelectionState(), loraLibrary.getItems());
   loraSyncNotices = buildLoraNotices(result);
   renderLoraSyncNotice(describeLoraNotices(result));
   if (!result.changed) return;
@@ -5172,6 +3872,7 @@ function unlockComposition() {
 }
 
 async function ensureRuntimeForRecipe(recipe) {
+  const { runtimeOptions, activeRuntimeId } = runtimeController.getState();
   const targetId = safeRuntimeId(recipe?.runtime?.id) || "reforge";
   const target = runtimeOptions.find((item) => item.id === targetId && isRuntimeSelectable(item));
   if (!target) {
@@ -5179,7 +3880,7 @@ async function ensureRuntimeForRecipe(recipe) {
     return false;
   }
   if (target.id === activeRuntimeId) {
-    return runtimeSwitching ? runtimeSwitchPromise : true;
+    return runtimeController.waitForSwitch();
   }
   elements.runtimeSelect.value = target.id;
   return handleRuntimeChange(target.id);
@@ -5190,11 +3891,6 @@ async function loadRecipeFields(recipe, image) {
   promptDescription = recipe.description ?? "";
   elements.generationTitle.value = normalizeManualTitle(recipe.title);
   setContentRating(recipe.contentRating === "nsfw" ? "nsfw" : "general");
-  if (recipe?.runtime?.id && recipe.runtime.id !== activeRuntimeId
-    && runtimeOptions.some((item) => item.id === recipe.runtime.id && isRuntimeSelectable(item))) {
-    elements.runtimeSelect.value = recipe.runtime.id;
-    void handleRuntimeChange();
-  }
   restorePromptFieldsFromRecipe(recipe);
   restoreIpAdapterFromRecipe(recipe);
   const settings = recipe.settings ?? {};
@@ -5221,7 +3917,7 @@ async function loadRecipeFields(recipe, image) {
   loraSelectionSources.clear();
   disabledLoras.clear();
   for (const lora of recipe.loras ?? []) {
-    if (!installedLoras.some((item) => item.name === lora.name)) continue;
+    if (!loraLibrary.getItems().some((item) => item.name === lora.name)) continue;
     // 履歴のWeightは実際に生成へ使った実効値。選択元もそのまま復元する。
     selectedLoras.set(lora.name, Number(lora.weight));
     loraSelectionSources.set(lora.name, ["ui", "prompt", "both"].includes(lora.source) ? lora.source : "ui");
@@ -5706,6 +4402,7 @@ async function openPresetPicker({
         const meta = document.createElement("p");
         meta.className = "pickerMeta";
         const sourceLora = folderBrowser ? findLoraByName(item.loraName) : null;
+        const { selectedCheckpoint } = runtimeController.getState();
         const compatibilityLabel = sourceLora?.registry?.baseModel && selectedCheckpoint
           ? `${getLoraCompatibility(sourceLora).label}・${sourceLora.registry.baseModel}`
           : "";
@@ -5823,56 +4520,11 @@ async function openPresetPicker({
 
 // LoRAマスタのFavorite。未登録LoRAは登録してから更新する（画像のFavoriteとは別管理）。
 async function toggleLoraFavorite(loraName, favorite) {
-  const lora = findLoraByName(loraName);
-  if (!lora) return null;
-  try {
-    let uid = lora.registry?.uid;
-    if (!uid) {
-      const { entry } = await postJson("/api/loras/registry/ensure", {
-        relativeName: String(loraName).replaceAll("\\", "/"),
-        displayName: lora.displayName ?? ""
-      });
-      uid = entry.uid;
-    }
-    const result = await patchJson(`/api/loras/${uid}`, { favorite });
-    if (Array.isArray(result.loras) && result.loras.length) installedLoras = result.loras;
-    else if (lora.registry) lora.registry.favorite = favorite;
-    renderLoras();
-    return favorite;
-  } catch (error) {
-    toast.error(`Favoriteを保存できませんでした: ${error.message}`);
-    return null;
-  }
+  return loraLibrary.toggleFavorite(loraName, favorite);
 }
 
 function loraThumbnail(lora) {
   return resolveLoraPreviewUrl(lora);
-}
-
-// LoRA選択（フォルダ・分類・検索・Favorite絞り込み・サムネイル付き）
-async function openLoraPicker() {
-  if (runtimeSwitching) {
-    toast.info("Runtimeの一覧を更新中です。完了してからLoRAを選択してください");
-    return;
-  }
-  const items = buildLoraCatalog(installedLoras, { resolveThumbnail: loraThumbnail });
-  await openPresetPicker({
-    title: "LoRAを追加",
-    subtitle: `最大${loraConfig.maxSelected}個まで。★はLoRAのお気に入り（画像のFavoriteとは別です）`,
-    items,
-    groupKey: "folder",
-    folderBrowser: true,
-    isApplied: (item) => selectedLoras.has(item.loraName),
-    onApply: (item) => {
-      if (selectedLoras.has(item.loraName)) {
-        setLoraSelected(item.loraName, false);
-      } else if (!addLoraToForm(item.loraName)) {
-        return;
-      }
-      renderSelectedLoraSummary();
-      renderLoras();
-    }
-  });
 }
 
 // 生成フォームへLoRAを1件足す（LoRAマスタは書き換えない）。
@@ -5892,11 +4544,12 @@ function addLoraToForm(loraName) {
 
 // キャラクター選択。キャラ欄へタグを反映し、関連LoRAがあれば生成フォームへ追加する。
 async function openCharacterPicker() {
+  const { switching: runtimeSwitching } = runtimeController.getState();
   if (runtimeSwitching) {
     toast.info("Runtimeの一覧を更新中です。完了してからLoRAを選択してください");
     return;
   }
-  const items = buildCharacterPresets(installedLoras, {
+  const items = buildCharacterPresets(loraLibrary.getItems(), {
     resolveProfile,
     resolveThumbnail: loraThumbnail
   });
@@ -5918,11 +4571,12 @@ async function openCharacterPicker() {
 
 // 衣装選択。容姿・衣装欄へ反映する（キャラクター欄は触らない）。
 async function openOutfitPicker() {
+  const { switching: runtimeSwitching } = runtimeController.getState();
   if (runtimeSwitching) {
     toast.info("Runtimeの一覧を更新中です。完了してからLoRAを選択してください");
     return;
   }
-  const items = buildOutfitPresets(installedLoras, {
+  const items = buildOutfitPresets(loraLibrary.getItems(), {
     resolveProfile,
     resolveThumbnail: loraThumbnail
   });
@@ -6158,7 +4812,7 @@ async function changeLoraOnly(generation, image) {
       list.className = "loraSwapList";
       const rows = () => {
         list.replaceChildren();
-        for (const lora of installedLoras) {
+        for (const lora of loraLibrary.getItems()) {
           const row = document.createElement("label");
           row.className = "loraSwapRow";
           const checkbox = document.createElement("input");
@@ -6343,425 +4997,13 @@ function savePromptPartSelections() {
   }));
 }
 
-async function inspectCivitai() {
-  const url = elements.civitaiUrl.value.trim();
-  if (!url) return showError("CivitaiのモデルページURLを入力してください");
-  clearError();
-  rememberSessionSecrets();
-  elements.inspectCivitaiButton.disabled = true;
-  elements.installCivitaiButton.disabled = true;
-  elements.civitaiStatus.textContent = "Civitaiからモデル情報を取得中…";
-  try {
-    const data = await postJson("/api/civitai/inspect", {
-      url,
-      token: elements.civitaiToken.value
-    });
-    inspectedCivitai = data.metadata;
-    renderCivitaiPreview(data.metadata);
-    elements.installCivitaiButton.disabled = false;
-    elements.civitaiStatus.textContent = "内容を確認しました。分類を選んで登録できます。";
-  } catch (error) {
-    inspectedCivitai = null;
-    elements.civitaiPreview.classList.add("hidden");
-    elements.civitaiStatus.textContent = error.message;
-  } finally {
-    elements.inspectCivitaiButton.disabled = false;
-  }
-}
-
-function renderCivitaiPreview(metadata) {
-  elements.civitaiPreview.replaceChildren();
-  if (metadata.previewUrl) {
-    const image = document.createElement("img");
-    image.src = metadata.previewUrl;
-    image.alt = metadata.modelName;
-    elements.civitaiPreview.append(image);
-  }
-  const text = document.createElement("div");
-  const heading = document.createElement("strong");
-  heading.textContent = `${metadata.modelName} / ${metadata.versionName}`;
-  const base = document.createElement("span");
-  base.textContent = `${metadata.modelType}・${metadata.baseModel}・${formatFileSize(metadata.file.sizeKB)}`;
-  const triggers = document.createElement("span");
-  triggers.textContent = metadata.trainedWords.length
-    ? `Trigger: ${metadata.trainedWords.join(", ")}`
-    : "Trigger Wordsの登録なし";
-  const outfits = document.createElement("span");
-  outfits.textContent = metadata.outfitPresets?.length > 1
-    ? `衣装プリセット候補: ${metadata.outfitPresets.length}種類`
-    : "衣装プリセット候補: 1種類";
-  const filename = document.createElement("span");
-  filename.textContent = metadata.file.name;
-  const location = document.createElement("span");
-  location.className = "civitaiPreviewLocation";
-  const categoryLabel = elements.civitaiCategory.selectedOptions[0]?.textContent ?? elements.civitaiCategory.value;
-  const folder = selectedCivitaiFolder();
-  location.textContent = `分類: ${categoryLabel} ／ 保存先: ${folder || "保存先を選択してください"}`;
-  text.append(heading, base, triggers, outfits, filename, location);
-  elements.civitaiPreview.append(text);
-  elements.civitaiPreview.classList.remove("hidden");
-}
-
-// 現在認識しているLoRAルートを取得して表示する。推定値と明示設定を区別する。
-async function loadLoraRoot() {
-  try {
-    loraRootInfo = await getJson("/api/lora/install-root");
-  } catch (error) {
-    loraRootInfo = { root: "", source: "", label: "取得失敗", warning: error.message };
-  }
-  renderLoraRoot();
-}
-
-function renderLoraRoot() {
-  const { root, source, label, warning } = loraRootInfo;
-  elements.loraRootPath.textContent = root || "特定できていません";
-  elements.loraRootPath.title = warning || root || "";
-  elements.loraRootBadge.textContent = label || "未特定";
-  elements.loraRootBadge.className = `loraRootBadge ${
-    source === "config" ? "configured" : source ? "detected" : "missing"
-  }`;
-  elements.openLoraRootButton.disabled = !root;
-}
-
-async function openLoraRootFolder() {
-  await withBusy(elements.openLoraRootButton, "開いています…", async () => {
-    try {
-      const data = await postJson("/api/lora/open-root", {});
-      toast.success(`LoRAフォルダを開きました: ${data.root}`);
-    } catch (error) {
-      toast.error(error.message);
-    }
-  });
-}
-
 async function loadCivitaiFolders() {
-  try {
-    const data = await getJson("/api/civitai/install-folders");
-    civitaiFolders = Array.isArray(data.folders) ? data.folders : [];
-    if (data.defaults && typeof data.defaults === "object") civitaiFolderDefaults = data.defaults;
-    civitaiRecommendedFolders = data.recommended && typeof data.recommended === "object" ? data.recommended : {};
-  } catch {
-    civitaiFolders = [];
-    civitaiRecommendedFolders = {};
-  }
-  applyCategoryFolder(elements.civitaiCategory.value);
+  return civitaiController.loadFolders();
 }
 
-// 保存先selectを「前回使用 / お気に入り / 推奨 / 既存フォルダ / 新規作成」の順で構成する。
-// 実在しない推奨フォルダは既存フォルダ一覧へ混ぜず、「（新規作成）」と明示する。
-function populateCivitaiFolderSelect(category, preferred) {
-  const select = elements.civitaiFolder;
-  select.replaceChildren();
-  const groups = buildFolderGroups({
-    folders: civitaiFolders,
-    recommended: civitaiRecommendedFolders,
-    recent: civitaiRecentFolders[category] ?? [],
-    favorites: civitaiFavoriteFolders,
-    category
-  });
-  for (const group of groups) {
-    const optgroup = document.createElement("optgroup");
-    optgroup.label = group.label;
-    for (const option of group.options) optgroup.append(new Option(option.label, option.value));
-    select.append(optgroup);
-  }
-  const values = [...select.options].map((option) => option.value);
-  const fallback = pickInitialFolder({
-    folders: civitaiFolders,
-    recommended: civitaiRecommendedFolders,
-    recent: civitaiRecentFolders[category] ?? [],
-    favorites: civitaiFavoriteFolders,
-    category
-  });
-  select.value = preferred && values.includes(preferred)
-    ? preferred
-    : (values.includes(fallback) ? fallback : CIVITAI_NEW_FOLDER);
+async function loadLoraRoot() {
+  return loraLibrary.loadRoot();
 }
-
-function saveCivitaiFolderMemory() {
-  localStorage.setItem("localImageChat.civitaiRecentFolders", JSON.stringify(civitaiRecentFolders));
-  localStorage.setItem("localImageChat.civitaiFavoriteFolders", JSON.stringify(civitaiFavoriteFolders));
-}
-
-function rememberCivitaiFolder(category, folder) {
-  const normalized = normalizeFolder(folder);
-  if (!normalized || normalized === CIVITAI_NEW_FOLDER) return;
-  civitaiRecentFolders = rememberRecentFolder(civitaiRecentFolders, category, normalized);
-  saveCivitaiFolderMemory();
-}
-
-function applyCategoryFolder(category) {
-  const recent = civitaiRecentFolders[category] ?? [];
-  populateCivitaiFolderSelect(category, recent[0]);
-  refreshCivitaiFolderHint();
-}
-
-function onCivitaiFolderChange() {
-  const value = elements.civitaiFolder.value;
-  if (value === CIVITAI_NEW_FOLDER) {
-    if (!elements.civitaiNewFolder.value.trim()) {
-      const recommended = civitaiRecommendedFolders[elements.civitaiCategory.value]?.folder ?? "";
-      elements.civitaiNewFolder.value = recommended;
-    }
-  } else {
-    rememberCivitaiFolder(elements.civitaiCategory.value, value);
-  }
-  refreshCivitaiFolderHint();
-}
-
-function toggleCivitaiFolderFavorite() {
-  const folder = selectedCivitaiFolder();
-  if (!folder) return toast.warning("お気に入りにする保存先を選んでください");
-  const wasFavorite = isFavoriteFolder(civitaiFavoriteFolders, folder);
-  civitaiFavoriteFolders = toggleFavoriteFolder(civitaiFavoriteFolders, folder);
-  saveCivitaiFolderMemory();
-  populateCivitaiFolderSelect(elements.civitaiCategory.value, folder);
-  refreshCivitaiFolderHint();
-  toast.info(wasFavorite ? `${folder} をお気に入りから外しました` : `${folder} をお気に入りに登録しました`);
-}
-
-function selectedCivitaiFolder() {
-  return elements.civitaiFolder.value === CIVITAI_NEW_FOLDER
-    ? normalizeFolder(elements.civitaiNewFolder.value)
-    : elements.civitaiFolder.value;
-}
-
-function refreshCivitaiFolderHint() {
-  const isNew = elements.civitaiFolder.value === CIVITAI_NEW_FOLDER;
-  elements.civitaiNewFolderRow.classList.toggle("hidden", !isNew);
-  const folder = selectedCivitaiFolder();
-  const favorite = isFavoriteFolder(civitaiFavoriteFolders, folder);
-  elements.civitaiFolderFavorite.textContent = favorite ? "★" : "☆";
-  elements.civitaiFolderFavorite.title = favorite ? "お気に入りから外す" : "この保存先をお気に入りに登録";
-  elements.civitaiFolderFavorite.setAttribute("aria-pressed", String(favorite));
-  const exists = civitaiFolders.some((item) => item.toLowerCase() === folder.toLowerCase());
-  elements.civitaiFolderPath.textContent = folder
-    ? `保存先: ${loraRootInfo.root ? `${loraRootInfo.root} / ` : ""}${folder}${exists ? "" : "（新規作成されます）"}`
-    : "保存先を選択してください";
-  if (inspectedCivitai) renderCivitaiPreview(inspectedCivitai);
-}
-
-async function installCivitai() {
-  if (!inspectedCivitai) return inspectCivitai();
-  const folder = selectedCivitaiFolder();
-  if (!folder) {
-    elements.civitaiStatus.textContent = "保存先を選択してください";
-    toast.warning("保存先を選択してください");
-    return;
-  }
-  const category = elements.civitaiCategory.value;
-  clearError();
-  rememberSessionSecrets();
-  elements.inspectCivitaiButton.disabled = true;
-  elements.installCivitaiButton.disabled = true;
-  try {
-    elements.civitaiStatus.textContent = "既に導入済みかを確認中…";
-    const duplicate = await postJson("/api/civitai/check-duplicate", {
-      url: elements.civitaiUrl.value.trim(),
-      token: elements.civitaiToken.value,
-      category,
-      folder
-    });
-
-    let choice = { mode: "auto", filename: "", confirmMove: false };
-    if (duplicate.duplicate) {
-      choice = await openDuplicateDialog(duplicate, folder);
-      if (!choice) {
-        elements.civitaiStatus.textContent = "インストールを中止しました。";
-        return;
-      }
-    }
-
-    elements.civitaiStatus.textContent = choice.mode === "auto" || choice.mode === "rename"
-      ? "LoRAをダウンロード中です。大きいファイルは数分かかります…"
-      : "既存ファイルの情報を更新中…";
-    const result = await postJson("/api/civitai/install", {
-      url: elements.civitaiUrl.value.trim(),
-      token: elements.civitaiToken.value,
-      category,
-      folder,
-      mode: choice.mode,
-      filename: choice.filename,
-      confirmMove: choice.confirmMove,
-      ...runtimePayload()
-    });
-    rememberCivitaiFolder(category, result.folder ?? folder);
-    const message = describeInstallResult(result, folder);
-    elements.civitaiStatus.textContent = message;
-    toast.success(message);
-    await loadCivitaiFolders();
-    await loadLoras();
-  } catch (error) {
-    elements.civitaiStatus.textContent = error.message;
-    toast.error(error.message);
-  } finally {
-    elements.inspectCivitaiButton.disabled = false;
-    elements.installCivitaiButton.disabled = false;
-  }
-}
-
-function describeInstallResult(result, folder) {
-  const name = result.entry?.modelName ?? inspectedCivitai?.modelName ?? "LoRA";
-  if (result.mode === "move") {
-    return `${name}を「${result.folder}」へ移動しました（${result.movedFiles.length}ファイル）。`;
-  }
-  if (result.mode === "metadata") return `${name}のメタデータだけを更新しました。`;
-  if (result.reusedExisting) {
-    const suffix = result.existingInOtherFolder
-      ? `（既存ファイルは ${result.existingInOtherFolder} にあります。移動はしていません）`
-      : "";
-    return `${name}の既存ファイルを再利用し、分類・全衣装プリセットを更新しました。${suffix}`;
-  }
-  return `${name}を保存先「${result.folder ?? folder}」へ配置し、全衣装プリセットを登録しました。`;
-}
-
-// 既に導入済みの場合に、何が起きるかを見せてから操作を選ばせる。
-function openDuplicateDialog(duplicate, folder) {
-  const options = [];
-  let renameField = null;
-  const existingLocation = duplicate.registeredVersion?.relativeName
-    ?? duplicate.installed[0]?.relativeName
-    ?? (duplicate.targetExists ? `${duplicate.targetFolder}/${duplicate.filename}` : "");
-
-  return openModal({
-    title: "既に導入済みです",
-    subtitle: duplicate.metadata ? `${duplicate.metadata.modelName} / ${duplicate.metadata.versionName}` : "",
-    dismissValue: null,
-    build: (body) => {
-      const list = document.createElement("dl");
-      list.className = "detailFields";
-      const add = (label, value) => {
-        if (!value) return;
-        const dt = document.createElement("dt");
-        dt.textContent = label;
-        const dd = document.createElement("dd");
-        dd.textContent = value;
-        list.append(dt, dd);
-      };
-      add("保存場所", existingLocation ? `${existingLocation}.safetensors` : "不明");
-      add("登録バージョン", duplicate.registeredVersion?.versionName);
-      add("Civitaiバージョン", duplicate.metadata?.versionName);
-      if (duplicate.registeredModelVersions?.length) {
-        add("同じモデルの別バージョン", duplicate.registeredModelVersions
-          .map((item) => item.versionName || item.relativeName).join(" / "));
-      }
-      if (duplicate.installedElsewhere?.length) {
-        add("別フォルダの同名ファイル", duplicate.installedElsewhere.map((item) => item.folder || "（ルート直下）").join(" / "));
-      }
-      add("今回の保存先", `${folder}/${duplicate.filename}`);
-      body.append(list);
-
-      const choices = document.createElement("div");
-      choices.className = "duplicateChoices";
-      const definitions = [
-        { mode: "reuse", label: "既存を使う", hint: "ダウンロードせず、登録情報だけ現在の保存場所へ紐付けます。" },
-        { mode: "metadata", label: "メタデータだけ更新", hint: "ファイルは触らず、Trigger Wordsや推奨Weightなどを更新します。" },
-        { mode: "rename", label: "別名で保存", hint: `新しいファイル名でダウンロードします。` },
-        ...(duplicate.movableSource
-          ? [{ mode: "move", label: "指定フォルダへ移動", hint: `既存ファイルを ${folder} へ移動します（確認あり）。` }]
-          : [])
-      ];
-      for (const [index, definition] of definitions.entries()) {
-        const row = document.createElement("label");
-        row.className = "duplicateChoice";
-        const radio = document.createElement("input");
-        radio.type = "radio";
-        radio.name = "duplicateMode";
-        radio.value = definition.mode;
-        radio.checked = index === 0;
-        if (index === 0) radio.setAttribute("data-autofocus", "true");
-        const text = document.createElement("span");
-        const strong = document.createElement("strong");
-        strong.textContent = definition.label;
-        const hint = document.createElement("small");
-        hint.textContent = definition.hint;
-        text.append(strong, hint);
-        row.append(radio, text);
-        choices.append(row);
-        options.push(radio);
-      }
-      body.append(choices);
-
-      const renameRow = document.createElement("label");
-      renameRow.className = "duplicateRename hidden";
-      const renameLabel = document.createElement("span");
-      renameLabel.textContent = "別名で保存するファイル名";
-      const renameInput = document.createElement("input");
-      renameInput.type = "text";
-      renameInput.value = duplicate.suggestedFilename ?? "";
-      renameRow.append(renameLabel, renameInput);
-      body.append(renameRow);
-
-      const sync = () => {
-        const selected = options.find((radio) => radio.checked)?.value;
-        renameRow.classList.toggle("hidden", selected !== "rename");
-      };
-      for (const radio of options) radio.addEventListener("change", sync);
-      sync();
-      renameField = renameInput;
-    },
-    actions: [
-      { label: "キャンセル", value: null, variant: "secondary" },
-      {
-        label: "実行する",
-        primary: true,
-        onSelect: async (close) => {
-          const mode = options.find((radio) => radio.checked)?.value ?? "reuse";
-          const filename = mode === "rename" ? (renameField?.value ?? "").trim() : "";
-          if (mode === "rename" && !/\.safetensors$/i.test(filename)) {
-            toast.warning("別名は .safetensors で終わるファイル名にしてください");
-            return false;
-          }
-          if (mode === "move") {
-            const confirmed = await confirmModal(
-              `既存ファイルを ${folder} へ移動します。関連する preview 画像やjsonも一緒に移動します。よろしいですか？`,
-              { title: "移動の確認", confirmText: "移動する", danger: true }
-            );
-            if (!confirmed) return false;
-            close({ mode, filename: "", confirmMove: true });
-            return;
-          }
-          close({ mode, filename, confirmMove: false });
-        },
-        keepOpen: true
-      }
-    ]
-  }).promise;
-}
-
-async function refreshCivitaiRegistrations() {
-  clearError();
-  rememberSessionSecrets();
-  elements.inspectCivitaiButton.disabled = true;
-  elements.installCivitaiButton.disabled = true;
-  elements.refreshCivitaiRegistrationsButton.disabled = true;
-  elements.civitaiStatus.textContent = "登録済みCivitai LoRAの衣装・Trigger Wordsを再解析中…";
-  try {
-    const result = await postJson("/api/civitai/refresh-registrations", {
-      token: elements.civitaiToken.value
-    });
-    if (!result.total) {
-      elements.civitaiStatus.textContent = "Civitai URLから登録したLoRAはまだありません。";
-      return;
-    }
-
-    const failureNames = (result.failures ?? [])
-      .slice(0, 3)
-      .map((item) => item.modelName)
-      .join("、");
-    elements.civitaiStatus.textContent = result.failed
-      ? `${result.updated}/${result.total}件を更新しました。失敗${result.failed}件: ${failureNames}`
-      : `${result.updated}件すべての衣装・Trigger Wordsを更新しました。`;
-    await loadLoras();
-  } catch (error) {
-    elements.civitaiStatus.textContent = `一括再解析に失敗しました: ${error.message}`;
-  } finally {
-    elements.inspectCivitaiButton.disabled = false;
-    elements.installCivitaiButton.disabled = !inspectedCivitai;
-    elements.refreshCivitaiRegistrationsButton.disabled = false;
-  }
-}
-
 async function checkForUpdate() {
   rememberSessionSecrets();
   elements.checkUpdateButton.disabled = true;
@@ -6809,12 +5051,10 @@ async function applyUpdate() {
 }
 
 function restoreSessionSecrets() {
-  elements.civitaiToken.value = sessionStorage.getItem("localImageChat.civitaiToken") ?? "";
   elements.githubToken.value = sessionStorage.getItem("localImageChat.githubToken") ?? "";
 }
 
 function rememberSessionSecrets() {
-  sessionStorage.setItem("localImageChat.civitaiToken", elements.civitaiToken.value);
   sessionStorage.setItem("localImageChat.githubToken", elements.githubToken.value);
 }
 
@@ -6841,6 +5081,7 @@ function sleep(milliseconds) {
 }
 
 function readSettings(overrides = {}) {
+  const { selectedCheckpoint } = runtimeController.getState();
   return {
     width: elements.width.value,
     height: elements.height.value,
@@ -6957,11 +5198,6 @@ function hasStructuredLoraPresets(loraName) {
   return typeof findLoraByName(loraName)?.registry?.characterTriggerWords === "string";
 }
 
-function loadLoraCategory() {
-  const stored = localStorage.getItem("localImageChat.loraCategory");
-  return ["character", "direction", "selected", "all"].includes(stored) ? stored : "character";
-}
-
 function loadLoraTriggers() {
   try {
     const stored = JSON.parse(localStorage.getItem("localImageChat.loraTriggers") ?? "{}");
@@ -7051,8 +5287,8 @@ function setBusy(busy, message = "") {
   generationBusy = busy;
   elements.generateButton.disabled = busy;
   elements.healthButton.disabled = busy;
-  elements.refreshLorasButton.disabled = busy;
-  elements.refreshCivitaiRegistrationsButton.disabled = busy;
+  loraLibrary.setBusy(busy);
+  civitaiController.setBusy(busy);
   elements.txt2imgModeButton.disabled = busy;
   elements.img2imgModeButton.disabled = busy;
   elements.inpaintModeButton.disabled = busy;

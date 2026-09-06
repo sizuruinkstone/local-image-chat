@@ -157,12 +157,15 @@ test("一般カテゴリの画像保存場所はplan確認後だけ移行を予�
 
 test("AI共有とGrokテンプレートは専用controllerへ接続する", async () => {
   const app = await fs.readFile("public/app.js", "utf8");
+  const loraLibrary = await fs.readFile("public/features/lora-library.js", "utf8");
   const aiShare = await fs.readFile("public/features/ai-share.js", "utf8");
   assert.match(app, /createAiShare\(\{[\s\S]*?copyGrokShareButton: elements\.copyGrokShareButton[\s\S]*?grokTemplateStatus: elements\.grokTemplateStatus/);
   assert.match(app, /getManualTriggerWords: \(\) => Object\.fromEntries\(loraTriggers\)/);
   assert.match(app, /const \{ loadShareState, loadPromptTemplate, scheduleShareCsvSync \} = aiShare/);
   assert.match(app, /aiShare\.init\(\)/);
-  assert.equal((app.match(/scheduleShareCsvSync\(\)/g) ?? []).length, 2);
+  assert.match(app, /scheduleShare: scheduleShareCsvSync/);
+  assert.match(app, /function publishLoraCatalog\(\)[\s\S]*?scheduleShareCsvSync\(\)/);
+  assert.match(loraLibrary, /controls\.scheduleShare\?\.\(\)/);
   assert.doesNotMatch(app, /function (?:renderShareStatus|updateShareCsv|copyGrokShare|syncShareCsvQuietly|savePromptTemplate)\(/);
   assert.match(aiShare, /const SHARE_SYNC_DEBOUNCE = 1500/);
 });
@@ -443,12 +446,13 @@ test("分割プロンプト7項目とLoRAを左カラムのアコーディオン
   assert.doesNotMatch(generationLoraMarkup, /Civitai URLから追加/);
 
   const app = await fs.readFile("public/app.js", "utf8");
+  const loraLibrary = await fs.readFile("public/features/lora-library.js", "utf8");
   const settingsNavigation = await fs.readFile("public/features/settings-navigation.js", "utf8");
-  assert.match(app, /elements\.addLoraButton\.addEventListener\("click", \(\) => void openLoraPicker\(\)\)/);
+  assert.match(app, /elements\.addLoraButton\.addEventListener\("click", \(\) => void loraLibrary\.openPicker\(\)\)/);
   assert.match(app, /elements\.openLoraManagementButton\.addEventListener\("click"[\s\S]*?settingsNavigation\.activate\("lora",\s*\{\s*targetId:\s*"settingsLoraDetails",\s*focus:\s*true\s*\}\)/);
   assert.match(settingsNavigation, /function activate\(categoryId/);
-  assert.match(app, /async function openLoraPicker\(\)/);
-  assert.match(app, /resolveThumbnail: loraThumbnail/);
+  assert.match(loraLibrary, /async function openPicker\(\)/);
+  assert.match(loraLibrary, /buildLoraCatalog\(items, \{ resolveThumbnail: resolveLoraPreviewUrl \}\)/);
 });
 
 test("生成バーはモバイル固定・safe-area対応で、軽量アニメーションを抑制できる", async () => {
@@ -782,6 +786,7 @@ test("設定画面はTask 04/05の保存方式と既存イベントを維持す�
 test("Task25のLoRAブラウザーは共有ツリー・相対場所・狭幅導線を持つ", async () => {
   const html = await fs.readFile("public/index.html", "utf8");
   const app = await fs.readFile("public/app.js", "utf8");
+  const loraLibrary = await fs.readFile("public/features/lora-library.js", "utf8");
   const css = await fs.readFile("public/style.css", "utf8");
   const catalog = await fs.readFile("public/preset-catalog.js", "utf8");
 
@@ -794,11 +799,11 @@ test("Task25のLoRAブラウザーは共有ツリー・相対場所・狭幅導�
   assert.match(catalog, /export function buildLoraFolderTree\(items = \[\]\)/);
   assert.match(catalog, /export function filterItemsByFolder\(items = \[\], selectedFolder = ""\)/);
   assert.match(catalog, /export function formatLoraRelativeLocation\(item\)/);
-  assert.match(app, /function renderLoraFolderTree\(container, items/);
-  assert.match(app, /filterItemsByFolder\(installedLoras, selectedLoraFolder\)/);
-  assert.match(app, /formatLoraRelativeLocation\(lora\)/);
-  assert.match(app, /folderBrowser:\s*true/);
-  assert.match(app, /function shouldUseLoraDetailModal\(\)/);
+  assert.match(app, /function renderLoraFolderTree\(container, items, options\)[\s\S]*?loraLibrary\.renderFolderTree/);
+  assert.match(loraLibrary, /filterItemsByFolder\(items, selectedFolder\)/);
+  assert.match(loraLibrary, /formatLoraRelativeLocation\(lora\)/);
+  assert.match(loraLibrary, /folderBrowser:\s*true/);
+  assert.match(loraLibrary, /matchMedia\?\.\("\(max-width: 1099px\)"\)/);
   assert.match(css, /\.loraWorkspace\s*\{[\s\S]*?minmax\(180px, 220px\)[\s\S]*?minmax\(280px, 1fr\)[\s\S]*?minmax\(280px, 1fr\)/);
   assert.match(css, /\.loraPickerBody \.pickerThumb img\s*\{\s*object-fit:\s*contain/);
   assert.match(css, /@media \(max-width: 1099px\)[\s\S]*?\.loraFolderPane,[\s\S]*?\.loraPreview\s*\{\s*display:\s*none/);
