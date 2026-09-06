@@ -1200,6 +1200,8 @@ test("MCPのgenerate_image／regenerate_imageはruntimeIdをBackendへ渡す", a
 
 test("Task20 UIはRuntime切替完了後に履歴を復元し、生成元RuntimeでHiresを判定する", async () => {
   const app = await fs.readFile("public/app.js", "utf8");
+  const studio = await fs.readFile("public/features/studio-controller.js", "utf8");
+  const historyController = await fs.readFile("public/features/history-controller.js", "utf8");
   const server = await fs.readFile("src/server.js", "utf8");
   assert.match(app, /let runtimeSelectionToken = 0/);
   assert.match(app, /function isRuntimeContextCurrent\(context\)/);
@@ -1231,14 +1233,16 @@ test("Task20 UIはRuntime切替完了後に履歴を復元し、生成元Runtime
   assert.doesNotMatch(server, /Forge Neo \/ AnimaのLoRA再読込は対応していません/);
   assert.match(app, /async function loadRecipeFields\(recipe, image\)[\s\S]*?await ensureRuntimeForRecipe\(recipe\)/);
   assert.match(app, /async function ensureRuntimeForRecipe\(recipe\)[\s\S]*?return handleRuntimeChange\(target\.id\)/);
-  const candidate = app.match(/function selectCandidate\([\s\S]*?\n\}/)?.[0] ?? "";
-  assert.match(candidate, /runtimeForGeneration\(lastGeneration\)/);
+  assert.match(app, /isHiresAvailable:[\s\S]*?runtimeForGeneration\(generation\)/);
+  const candidate = studio.match(/function selectCandidate\([\s\S]*?\n  \}/)?.[0] ?? "";
+  assert.match(candidate, /syncWorkflowAvailability\(\)/);
+  assert.match(studio, /!isHiresAvailable\(lastGeneration\)/);
   const finish = app.match(/async function finishSelected\([\s\S]*?\n\}/)?.[0] ?? "";
   assert.match(finish, /runtimePayloadFor\(sourceRuntime\)/);
   const galleryHires = app.match(/async function hiresFromGallery\([\s\S]*?\n\}/)?.[0] ?? "";
   assert.match(galleryHires, /runtimeForGeneration\(generation\)/);
   assert.match(galleryHires, /runtimePayloadFor\(sourceRuntime\)/);
-  const detail = app.match(/function openHistoryDetail\([\s\S]*?\n\}/)?.[0] ?? "";
+  const detail = historyController.match(/function openDetail\([\s\S]*?(?=\n  function createCopyButton)/)?.[0] ?? "";
   assert.match(detail, /const hiresAction = addAction\("Hiresする"/);
   assert.match(detail, /hiresAction\.disabled = !hiresAvailable/);
   assert.match(app, /async function openLoraPicker\(\)[\s\S]*?if \(runtimeSwitching\)/);

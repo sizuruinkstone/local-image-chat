@@ -1,3 +1,4 @@
+import { getJson, postJson, patchJson, deleteJson } from "./core/http-client.js";
 import {
   LORA_PROFILES,
   createRegistryProfile,
@@ -13,13 +14,10 @@ import {
 } from "./checkpoint-profiles.js";
 import { confirmModal, copyToClipboard, flashLabel, openModal, toast, withBusy } from "./ui-kit.js";
 import { openLoraEditor } from "./lora-editor.js";
-import { describeRetryInfo, openCompareView } from "./compare-view.js";
 import {
   configureThumbnailImage,
   originalImageUrl
 } from "./image-delivery.js";
-import { buildMetadataText, buildPromptText } from "./metadata-format.js";
-import { buildQueuePanel, summarizeQueue } from "./queue-view.js";
 import {
   NEW_FOLDER_VALUE,
   buildFolderGroups,
@@ -39,21 +37,19 @@ import {
   resolveLoraPreviewUrl,
   shouldApplyRecommendedWeight
 } from "./lora-preview.js";
-import {
-  APP_VIEWS,
-  hashForView,
-  normalizeAppView,
-  viewFromHash
-} from "./view-router.js";
-import {
-  SAMPLER_PRESETS,
-  buildOptionSections,
-  describeSamplerPreset,
-  isActivePreset,
-  isFavoriteOption,
-  rememberRecentOption,
-  toggleFavoriteOption
-} from "./option-picker.js";
+import { createNavigation } from "./features/navigation.js";
+import { createSamplerPicker } from "./features/sampler-picker.js";
+import { createSettingsNavigation } from "./features/settings-navigation.js";
+import { createDiscordSettings } from "./features/settings-discord.js";
+import { createStorageSettings } from "./features/settings-storage.js";
+import { createAiShare } from "./features/ai-share.js";
+import { createQueueController } from "./features/queue-controller.js";
+import { createImageState } from "./features/image-state.js";
+import { createImageModal } from "./features/image-modal.js";
+import { createStudioController } from "./features/studio-controller.js";
+import { createHistoryController } from "./features/history-controller.js";
+import { createComparisonController } from "./features/comparison-controller.js";
+import { createExperimentController } from "./features/experiment-controller.js";
 import {
   LORA_ROOT_FOLDER,
   MAX_CANDIDATE_COUNT,
@@ -74,20 +70,6 @@ import {
   splitTriggerPreview
 } from "./preset-catalog.js";
 import {
-  collectCheckpoints,
-  collectLoras,
-  collectPromptTags,
-  describeGalleryFilter,
-  filterGalleryEntries,
-  sortGalleryEntries,
-  toGalleryEntries
-} from "./gallery-filter.js";
-import {
-  STUDIO_HISTORY_FILTERS,
-  filterStudioHistoryEntries,
-  normalizeStudioHistoryFilter
-} from "./studio-history.js";
-import {
   buildLoraNotices,
   describeLoraNotices,
   hasLoraTag,
@@ -97,8 +79,6 @@ import {
   replaceLoraWeight
 } from "./lora-tags.js";
 import {
-  DEFAULT_GROK_INSTRUCTIONS,
-  buildGrokRequestText,
   mergePromptValue,
   parseAiPromptOutput
 } from "./prompt-import.js";
@@ -108,7 +88,6 @@ import {
   activeTriggersForSources,
   appendTriggersToRawPrompt,
   buildFinalPrompt,
-  formatTriggerWord,
   hasSectionContent,
   normalizeAppliedTriggerWords,
   normalizeSections,
@@ -143,93 +122,6 @@ const TITLE_STORAGE_KEYS = {
   mode: "localImageChat.titleGenerationMode",
   template: "localImageChat.titleTemplate"
 };
-
-const SETTINGS_CATEGORIES = Object.freeze([
-  { id: "general", label: "一般", description: "接続確認、保存先、共有、日常のアプリ操作をまとめます。" },
-  { id: "prompt", label: "プロンプト", description: "プロンプト部品と生成補助の既存設定をまとめます。" },
-  { id: "model", label: "モデル", description: "Checkpointプロフィール、既定値、自動適用、LoRAセットを管理します。" },
-  { id: "lora", label: "LoRA", description: "LoRAの検索・選択・編集とCivitai登録を管理します。" },
-  { id: "history", label: "履歴・ギャラリー", description: "履歴に表示するタイトルの既存設定を管理します。" },
-  { id: "discord", label: "Discord通知", description: "Favorite通知と生成完了通知の既存設定を管理します。" },
-  { id: "connection", label: "接続", description: "スマホ接続と既存の接続案内を確認します。" },
-  { id: "details", label: "詳細", description: "Grok向け指示テンプレートなど高度な補助設定を管理します。" },
-  { id: "appInfo", label: "アプリ情報", description: "バージョン確認と既存の更新操作を行います。" }
-]);
-
-const SETTINGS_SEARCH_INDEX = Object.freeze([
-  {
-    categoryId: "history",
-    label: "履歴タイトル",
-    targetId: "titleGenerationDetails",
-    keywords: "履歴 ギャラリー タイトル 日時 キャラクター Model モデル 衣装 カスタムテンプレート"
-  },
-  {
-    categoryId: "general",
-    label: "アプリ管理",
-    targetId: "appManagementDetails",
-    keywords: "アプリ 接続確認 Ollama ReForge 最新版 Grok AI共有 CSV"
-  },
-  {
-    categoryId: "general",
-    label: "画像の保存場所",
-    targetId: "storageSettingsDetails",
-    keywords: "画像 保存先 outputs 出力 移行 再起動 Favorite サムネイル"
-  },
-  {
-    categoryId: "model",
-    label: "Checkpoint管理",
-    targetId: "checkpointDetails",
-    keywords: "Checkpoint モデル プロフィール 既定値 自動適用 LoRAセット"
-  },
-  {
-    categoryId: "lora",
-    label: "LoRA管理",
-    targetId: "settingsLoraDetails",
-    keywords: "LoRA 検索 分類 Preview プレビュー 選択 編集 衣装 Trigger"
-  },
-  {
-    categoryId: "lora",
-    label: "CivitaiからLoRAを追加",
-    targetId: "civitaiDetails",
-    keywords: "Civitai URL APIキー 保存先 フォルダ ダウンロード 登録"
-  },
-  {
-    categoryId: "prompt",
-    label: "プロンプト部品・好み補助",
-    targetId: "promptPartsDetails",
-    keywords: "プロンプト 部品 好み 補助 キャラクター 衣装 構図 シチュエーション"
-  },
-  {
-    categoryId: "details",
-    label: "Grok向け指示テンプレート",
-    targetId: "promptTemplateDetails",
-    keywords: "Grok 指示テンプレート MY_SD_SETUP lora_list CSV コピー"
-  },
-  {
-    categoryId: "discord",
-    label: "Discord通知",
-    targetId: "discordDetails",
-    keywords: "Discord Webhook Favorite 生成完了通知 添付 表示項目 テスト通知 保存"
-  },
-  {
-    categoryId: "connection",
-    label: "スマホから接続",
-    targetId: "mobileAccessDetails",
-    keywords: "スマホ ReForge Tailscale LAN 接続 ホーム画面"
-  },
-  {
-    categoryId: "appInfo",
-    label: "アプリのアップデート",
-    targetId: "updateDetails",
-    keywords: "アップデート 更新 GitHub Token 最新版 適用"
-  }
-]);
-
-const DEFAULT_SETTINGS_CATEGORY = "general";
-let activeSettingsCategory = DEFAULT_SETTINGS_CATEGORY;
-let storageSettingsState = null;
-let storageMigrationPlan = null;
-let storageMigrationBusy = false;
 
 const elements = Object.fromEntries(
   [
@@ -362,45 +254,15 @@ const PROMPT_FIELD_ELEMENTS = {
   extra: "promptExtra"
 };
 
-const DISCORD_STATUS_LABELS = {
-  sending: "★ Discord送信中…",
-  sent: "★ Discord送信済み",
-  failed: "★ Favorite済み・Discord送信失敗"
-};
-
-const DISCORD_GENERATION_STATUS_LABELS = {
-  sending: "★ 生成通知送信中…",
-  sent: "★ 生成通知送信済み",
-  failed: "★ 生成通知送信失敗"
-};
-
-// 画像IDごとのDiscord送信状態。履歴の再描画で作り直されるバッジもここから読む。
-const discordStates = new Map();
-const discordGenerationStates = new Map();
-const discordWatchers = new Set();
-const discordGenerationWatchers = new Set();
-
 // LoRAトリガーワード一覧の開閉状態（項目ごと）。既定は折りたたみ。
 const triggerPanelOpen = new Map();
 const TRIGGER_PREVIEW_COUNT = 2;
-// トップレベル画面と、その表示領域の要素ID。
-// 初期化（画面復元）より前に評価されている必要があるため、ここで定義する。
-const VIEW_ELEMENTS = {
-  generate: "viewGenerate",
-  gallery: "viewGallery",
-  compare: "viewCompare",
-  settings: "viewSettings"
-};
 
 // AI出力から取り込んだトリガーワードの由来ID（LoRA名と混ざらない形にする）。
 const IMPORT_SOURCE_PREFIX = "import:";
 // プロンプト入力中に同期を走らせすぎないための待ち時間。
 const LORA_SYNC_DEBOUNCE = 400;
 let loraSyncTimer = null;
-// AI共有CSVの自動更新も、続けて走らせない。
-const SHARE_SYNC_DEBOUNCE = 1500;
-let shareSyncTimer = null;
-
 const TRIGGER_LIST_ELEMENTS = {
   character: "triggerListCharacter",
   appearance: "triggerListAppearance",
@@ -411,8 +273,6 @@ const TRIGGER_LIST_ELEMENTS = {
 };
 
 let promptDescription = "";
-let selectedCandidate = null;
-let lastGeneration = null;
 let settingPromptProgrammatically = false;
 // 用途別プロンプト（分割入力）とRaw Promptの状態。
 // rawPromptOverride が true の間は、分割入力ではなくRaw Promptを生成へ使う。
@@ -424,8 +284,6 @@ let installedLoras = [];
 let loraConfig = { defaultWeight: 0.7, maxSelected: 4 };
 let activeJobId = null;
 let compositionLock = null;
-let finalImage = null;
-let finalGeneration = null;
 let preferenceData = { favoriteCount: 0, topTags: [], topLoras: [], topSettings: [] };
 let preferenceBoosts = [];
 let inspectedCivitai = null;
@@ -437,25 +295,372 @@ let civitaiFavoriteFolders = normalizeFavorites(readJsonStorage("localImageChat.
 const CIVITAI_NEW_FOLDER = NEW_FOLDER_VALUE;
 let updateInfo = null;
 let loraRootInfo = { root: "", source: "", label: "", warning: "" };
-let knownExperiments = [];
-let experimentParameters = {};
-let experimentLimits = { maxImages: 8, hardLimit: 12 };
-let activeExperimentId = null;
-let experimentPolling = false;
 let checkpointSets = [];
 // 「ユーザーが編集中か」を判定するための、最後に適用した設定のスナップショット。
 let appliedSettingsFingerprint = null;
-let historyEntries = [];
 // 表示中のトップレベル画面。生成の進行状況はサーバー側のジョブが持つので、
 // ここを切り替えても生成は止まらない。
-let currentView = "generate";
-// ギャラリーの絞り込み条件（画面側だけの状態。履歴データは変えない）。
-let galleryFilter = { kind: "all", rating: "all", checkpoint: "", lora: "", period: "", query: "", tags: [] };
-let gallerySort = "newest";
-let galleryTagQuery = "";
-let galleryCompareMode = false;
-// Sampler / Scheduler の候補一覧（ReForgeから取得、失敗時は既定値）。
-let samplerOptions = { samplers: [], schedulers: [] };
+const navigation = createNavigation({
+  body: document.body,
+  mainNav: elements.mainNav,
+  views: {
+    generate: elements.viewGenerate,
+    gallery: elements.viewGallery,
+    compare: elements.viewCompare,
+    settings: elements.viewSettings
+  },
+  onGalleryEnter() {
+    // 初回取得のcacheを再利用し、表示だけで履歴を再転送しない。
+    if (!historyController.getGenerations().length && !historyController.getState().loading) void loadHistory();
+  },
+  onCompareEnter() {
+    renderImageCompareEntry();
+    renderExperimentCards();
+  }
+});
+const { showView, loadInitialView } = navigation;
+const samplerPicker = createSamplerPicker({
+  elements: {
+    samplerPickerButton: elements.samplerPickerButton,
+    schedulerPickerButton: elements.schedulerPickerButton,
+    samplerName: elements.samplerName,
+    scheduler: elements.scheduler,
+    samplerPickerValue: elements.samplerPickerValue,
+    schedulerPickerValue: elements.schedulerPickerValue,
+    samplerPresets: elements.samplerPresets
+  },
+  document, storage: localStorage, getJson, openModal,
+  runtimeApiUrl, runtimeRequestContext, isRuntimeContextCurrent
+});
+const settingsNavigation = createSettingsNavigation({
+  elements: {
+    settingsCategoryNav: elements.settingsCategoryNav,
+    settingsCategorySelect: elements.settingsCategorySelect,
+    settingsCategoryTitle: elements.settingsCategoryTitle,
+    settingsCategoryDescription: elements.settingsCategoryDescription,
+    settingsContent: elements.settingsContent,
+    settingsSearch: elements.settingsSearch,
+    settingsSearchResults: elements.settingsSearchResults
+  },
+  document,
+  window,
+  requestAnimationFrame
+});
+const discordSettings = createDiscordSettings({
+  elements: {
+    discordAutoSend: elements.discordAutoSend,
+    discordIncludePrompt: elements.discordIncludePrompt,
+    discordIncludeMetadata: elements.discordIncludeMetadata,
+    discordGenerationAutoSend: elements.discordGenerationAutoSend,
+    discordGenerationIncludeImage: elements.discordGenerationIncludeImage,
+    discordGenerationIncludeTitle: elements.discordGenerationIncludeTitle,
+    discordGenerationIncludeModel: elements.discordGenerationIncludeModel,
+    discordGenerationIncludeSeed: elements.discordGenerationIncludeSeed,
+    discordGenerationIncludeDuration: elements.discordGenerationIncludeDuration,
+    discordWebhook: elements.discordWebhook,
+    saveDiscordSettingsButton: elements.saveDiscordSettingsButton,
+    clearDiscordWebhookButton: elements.clearDiscordWebhookButton,
+    sendDiscordTestButton: elements.sendDiscordTestButton,
+    discordSettingsStatus: elements.discordSettingsStatus
+  },
+  getJson, patchJson, postJson, withBusy, toast, confirmModal,
+  onSummaryChanged: syncSettingsConnectionSummary
+});
+const { load: loadDiscordSettings } = discordSettings;
+const storageSettings = createStorageSettings({
+  elements: {
+    storageTargetOutputDir: elements.storageTargetOutputDir,
+    storagePlanButton: elements.storagePlanButton,
+    storageReserveButton: elements.storageReserveButton,
+    storageCancelButton: elements.storageCancelButton,
+    storageCurrentOutputDir: elements.storageCurrentOutputDir,
+    storagePendingOutputDir: elements.storagePendingOutputDir,
+    storageOutputSource: elements.storageOutputSource,
+    storageFavoritesFollow: elements.storageFavoritesFollow,
+    storageLastMigration: elements.storageLastMigration,
+    storagePlanSummary: elements.storagePlanSummary,
+    storageStatus: elements.storageStatus
+  },
+  getJson, postJson, patchJson, confirmModal
+});
+const { load: loadStorageSettings } = storageSettings;
+const aiShare = createAiShare({
+  elements: {
+    copyGrokShareButton: elements.copyGrokShareButton,
+    updateShareCsvButton: elements.updateShareCsvButton,
+    shareBarStatus: elements.shareBarStatus,
+    grokInstructions: elements.grokInstructions,
+    grokSetupDoc: elements.grokSetupDoc,
+    grokLoraCsv: elements.grokLoraCsv,
+    copyGrokTemplateButton: elements.copyGrokTemplateButton,
+    saveGrokTemplateButton: elements.saveGrokTemplateButton,
+    generateLoraCsvButton: elements.generateLoraCsvButton,
+    resetGrokInstructionsButton: elements.resetGrokInstructionsButton,
+    grokTemplateStatus: elements.grokTemplateStatus
+  },
+  document, getJson, postJson, patchJson, withBusy, copyToClipboard, flashLabel, toast,
+  openModal, confirmModal, formatDate,
+  getManualTriggerWords: () => Object.fromEntries(loraTriggers)
+});
+const { loadShareState, loadPromptTemplate, scheduleShareCsvSync } = aiShare;
+const queueController = createQueueController({
+  elements: {
+    queueIndicator: elements.queueIndicator,
+    queueIndicatorText: elements.queueIndicatorText
+  },
+  getJson, postJson, deleteJson, toast, openModal, loadHistory, loadExperiments,
+  openComparisonResult,
+  isGalleryVisible: () => navigation.getCurrentView() === "gallery",
+  sleep
+});
+const imageState = createImageState({
+  document, CSS, getJson, postJson, patchJson, sleep, showError, toast,
+  onPreferencesChanged: (preferences) => {
+    preferenceData = preferences;
+    renderPreferenceSummary();
+  },
+  reloadHistory: loadHistory,
+  reloadStudioRecent: loadStudioRecent,
+  getFinalImage: () => studioController.getFinalImage(),
+  favoriteFinalButton: elements.favoriteFinalButton,
+  finalDiscordStatus: elements.finalDiscordStatus,
+  finalDiscordGenerationStatus: elements.finalDiscordGenerationStatus
+});
+const {
+  toggleFavorite
+} = imageState;
+const imageModal = createImageModal({ document });
+const { open: openImageModal } = imageModal;
+const studioController = createStudioController({
+  document,
+  elements: {
+    candidateGrid: elements.candidateGrid, candidateSummary: elements.candidateSummary,
+    finishButton: elements.finishButton, lockCompositionButton: elements.lockCompositionButton,
+    finalResult: elements.finalResult, resultImage: elements.resultImage,
+    seedText: elements.seedText, resolutionText: elements.resolutionText, downloadLink: elements.downloadLink,
+    finalEyebrow: elements.finalEyebrow, finalTitle: elements.finalTitle,
+    emptyState: elements.emptyState, loading: elements.loading, resultContent: elements.resultContent,
+    reuseFinalButton: elements.reuseFinalButton,
+    finalIpAdapterButton: elements.finalIpAdapterButton,
+    sendFinalToImg2ImgButton: elements.sendFinalToImg2ImgButton,
+    sendFinalToInpaintButton: elements.sendFinalToInpaintButton,
+    regenerateFinalButton: elements.regenerateFinalButton, openInGalleryButton: elements.openInGalleryButton,
+    studioOutputStats: elements.studioOutputStats, studioGenerationStatus: elements.studioGenerationStatus,
+    studioGenerationTime: elements.studioGenerationTime, studioResolution: elements.studioResolution,
+    studioSeed: elements.studioSeed, studioSampler: elements.studioSampler,
+    studioCfg: elements.studioCfg, studioSteps: elements.studioSteps,
+    studioRecentCount: elements.studioRecentCount, studioRecentList: elements.studioRecentList,
+    studioHistoryAllButton: elements.studioHistoryAllButton,
+    studioHistoryFavoriteButton: elements.studioHistoryFavoriteButton,
+    studioMetadataEmpty: elements.studioMetadataEmpty, studioMetadataContent: elements.studioMetadataContent,
+    studioMetaModel: elements.studioMetaModel, studioMetaCheckpoint: elements.studioMetaCheckpoint,
+    studioMetaScheduler: elements.studioMetaScheduler, studioMetaSampler: elements.studioMetaSampler,
+    studioMetaSteps: elements.studioMetaSteps, studioMetaCfg: elements.studioMetaCfg,
+    studioMetaSeed: elements.studioMetaSeed, studioMetaLoraCount: elements.studioMetaLoraCount,
+    studioMetaResolution: elements.studioMetaResolution, studioMetaLoras: elements.studioMetaLoras,
+    studioMetaCreated: elements.studioMetaCreated, studioMetaVram: elements.studioMetaVram,
+    studioMetaModelHash: elements.studioMetaModelHash,
+    studioMetaParameterSampler: elements.studioMetaParameterSampler,
+    studioMetaParameterSteps: elements.studioMetaParameterSteps,
+    studioMetaParameterCfg: elements.studioMetaParameterCfg,
+    studioMetaParameterSeed: elements.studioMetaParameterSeed,
+    studioMetaWidth: elements.studioMetaWidth, studioMetaHeight: elements.studioMetaHeight,
+    studioMetaBatchCount: elements.studioMetaBatchCount, studioMetaBatchSize: elements.studioMetaBatchSize,
+    studioMetaHires: elements.studioMetaHires, studioMetaDenoising: elements.studioMetaDenoising,
+    studioMetaVae: elements.studioMetaVae, studioMetaClipSkip: elements.studioMetaClipSkip,
+    studioMetaPositive: elements.studioMetaPositive, studioMetaNegative: elements.studioMetaNegative,
+    studioCopyPromptButton: elements.studioCopyPromptButton,
+    studioCopyNegativeButton: elements.studioCopyNegativeButton,
+    studioCopyMetadataButton: elements.studioCopyMetadataButton,
+    studioOpenDetailButton: elements.studioOpenDetailButton,
+    studioLoadRecipeButton: elements.studioLoadRecipeButton,
+    studioCompareButton: elements.studioCompareButton, studioMetadataButton: elements.studioMetadataButton,
+    studioMainPreview: elements.studioMainPreview, studioMainImage: elements.studioMainImage,
+    studioMainFavoriteButton: elements.studioMainFavoriteButton,
+    studioMainCompareButton: elements.studioMainCompareButton,
+    studioMainIpAdapterButton: elements.studioMainIpAdapterButton,
+    studioMainMetadataButton: elements.studioMainMetadataButton,
+    studioMainRegenerateButton: elements.studioMainRegenerateButton
+  },
+  imageState, openImageModal, copyToClipboard, flashLabel, toast, formatCheckpointBadge, formatDate,
+  readFormStats: () => ({
+    width: elements.width.value, height: elements.height.value, seed: elements.seed.value,
+    sampler: elements.samplerPickerValue.textContent || elements.samplerName.value,
+    cfg: elements.cfgScale.value, steps: elements.steps.value
+  }),
+  syncGenerationSettingsSummary,
+  isHiresAvailable: (generation) => {
+    const runtime = generation ? runtimeForGeneration(generation) : null;
+    return Boolean(runtime && runtimeSupports("hires", runtime));
+  },
+  syncCompareControl,
+  onHistoryFilterChange: loadStudioRecent,
+  onOpenDetail: openHistoryDetail,
+  onLoadRecipe: activateCompositionLock,
+  onUseAsReference: setCurrentImageAsIpAdapterReference,
+  onToggleCompare: toggleCompareSelection,
+  onRegenerate: regenerateWithSameSeed,
+  onUseFinalAsImg2Img: useImageForImg2Img,
+  onUseFinalAsInpaint: useImageForInpaint,
+  onOpenFinalInGallery: (generation, image) => {
+    showView("gallery");
+    openHistoryDetail(generation, image);
+  },
+  onFocusSetting: focusGenerationSetting,
+  onStateChanged: () => {
+    syncRuntimeUi();
+    syncIpAdapterUi();
+  }
+});
+const comparisonController = createComparisonController({
+  document,
+  elements: {
+    compareSelectionButton: elements.compareSelectionButton,
+    compareSelectionBadge: elements.compareSelectionBadge,
+    compareTray: elements.compareTray,
+    compareTrayCount: elements.compareTrayCount,
+    compareTrayOpenButton: elements.compareTrayOpenButton,
+    compareTrayClearButton: elements.compareTrayClearButton,
+    compareTrayItems: elements.compareTrayItems,
+    imageCompareMessage: elements.imageCompareMessage,
+    imageCompareGalleryButton: elements.imageCompareGalleryButton,
+    imageCompareStartButton: elements.imageCompareStartButton,
+    galleryCompareModeButton: elements.galleryCompareModeButton,
+    galleryCompareModeBar: elements.galleryCompareModeBar,
+    galleryCompareModeCount: elements.galleryCompareModeCount,
+    galleryCompareModeMessage: elements.galleryCompareModeMessage,
+    galleryCompareClearButton: elements.galleryCompareClearButton,
+    galleryCompareExitButton: elements.galleryCompareExitButton,
+    mainNav: elements.mainNav,
+    studioMainCompareButton: elements.studioMainCompareButton,
+    studioCompareButton: elements.studioCompareButton
+  },
+  postJson, toast, generationTitle,
+  getStudioInspection: () => studioController.getInspection(),
+  getStudioFinalImage: () => studioController.getFinalImage(),
+  onOpenGallery: () => showView("gallery"),
+  onHistoryReload: loadHistory,
+  onSetExperimentBest: (experimentId, bestImageId) =>
+    patchJson(`/api/experiments/${experimentId}`, { bestImageId })
+});
+const historyController = createHistoryController({
+  document,
+  elements: {
+    refreshHistoryButton: elements.refreshHistoryButton,
+    historyLoadMoreButton: elements.historyLoadMoreButton,
+    historyGrid: elements.historyGrid,
+    galleryFilterButton: elements.galleryFilterButton,
+    galleryFilterCloseButton: elements.galleryFilterCloseButton,
+    galleryFilterDialog: elements.galleryFilterDialog,
+    gallerySort: elements.gallerySort,
+    galleryAllButton: elements.galleryAllButton,
+    galleryFavoriteButton: elements.galleryFavoriteButton,
+    galleryKindFilter: elements.galleryKindFilter,
+    galleryCheckpoint: elements.galleryCheckpoint,
+    galleryLora: elements.galleryLora,
+    galleryPeriod: elements.galleryPeriod,
+    gallerySearch: elements.gallerySearch,
+    galleryTagSearch: elements.galleryTagSearch,
+    galleryTagOptions: elements.galleryTagOptions,
+    gallerySelectedTags: elements.gallerySelectedTags,
+    galleryRatingFilter: elements.galleryRatingFilter,
+    galleryRatingDialogFilter: elements.galleryRatingDialogFilter,
+    galleryFilterSummary: elements.galleryFilterSummary,
+    galleryFilterDialogSummary: elements.galleryFilterDialogSummary,
+    resetGalleryFilterButton: elements.resetGalleryFilterButton
+  },
+  getJson, patchJson, deleteJson, imageState, toast, showError, confirmModal,
+  openImageModal, copyToClipboard, flashLabel, generationTitle, formatCheckpointBadge, formatDate, shorten,
+  getStudioHistoryFilter: () => studioController.getHistoryFilter(),
+  onStudioRecentData: (generations) => studioController.renderRecent(generations),
+  onStudioRecentError: (message) => studioController.renderRecentError(message),
+  isCompareMode: () => comparisonController.isGalleryMode(),
+  isCompareSelected,
+  syncCompareControl,
+  onToggleCompare: toggleCompareSelection,
+  onLoadRecipe: activateCompositionLock,
+  onUseAsImg2Img: useImageForImg2Img,
+  onUseAsInpaint: useImageForInpaint,
+  onRegenerate: regenerateWithSameSeed,
+  onChangeLora: changeLoraOnly,
+  onDerive: deriveWithInstruction,
+  onDuplicateRecipe: duplicateRecipe,
+  isHiresAvailable: (generation) => {
+    const runtime = runtimeForGeneration(generation);
+    return Boolean(runtime && runtimeSupports("hires", runtime));
+  },
+  onHires: hiresFromGallery,
+  onPreferencesChanged: (preferences) => {
+    preferenceData = preferences;
+    renderPreferenceSummary();
+  },
+  onRendered: () => {
+    renderExperimentCards();
+    comparisonController.sync();
+  }
+});
+const experimentController = createExperimentController({
+  document,
+  elements: {
+    experimentParameter: elements.experimentParameter,
+    experimentTarget: elements.experimentTarget,
+    experimentTargetRow: elements.experimentTargetRow,
+    experimentValues: elements.experimentValues,
+    experimentFixSeed: elements.experimentFixSeed,
+    runExperimentButton: elements.runExperimentButton,
+    cancelExperimentButton: elements.cancelExperimentButton,
+    openExperimentsButton: elements.openExperimentsButton,
+    refreshExperimentsButton: elements.refreshExperimentsButton,
+    experimentStatus: elements.experimentStatus,
+    experimentProgress: elements.experimentProgress,
+    experimentBadge: elements.experimentBadge,
+    experimentGrid: elements.experimentGrid
+  },
+  getJson, postJson, patchJson, deleteJson, toast, openModal, confirmModal, promptModal, withBusy, clearError,
+  getFormSnapshot: () => ({
+    parameter: elements.experimentParameter.value,
+    target: elements.experimentTarget.value,
+    values: elements.experimentValues.value,
+    fixSeed: elements.experimentFixSeed.checked,
+    seed: elements.seed.value,
+    description: promptDescription,
+    positivePrompt: currentPositivePrompt(),
+    mode: generationMode,
+    hasInitImage: Boolean(initImageReference)
+  }),
+  setSeed: (seed) => { elements.seed.value = String(seed); },
+  getSelectedLoraOptions: () => [...selectedLoras.keys()].map((name) => ({
+    value: name,
+    label: findLoraByName(name)?.displayName ?? name
+  })),
+  syncLorasFromPrompt,
+  shouldRequestPrompt,
+  requestPrompt,
+  getRuntimePayload: runtimePayload,
+  getContentRating: selectedContentRating,
+  getTitlePayload: readTitlePayload,
+  getPromptPayload: readPromptPayload,
+  getSelectedLoras: readSelectedLoras,
+  getPromptBoosts: readPromptBoosts,
+  getInitImagePayload: readInitImagePayload,
+  getInpaintPayload: readInpaintPayload,
+  getIpAdapterPayload: readIpAdapterPayload,
+  getSettings: readSettings,
+  onQueuePolling: () => queueController.startPolling(),
+  getHistoryEntries: () => historyController.getEntries(),
+  loadHistory,
+  openComparison: (entries, context) => comparisonController.openEntries(entries, context),
+  openImageModal,
+  toggleFavorite,
+  onShowExperiments: () => showView("compare"),
+  onShowExperimentResult: () => {
+    setResultTab("gallery");
+    showView("compare");
+  },
+  onCloseQueuePanel: () => queueController.closePanel(),
+  sleep
+});
+const { loadOptions: loadSamplerOptions, syncLabels: syncSamplerLabels } = samplerPicker;
 let runtimeOptions = [];
 let activeRuntimeId = "reforge";
 let activeRuntime = null;
@@ -465,19 +670,8 @@ let runtimeSwitching = false;
 let runtimeSwitchPromise = Promise.resolve(true);
 let runtimeSwitchSnapshot = null;
 let checkpointRefreshInFlight = false;
-// 直近に取得した履歴。絞り込みのたびに取り直さないよう保持する。
-let lastHistoryGenerations = [];
-const HISTORY_PAGE_SIZE = 20;
-let historyCursor = null;
-let historyHasMore = true;
-let historyLoading = false;
-let historyTotal = 0;
 // 選択したまま「今回は使わない」LoRA（ON/OFF）。選択自体は保持する。
 const disabledLoras = new Set();
-const compareSelection = new Map();
-const experimentEntryCache = new Map();
-// 初回履歴取得はトップレベル初期化中にも完了し得るため、先に用意する。
-const imageFavorites = new Map();
 // 次の生成が「どの派生操作から来たか」を履歴へ残すための一時情報。
 let pendingDerivation = null;
 let installedCheckpoints = [];
@@ -491,16 +685,6 @@ let pinnedLoraName = null;
 let displayedLoraName = null;
 // Seedの「ランダム」はアプリ全体で-1。空欄と同じ扱いにはしない。
 const RANDOM_SEED = "-1";
-// ヘッダー右上のキュー表示。サーバーのジョブ状態が正で、画面はそれを映すだけ。
-// 起動処理より前に評価されるよう、定数もここへ置く。
-const QUEUE_POLL_INTERVAL = 1200;
-// 完了・失敗の表示を少し残してから停止する（1.2秒 × 8回 ≒ 10秒）。
-const QUEUE_IDLE_TICKS = 8;
-const QUEUE_TERMINAL_STATUSES = ["done", "completed", "failed", "cancelled"];
-let queueSnapshot = { generation: [], comparison: [], summary: { activeCount: 0 } };
-let queuePolling = false;
-let queuePanel = null;
-let queueSeenTerminal = null;
 // Clear PromptsのUndo用スナップショット。
 let clearedPromptSnapshot = null;
 // Seedクリアボタンの表示同期（setupClearableFieldsで実体を入れる）。
@@ -535,10 +719,6 @@ let maskSourceKey = "";
 let maskUndoStack = [];
 let maskRedoStack = [];
 const MAX_MASK_HISTORY = 12;
-let studioInspection = null;
-let studioHistoryFilter = STUDIO_HISTORY_FILTERS.all;
-let studioStartedAt = 0;
-let studioElapsedTimer = null;
 const selectedLoras = new Map();
 // LoRAごとの選択元: "ui"（UI操作）/ "prompt"（プロンプト内タグ）/ "both"
 const loraSelectionSources = new Map();
@@ -574,124 +754,40 @@ await Promise.all([
 markSettingsApplied();
 setGenerationMode("txt2img");
 updateGenerateButton();
-syncStudioOutputStats();
+studioController.syncOutputStats();
 setupClearableFields();
 syncIpAdapterUi();
 // 再読み込み後も、サーバー側で走っているジョブを拾って右上へ表示する。
-  startQueuePolling();
+queueController.startPolling();
 
 elements.healthButton.addEventListener("click", checkHealth);
 elements.runtimeSelect.addEventListener("change", () => void handleRuntimeChange());
-elements.storageTargetOutputDir.addEventListener("input", invalidateStoragePlan);
-elements.storagePlanButton.addEventListener("click", planStorageMigration);
-elements.storageReserveButton.addEventListener("click", reserveStorageMigration);
-elements.storageCancelButton.addEventListener("click", cancelStorageMigration);
 elements.titleGenerationMode.addEventListener("change", saveTitleSettings);
 elements.titleTemplate.addEventListener("input", saveTitleSettings);
 elements.generateButton.addEventListener("click", generateCandidates);
 elements.finishButton.addEventListener("click", finishSelected);
-elements.mainNav.addEventListener("click", (event) => {
-  const button = event.target.closest("[data-view]");
-  if (button) showView(button.dataset.view);
-});
-elements.settingsCategoryNav.addEventListener("click", (event) => {
-  const button = event.target.closest("[data-settings-category]");
-  if (button) activateSettingsCategory(button.dataset.settingsCategory);
-});
-elements.settingsCategorySelect.addEventListener("change", () => {
-  activateSettingsCategory(elements.settingsCategorySelect.value);
-});
-elements.settingsSearch.addEventListener("input", renderSettingsSearchResults);
-elements.settingsSearchResults.addEventListener("click", (event) => {
-  const button = event.target.closest("[data-settings-search-category]");
-  if (!button) return;
-  activateSettingsCategory(button.dataset.settingsSearchCategory, {
-    targetId: button.dataset.settingsSearchTarget,
-    focus: true
-  });
-  elements.settingsSearch.value = "";
-  renderSettingsSearchResults();
-});
-window.addEventListener("hashchange", () => {
-  const view = viewFromHash(location.hash);
-  if (view && view !== currentView) showView(view, { remember: false });
-});
-// 生成結果（Hires仕上げ）画像のクリックで拡大モーダルを開く。
-elements.resultImage.addEventListener("click", () => {
-  if (finalImage) openImageModal(
-    originalImageUrl(finalImage),
-    finalGeneration ? generationTitle(finalGeneration) : elements.finalTitle.textContent
-  );
-});
-elements.studioMetadataButton.addEventListener("click", () => {
-  if (finalGeneration && finalImage) setStudioInspection(finalGeneration, finalImage);
-});
-elements.studioCompareButton.addEventListener("click", () => {
-  if (!finalGeneration || !finalImage) return;
-  toggleCompareSelection(finalImage, finalGeneration);
-});
-elements.studioOpenDetailButton.addEventListener("click", () => {
-  if (studioInspection) openHistoryDetail(studioInspection.generation, studioInspection.image);
-});
-elements.studioLoadRecipeButton.addEventListener("click", () => {
-  if (studioInspection) activateCompositionLock(studioInspection.generation, studioInspection.image);
-});
-elements.studioMainFavoriteButton.addEventListener("click", () => {
-  if (studioInspection) void toggleFavorite(studioInspection.image, elements.studioMainFavoriteButton);
-});
-elements.studioHistoryAllButton.addEventListener("click", () => {
-  void setStudioHistoryFilter(STUDIO_HISTORY_FILTERS.all);
-});
-elements.studioHistoryFavoriteButton.addEventListener("click", () => {
-  void setStudioHistoryFilter(STUDIO_HISTORY_FILTERS.favorite);
-});
-elements.studioMainImage.addEventListener("click", openStudioInspectionImage);
-elements.studioMainImage.addEventListener("keydown", handleStudioMainImageKey);
-elements.studioMainIpAdapterButton.addEventListener("click", (event) => {
-  event.preventDefault();
-  event.stopPropagation();
-  setCurrentImageAsIpAdapterReference(studioInspection?.image, { focus: true });
-});
-elements.studioMainCompareButton.addEventListener("click", () => {
-  if (!studioInspection) return;
-  const { generation, image } = studioInspection;
-  toggleCompareSelection(image, generation, elements.studioMainCompareButton);
-});
-elements.studioMainMetadataButton.addEventListener("click", () => {
-  if (studioInspection) setStudioInspection(studioInspection.generation, studioInspection.image);
-});
-elements.studioMainRegenerateButton.addEventListener("click", () => {
-  if (studioInspection) regenerateWithSameSeed(studioInspection.generation, studioInspection.image);
-});
-elements.studioCopyPromptButton.addEventListener("click", () => {
-  void copyStudioInspectionValue(elements.studioCopyPromptButton, (generation) => buildPromptText(generation));
-});
-elements.studioCopyNegativeButton.addEventListener("click", () => {
-  void copyStudioInspectionValue(
-    elements.studioCopyNegativeButton,
-    (generation) => generation.effectiveNegativePrompt || generation.negativePrompt || ""
-  );
-});
-elements.studioCopyMetadataButton.addEventListener("click", () => {
-  void copyStudioInspectionValue(
-    elements.studioCopyMetadataButton,
-    (generation, image) => buildMetadataText(generation, image)
-  );
-});
+navigation.init();
+samplerPicker.init();
+settingsNavigation.init();
+discordSettings.init();
+storageSettings.init();
+aiShare.init();
+  queueController.init();
+imageState.init();
+studioController.init();
+comparisonController.init();
+historyController.init();
+experimentController.init();
 for (const control of [
   elements.width, elements.height, elements.seed, elements.steps, elements.cfgScale,
   elements.samplerName, elements.scheduler
 ]) {
-  control.addEventListener("input", () => syncStudioOutputStats());
-  control.addEventListener("change", () => syncStudioOutputStats());
+  control.addEventListener("input", () => studioController.syncOutputStats());
+  control.addEventListener("change", () => studioController.syncOutputStats());
 }
 elements.resolutionPreset.addEventListener("change", applyResolutionPreset);
 elements.randomizeSeedButton.addEventListener("click", randomizeGenerationSeed);
 elements.seedFixedToggle.addEventListener("change", toggleGenerationSeedFixed);
-elements.studioOutputStats.addEventListener("click", (event) => {
-  const shortcut = event.target.closest("[data-generation-setting-target]");
-  if (shortcut) focusGenerationSetting(shortcut.dataset.generationSettingTarget);
-});
 elements.txt2imgModeButton.addEventListener("click", () => setGenerationMode("txt2img"));
 elements.img2imgModeButton.addEventListener("click", () => setGenerationMode("img2img"));
 elements.inpaintModeButton.addEventListener("click", () => setGenerationMode("inpaint"));
@@ -770,33 +866,8 @@ elements.img2imgDropZone.addEventListener("drop", (event) => {
   if (file) void loadInitImageFile(file);
 });
 elements.lockCompositionButton.addEventListener("click", lockSelectedComposition);
-elements.reuseFinalButton.addEventListener("click", () => {
-  if (finalGeneration && finalImage) activateCompositionLock(finalGeneration, finalImage);
-});
-elements.favoriteFinalButton.addEventListener("click", () => {
-  if (finalImage) void toggleFavorite(finalImage, elements.favoriteFinalButton);
-});
-elements.finalIpAdapterButton.addEventListener("click", (event) => {
-  event.preventDefault();
-  event.stopPropagation();
-  setCurrentImageAsIpAdapterReference(finalImage, { focus: true });
-});
-elements.sendFinalToImg2ImgButton.addEventListener("click", () => {
-  if (finalImage) useImageForImg2Img(finalImage);
-});
-elements.sendFinalToInpaintButton.addEventListener("click", () => {
-  if (finalImage) useImageForInpaint(finalImage);
-});
-elements.regenerateFinalButton.addEventListener("click", () => {
-  if (finalGeneration && finalImage) regenerateWithSameSeed(finalGeneration, finalImage);
-});
-elements.openInGalleryButton.addEventListener("click", () => {
-  showView("gallery");
-  if (finalGeneration && finalImage) openHistoryDetail(finalGeneration, finalImage);
-});
 elements.unlockCompositionButton.addEventListener("click", unlockComposition);
 elements.cancelJobButton.addEventListener("click", cancelActiveJob);
-elements.queueIndicator.addEventListener("click", openQueuePanel);
 elements.clearPromptsButton.addEventListener("click", clearBothPrompts);
 elements.candidateCount.addEventListener("change", normalizeCandidateCount);
 for (const radio of [elements.contentRatingGeneral, elements.contentRatingNsfw]) {
@@ -838,10 +909,6 @@ elements.checkpointAutoApply.addEventListener("change", () => {
   localStorage.setItem("localImageChat.checkpointAutoApply", String(elements.checkpointAutoApply.checked));
 });
 elements.openLoraRootButton.addEventListener("click", openLoraRootFolder);
-elements.experimentParameter.addEventListener("change", syncExperimentTargetVisibility);
-elements.runExperimentButton.addEventListener("click", runExperiment);
-elements.cancelExperimentButton.addEventListener("click", cancelExperiment);
-elements.openExperimentsButton.addEventListener("click", () => openGalleryExperiments());
 elements.inspectCivitaiButton.addEventListener("click", inspectCivitai);
 elements.installCivitaiButton.addEventListener("click", installCivitai);
 elements.refreshCivitaiRegistrationsButton.addEventListener("click", refreshCivitaiRegistrations);
@@ -853,68 +920,13 @@ elements.civitaiCategory.addEventListener("change", () => applyCategoryFolder(el
 elements.civitaiFolder.addEventListener("change", onCivitaiFolderChange);
 elements.civitaiFolderFavorite.addEventListener("click", toggleCivitaiFolderFavorite);
 elements.civitaiNewFolder.addEventListener("input", refreshCivitaiFolderHint);
-elements.copyGrokShareButton.addEventListener("click", copyGrokShare);
-elements.updateShareCsvButton.addEventListener("click", updateShareCsv);
 elements.importAiPromptButton.addEventListener("click", openAiPromptImport);
-elements.copyGrokTemplateButton.addEventListener("click", copyGrokTemplate);
-elements.saveGrokTemplateButton.addEventListener("click", () => void savePromptTemplate());
-elements.generateLoraCsvButton.addEventListener("click", updateLoraCsvFromInstalled);
-elements.resetGrokInstructionsButton.addEventListener("click", resetGrokInstructions);
-elements.saveDiscordSettingsButton.addEventListener("click", saveDiscordSettings);
-elements.clearDiscordWebhookButton.addEventListener("click", clearDiscordWebhook);
-elements.sendDiscordTestButton.addEventListener("click", sendDiscordTestNotification);
 elements.checkUpdateButton.addEventListener("click", checkForUpdate);
 elements.applyUpdateButton.addEventListener("click", applyUpdate);
 elements.updateStatusButton.addEventListener("click", () => {
-  activateSettingsCategory("appInfo", { targetId: "updateDetails" });
+  settingsNavigation.activate("appInfo", { targetId: "updateDetails" });
   void checkForUpdate();
 });
-elements.refreshHistoryButton.addEventListener("click", () => void loadHistory());
-elements.historyLoadMoreButton.addEventListener("click", () => void loadMoreHistory());
-elements.refreshExperimentsButton.addEventListener("click", () => void openGalleryExperiments());
-elements.galleryFilterButton.addEventListener("click", openGalleryFilterDialog);
-elements.galleryFilterCloseButton.addEventListener("click", () => elements.galleryFilterDialog.close());
-elements.galleryFilterDialog.addEventListener("click", (event) => {
-  if (event.target === elements.galleryFilterDialog) elements.galleryFilterDialog.close();
-});
-elements.gallerySort.addEventListener("change", () => {
-  gallerySort = elements.gallerySort.value === "oldest" ? "oldest" : "newest";
-  renderHistory(lastHistoryGenerations);
-});
-elements.galleryAllButton.addEventListener("click", () => setGalleryFilter({ kind: "all" }));
-elements.galleryFavoriteButton.addEventListener("click", () => setGalleryFilter({ kind: "favorite" }));
-elements.galleryKindFilter.addEventListener("click", (event) => {
-  const button = event.target.closest("[data-gallery-kind]");
-  if (button) setGalleryFilter({ kind: button.dataset.galleryKind });
-});
-for (const element of [elements.galleryCheckpoint, elements.galleryLora, elements.galleryPeriod]) {
-  element.addEventListener("change", () => setGalleryFilter({
-    checkpoint: elements.galleryCheckpoint.value,
-    lora: elements.galleryLora.value,
-    period: elements.galleryPeriod.value
-  }));
-}
-elements.gallerySearch.addEventListener("input", () => setGalleryFilter({ query: elements.gallerySearch.value }));
-elements.galleryTagSearch.addEventListener("input", () => {
-  galleryTagQuery = elements.galleryTagSearch.value;
-  renderGalleryTagOptions(toGalleryEntries(lastHistoryGenerations));
-});
-for (const container of [elements.galleryRatingFilter, elements.galleryRatingDialogFilter]) {
-  container.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-gallery-rating]");
-    if (button) setGalleryFilter({ rating: button.dataset.galleryRating });
-  });
-}
-elements.resetGalleryFilterButton.addEventListener("click", resetGalleryFilter);
-elements.compareTrayOpenButton.addEventListener("click", compareCurrentSelection);
-elements.compareTrayClearButton.addEventListener("click", clearCompareSelection);
-elements.galleryCompareModeButton.addEventListener("click", () => setGalleryCompareMode(!galleryCompareMode));
-elements.galleryCompareClearButton.addEventListener("click", clearCompareSelection);
-elements.galleryCompareExitButton.addEventListener("click", () => setGalleryCompareMode(false));
-elements.imageCompareGalleryButton.addEventListener("click", () => showView("gallery"));
-elements.imageCompareStartButton.addEventListener("click", compareCurrentSelection);
-elements.samplerPickerButton.addEventListener("click", () => void openSamplerPicker("sampler"));
-elements.schedulerPickerButton.addEventListener("click", () => void openSamplerPicker("scheduler"));
 elements.showCombinedPromptButton.addEventListener("click", showCombinedPrompt);
 elements.compareShortcutButton.addEventListener("click", sendToCompare);
 elements.compareShortcutDetails.addEventListener("toggle", () => {
@@ -936,12 +948,11 @@ elements.candidateCount.addEventListener("input", handleCandidateCountChange);
 elements.candidateCount.addEventListener("blur", normalizeCandidateCount);
 elements.openLoraManagementButton.addEventListener("click", () => {
   showView("settings");
-  activateSettingsCategory("lora", { targetId: "settingsLoraDetails", focus: true });
+  settingsNavigation.activate("lora", { targetId: "settingsLoraDetails", focus: true });
 });
-elements.compareSelectionButton.addEventListener("click", compareCurrentSelection);
-activateSettingsCategory(DEFAULT_SETTINGS_CATEGORY);
+settingsNavigation.activate("general");
 showView(loadInitialView(), { remember: false });
-updateCompareButton();
+comparisonController.sync();
 elements.applyPreferenceButton.addEventListener("click", applyPreferenceTags);
 elements.clearPromptPartsButton.addEventListener("click", clearPromptParts);
 for (const element of [
@@ -1108,10 +1119,7 @@ function captureRuntimeState() {
     activeCheckpoint,
     selectedCheckpoint,
     installedLoras,
-    samplerOptions: {
-      samplers: [...(samplerOptions.samplers ?? [])],
-      schedulers: [...(samplerOptions.schedulers ?? [])]
-    },
+    samplerOptions: samplerPicker.getOptions(),
     ipAdapterOptions,
     ipAdapterState: { ...ipAdapterState },
     selectedLoras: new Map(selectedLoras),
@@ -1130,7 +1138,7 @@ function restoreRuntimeState(snapshot) {
   activeCheckpoint = snapshot.activeCheckpoint;
   selectedCheckpoint = snapshot.selectedCheckpoint;
   installedLoras = snapshot.installedLoras;
-  samplerOptions = snapshot.samplerOptions;
+  samplerPicker.setOptions(snapshot.samplerOptions);
   ipAdapterOptions = snapshot.ipAdapterOptions;
   ipAdapterState = snapshot.ipAdapterState;
   selectedLoras.clear();
@@ -1258,6 +1266,8 @@ function syncRuntimeUi() {
     : "Runtime情報を取得できません";
   const busy = generationBusy || runtimeSwitching;
   const runtimeUnavailable = Boolean(activeRuntime) && !isRuntimeSelectable(activeRuntime);
+  const selectedCandidate = studioController.getSelectedCandidate();
+  const lastGeneration = studioController.getLastGeneration();
   const hiresRuntime = selectedCandidate && lastGeneration
     ? runtimeForGeneration(lastGeneration)
     : activeRuntime;
@@ -1282,7 +1292,10 @@ function syncRuntimeUi() {
   if (!runtimeSwitching && !runtimeSupports("img2img") && ["img2img", "inpaint"].includes(generationMode)) {
     setGenerationMode("txt2img");
   }
-  elements.finishButton.disabled = busy || !selectedCandidate || !hiresAvailable;
+  studioController.syncWorkflowAvailability({
+    runtimeSwitching,
+    ipAdapterAvailable: Boolean(ipAdapterOptions.available && runtimeSupports("ipAdapter"))
+  });
   syncIpAdapterUi();
 }
 
@@ -1482,119 +1495,6 @@ function setGenerationMode(mode) {
   updateGenerateButton();
 }
 
-// ---- トップレベル画面（生成 / ギャラリー / 比較 / 設定） ----
-
-// 画面の切り替えは表示の出し分けだけ。生成ジョブはサーバー側で進み続けるので、
-// ギャラリーや設定へ移動しても中断・再実行は起きない。
-function showView(view, { remember = true } = {}) {
-  currentView = normalizeAppView(view);
-  document.body.dataset.currentView = currentView;
-  for (const name of APP_VIEWS) {
-    elements[VIEW_ELEMENTS[name]].classList.toggle("hidden", name !== currentView);
-  }
-  for (const button of elements.mainNav.querySelectorAll("[data-view]")) {
-    const active = button.dataset.view === currentView;
-    button.classList.toggle("active", active);
-    if (active) button.setAttribute("aria-current", "page");
-    else button.removeAttribute("aria-current");
-  }
-  if (remember) {
-    localStorage.setItem("localImageChat.view", currentView);
-    if (viewFromHash(location.hash) !== currentView) {
-      history.replaceState(null, "", hashForView(currentView));
-    }
-  }
-  // 初回起動時に取得したページを再利用し、画面へ戻るだけで履歴を再転送しない。
-  if (currentView === "gallery" && !lastHistoryGenerations.length && !historyLoading) void loadHistory();
-  if (currentView === "compare") {
-    renderImageCompareEntry();
-    renderExperimentCards();
-  }
-}
-
-function settingsCategoryById(categoryId) {
-  return SETTINGS_CATEGORIES.find((category) => category.id === categoryId) ?? null;
-}
-
-function activateSettingsCategory(categoryId, { targetId = "", focus = false } = {}) {
-  const category = settingsCategoryById(categoryId);
-  if (!category) return;
-  activeSettingsCategory = category.id;
-
-  for (const button of elements.settingsCategoryNav.querySelectorAll("[data-settings-category]")) {
-    const selected = button.dataset.settingsCategory === category.id;
-    button.classList.toggle("is-active", selected);
-    button.setAttribute("aria-selected", String(selected));
-  }
-  elements.settingsCategorySelect.value = category.id;
-  elements.settingsCategoryTitle.textContent = category.label;
-  elements.settingsCategoryDescription.textContent = category.description;
-  elements.settingsContent.classList.toggle("is-lora-category", category.id === "lora");
-  for (const panel of elements.settingsContent.querySelectorAll("[data-settings-panel]")) {
-    const selected = panel.dataset.settingsCategory === category.id;
-    panel.hidden = !selected;
-    panel.setAttribute("aria-hidden", String(!selected));
-  }
-
-  if (!targetId) return;
-  const target = document.getElementById(targetId);
-  if (!target) return;
-  if (target.tagName === "DETAILS") target.open = true;
-  requestAnimationFrame(() => {
-    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
-    target.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "start" });
-    if (!focus) return;
-    const focusTarget = target.matches("input, select, textarea, button")
-      ? target
-      : target.querySelector("input, select, textarea, button");
-    if (focusTarget && !focusTarget.disabled) focusTarget.focus({ preventScroll: true });
-  });
-}
-
-function normalizeSettingsSearch(value) {
-  return String(value ?? "").trim().toLowerCase();
-}
-
-function renderSettingsSearchResults() {
-  const query = normalizeSettingsSearch(elements.settingsSearch.value);
-  elements.settingsSearchResults.replaceChildren();
-  if (!query) {
-    elements.settingsSearchResults.hidden = true;
-    elements.settingsSearch.setAttribute("aria-expanded", "false");
-    return;
-  }
-
-  const terms = query.split(/\s+/).filter(Boolean);
-  const matches = SETTINGS_SEARCH_INDEX.filter((item) => {
-    const searchable = normalizeSettingsSearch(`${item.label} ${item.keywords}`);
-    return terms.every((term) => searchable.includes(term));
-  });
-  if (!matches.length) {
-    const empty = document.createElement("p");
-    empty.className = "settingsSearchEmpty";
-    empty.textContent = "一致する設定がありません";
-    elements.settingsSearchResults.append(empty);
-  } else {
-    for (const item of matches) {
-      const category = settingsCategoryById(item.categoryId);
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "settingsSearchResult";
-      button.setAttribute("role", "option");
-      button.dataset.settingsSearchCategory = item.categoryId;
-      button.dataset.settingsSearchTarget = item.targetId;
-      const label = document.createElement("strong");
-      label.textContent = item.label;
-      const categoryLabel = document.createElement("small");
-      categoryLabel.textContent = category?.label ?? "設定";
-      button.append(label, categoryLabel);
-      elements.settingsSearchResults.append(button);
-    }
-  }
-  elements.settingsSearchResults.hidden = false;
-  elements.settingsSearch.setAttribute("aria-expanded", "true");
-}
-
 function syncSettingsConnectionSummary() {
   if (!elements.settingsReforgeStatus) return;
   const healthText = elements.health.textContent ?? "";
@@ -1624,190 +1524,6 @@ function syncSettingsConnectionSummary() {
   elements.settingsReforgeStatus.textContent = reforgeStatus;
   elements.settingsDiscordStatus.textContent = discordStatus;
   elements.settingsUpdateStatus.textContent = updateStatus;
-}
-
-async function loadStorageSettings() {
-  try {
-    storageSettingsState = await getJson("/api/storage/settings");
-    const pending = storageSettingsState.pendingOutputDir ?? "";
-    if (!elements.storageTargetOutputDir.value || storageSettingsState.pendingStatus === "pending") {
-      elements.storageTargetOutputDir.value = pending;
-    }
-    renderStorageSettings();
-    if (storageSettingsState.source !== "env") {
-      setStorageStatus(storageSettingsState.pendingStatus === "pending"
-        ? "移行を予約しています。サーバーを通常終了して再起動するとコピーが始まります。"
-        : storageSettingsState.pendingStatus === "failed"
-          ? "前回の移行に失敗しました。内容を確認して再予約するか、予約を解除してください。"
-          : "保存先を確認しました。");
-    }
-  } catch (error) {
-    // 保存先設定の取得失敗で、他の設定画面の初期化を止めない。
-    setStorageStatus(`保存先設定を取得できません: ${error.message}`);
-    elements.storageTargetOutputDir.disabled = true;
-    elements.storagePlanButton.disabled = true;
-    elements.storageReserveButton.disabled = true;
-    elements.storageCancelButton.disabled = true;
-  }
-}
-
-function renderStorageSettings() {
-  const settings = storageSettingsState;
-  if (!settings) return;
-  setStoragePathText(elements.storageCurrentOutputDir, settings.currentOutputDir, "未確認");
-  setStoragePathText(elements.storagePendingOutputDir, settings.pendingOutputDir, settings.pendingStatus
-    ? settings.pendingStatus === "failed" ? "前回予約（失敗）" : "次回起動時に適用"
-    : "なし");
-  elements.storageOutputSource.textContent = settings.source === "env"
-    ? "環境変数 LOCAL_IMAGE_CHAT_OUTPUT_DIR"
-    : settings.source === "stored" ? "この画面で保存した設定" : "既定の outputs/";
-  elements.storageFavoritesFollow.textContent = settings.favorites?.followsOutputDir
-    ? "追従する（output/favorite）"
-    : "追従しない（LOCAL_IMAGE_CHAT_FAVORITES_DIR）";
-  if (settings.source === "env") {
-    elements.storageTargetOutputDir.disabled = true;
-    elements.storageTargetOutputDir.title = "LOCAL_IMAGE_CHAT_OUTPUT_DIRを変更して再起動してください";
-    setStorageStatus("環境変数で固定されています。LOCAL_IMAGE_CHAT_OUTPUT_DIRを変更して再起動してください。");
-  }
-  if (settings.lastMigration) {
-    const last = settings.lastMigration;
-    elements.storageLastMigration.textContent = last.status === "completed"
-      ? `前回の移行: 完了（${Number(last.copiedFiles ?? 0).toLocaleString("ja-JP")}ファイル / ${formatStorageBytes(last.copiedBytes)}）。旧保存先は手動確認まで残っています。`
-      : `前回の移行: 失敗（${last.reason ?? "原因を確認できませんでした"}）。部分コピーは自動削除していません。`;
-  } else {
-    elements.storageLastMigration.textContent = "前回の移行結果: なし";
-  }
-  updateStorageButtons();
-}
-
-function setStoragePathText(element, value, fallback) {
-  if (!element) return;
-  const text = value || fallback;
-  element.textContent = text;
-  element.title = value || "";
-}
-
-function setStorageStatus(message) {
-  if (elements.storageStatus) elements.storageStatus.textContent = String(message ?? "");
-}
-
-function updateStorageButtons() {
-  if (!elements.storageTargetOutputDir || !elements.storagePlanButton) return;
-  const editable = storageSettingsState?.editable === true;
-  const pending = storageSettingsState?.pendingStatus;
-  const hasTarget = Boolean(elements.storageTargetOutputDir.value.trim());
-  elements.storageTargetOutputDir.disabled = !editable || storageMigrationBusy || pending === "pending";
-  elements.storagePlanButton.disabled = !editable || storageMigrationBusy || pending === "pending" || !hasTarget;
-  elements.storageReserveButton.disabled = !editable
-    || storageMigrationBusy
-    || !storageMigrationPlan?.valid
-    || !storageMigrationPlan?.restartRequired;
-  elements.storageCancelButton.disabled = !editable || storageMigrationBusy || !pending;
-}
-
-function invalidateStoragePlan() {
-  storageMigrationPlan = null;
-  if (elements.storagePlanSummary) elements.storagePlanSummary.textContent = "入力を変更しました。もう一度「変更内容を確認」してください。";
-  updateStorageButtons();
-}
-
-async function planStorageMigration() {
-  if (storageMigrationBusy || !storageSettingsState?.editable) return;
-  const targetOutputDir = elements.storageTargetOutputDir.value.trim();
-  if (!targetOutputDir) return;
-  storageMigrationBusy = true;
-  storageMigrationPlan = null;
-  updateStorageButtons();
-  setStorageStatus("保存先の安全性・件数・容量・空き容量を確認中…");
-  try {
-    const plan = await postJson("/api/storage/plan", { targetOutputDir });
-    storageMigrationPlan = plan;
-    elements.storagePlanSummary.textContent = describeStoragePlan(plan);
-    setStorageStatus("内容を確認しました。予約する場合は、次回起動時にコピーが行われます。");
-  } catch (error) {
-    elements.storagePlanSummary.textContent = "この保存先は利用できません。空のフォルダまたは専用marker付きフォルダを指定してください。";
-    setStorageStatus(error.message);
-  } finally {
-    storageMigrationBusy = false;
-    updateStorageButtons();
-  }
-}
-
-function describeStoragePlan(plan) {
-  if (!plan?.valid) return plan?.error ?? "保存先を確認できませんでした。";
-  const freeSpace = plan.availableBytesKnown && plan.availableBytes !== null
-    ? `空き容量 ${formatStorageBytes(plan.availableBytes)}`
-    : "空き容量は確認できませんでした";
-  const targetFiles = plan.existingTargetFiles > 0
-    ? `移行先の既存ファイル ${Number(plan.existingTargetFiles).toLocaleString("ja-JP")}件`
-    : "移行先は空です";
-  if (!plan.restartRequired) return "現在と同じ保存先です。変更はありません。";
-  return `コピー対象 ${Number(plan.sourceFiles).toLocaleString("ja-JP")}ファイル / ${formatStorageBytes(plan.sourceBytes)}。${freeSpace}。${targetFiles}。旧保存先は削除せず残します。次回サーバー起動時に適用します。`;
-}
-
-async function reserveStorageMigration() {
-  if (storageMigrationBusy || !storageMigrationPlan?.valid || !storageSettingsState?.editable) return;
-  const confirmed = await confirmModal(
-    "次回サーバー起動時に、既存の保存先から新しい保存先へコピーします。",
-    {
-      title: "画像の保存先を変更",
-      confirmText: "移行を予約する",
-      detail: `${describeStoragePlan(storageMigrationPlan)} 起動完了まで時間がかかる場合があります。自動で旧保存先を削除することはありません。`
-    }
-  );
-  if (!confirmed) return;
-  storageMigrationBusy = true;
-  updateStorageButtons();
-  try {
-    await patchJson("/api/storage/settings", {
-      targetOutputDir: storageMigrationPlan.targetOutputDir,
-      confirmMigration: true
-    });
-    storageMigrationPlan = null;
-    await loadStorageSettings();
-    setStorageStatus("移行を予約しました。生成中でないことを確認し、サーバーを終了して再起動してください。");
-  } catch (error) {
-    setStorageStatus(error.message);
-  } finally {
-    storageMigrationBusy = false;
-    updateStorageButtons();
-  }
-}
-
-async function cancelStorageMigration() {
-  if (storageMigrationBusy || !storageSettingsState?.editable || !storageSettingsState.pendingOutputDir) return;
-  const confirmed = await confirmModal("次回起動時の画像保存先移行の予約を解除しますか？", {
-    title: "移行予約を解除",
-    confirmText: "解除する"
-  });
-  if (!confirmed) return;
-  storageMigrationBusy = true;
-  updateStorageButtons();
-  try {
-    await patchJson("/api/storage/settings", { cancelPending: true });
-    storageMigrationPlan = null;
-    await loadStorageSettings();
-    setStorageStatus("移行予約を解除しました。現在の保存先は変更していません。");
-  } catch (error) {
-    setStorageStatus(error.message);
-  } finally {
-    storageMigrationBusy = false;
-    updateStorageButtons();
-  }
-}
-
-function formatStorageBytes(value) {
-  const bytes = Number(value);
-  if (!Number.isFinite(bytes) || bytes < 0) return "容量不明";
-  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
-  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
-  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${Math.round(bytes)} B`;
-}
-
-function loadInitialView() {
-  return viewFromHash(location.hash)
-    ?? normalizeAppView(localStorage.getItem("localImageChat.view"));
 }
 
 // 旧APIの呼び出し（生成完了時など）を新しい画面切替へ橋渡しする。
@@ -3153,70 +2869,6 @@ function createTriggerWordsNode(triggerWords) {
   return details;
 }
 
-// 画像拡大モーダル（LoRA作例・履歴画像で共用）。外部ライブラリを使わず一度だけ生成する。
-let imageModalEl = null;
-
-function ensureImageModal() {
-  if (imageModalEl) return imageModalEl;
-  const overlay = document.createElement("div");
-  overlay.className = "imageModal hidden";
-  overlay.setAttribute("role", "dialog");
-  overlay.setAttribute("aria-modal", "true");
-  overlay.setAttribute("aria-label", "画像の拡大表示");
-  const img = document.createElement("img");
-  img.className = "imageModalImg";
-  img.alt = "";
-  const close = document.createElement("button");
-  close.type = "button";
-  close.className = "imageModalClose";
-  close.setAttribute("aria-label", "閉じる");
-  close.textContent = "×";
-  close.addEventListener("click", closeImageModal);
-  overlay.append(img, close);
-  // 背景（画像の外側）クリックで閉じる。
-  overlay.addEventListener("click", (event) => {
-    if (event.target === overlay) closeImageModal();
-  });
-  document.body.append(overlay);
-  imageModalEl = overlay;
-  return overlay;
-}
-
-function openStudioInspectionImage() {
-  if (!studioInspection) return;
-  const { generation, image } = studioInspection;
-  openImageModal(originalImageUrl(image), generationTitle(generation));
-}
-
-function handleStudioMainImageKey(event) {
-  const isSpace = event.key === " " || event.key === "Spacebar";
-  if (event.key !== "Enter" && !isSpace) return;
-  if (isSpace) event.preventDefault();
-  if (event.repeat) return;
-  openStudioInspectionImage();
-}
-
-function openImageModal(url, alt = "") {
-  if (!url) return;
-  const overlay = ensureImageModal();
-  const img = overlay.querySelector(".imageModalImg");
-  img.src = url;
-  img.alt = alt;
-  overlay.classList.remove("hidden");
-  document.addEventListener("keydown", handleImageModalKey);
-}
-
-function closeImageModal() {
-  if (!imageModalEl || imageModalEl.classList.contains("hidden")) return;
-  imageModalEl.classList.add("hidden");
-  imageModalEl.querySelector(".imageModalImg").removeAttribute("src");
-  document.removeEventListener("keydown", handleImageModalKey);
-}
-
-function handleImageModalKey(event) {
-  if (event.key === "Escape") closeImageModal();
-}
-
 function toggleLoraSelectionFromPreview(lora) {
   const isSelected = selectedLoras.has(lora.name);
   if (!isSelected && selectedLoras.size >= loraConfig.maxSelected) {
@@ -4166,12 +3818,7 @@ function syncIpAdapterUi() {
         : hasReference
           ? `参照画像を設定済み（OFF）: ${shorten(ipAdapterState.label, 42)}`
           : "参照画像を選択してください";
-  elements.studioMainIpAdapterButton.disabled = generationBusy || runtimeSwitching
-    || !available
-    || !studioInspection?.image?.id;
-  elements.studioMainIpAdapterButton.classList.toggle("hidden", !studioInspection?.image?.id);
-  elements.finalIpAdapterButton.disabled = generationBusy || runtimeSwitching || !available || !finalImage?.id;
-  elements.finalIpAdapterButton.classList.toggle("hidden", !finalImage?.id);
+  studioController.syncWorkflowAvailability({ runtimeSwitching, ipAdapterAvailable: available });
 }
 
 function openIpAdapterSettings() {
@@ -4270,13 +3917,7 @@ async function generateCandidates() {
   syncLorasFromPrompt();
   setResultTab("result");
   elements.emptyState.classList.add("hidden");
-  elements.finalResult.classList.add("hidden");
-  finalImage = null;
-  finalGeneration = null;
-  selectedCandidate = null;
-  studioInspection = null;
-  elements.studioMainPreview.classList.add("hidden");
-  elements.studioMainImage.removeAttribute("src");
+  studioController.resetForGeneration();
   const count = Number(elements.candidateCount.value);
   const modeLabel = generationMode === "inpaint"
     ? "部分修正候補"
@@ -4308,7 +3949,7 @@ async function generateCandidates() {
       settings: readSettings({ candidateCount: count, hiresEnabled: false })
     });
 
-    lastGeneration = {
+    const generation = {
       runtime: data.runtime ?? activeRuntime,
       mode: data.mode,
       sourceImageId: data.sourceImageId,
@@ -4331,18 +3972,20 @@ async function generateCandidates() {
     applyIpAdapterMetadata(data.ipAdapter);
     applyGeneratedPromptResult(data, description);
     elements.explanation.textContent = data.explanation;
-    renderCandidates(data.images);
+    studioController.setCandidates(generation, data.images);
     elements.resultContent.classList.remove("hidden");
     await loadHistory();
   } catch (error) {
     showError(error.message);
-    if (!lastGeneration) elements.emptyState.classList.remove("hidden");
+    if (!studioController.getLastGeneration()) elements.emptyState.classList.remove("hidden");
   } finally {
     setBusy(false);
   }
 }
 
 async function finishSelected() {
+  const selectedCandidate = studioController.getSelectedCandidate();
+  const lastGeneration = studioController.getLastGeneration();
   if (!selectedCandidate || !lastGeneration) return;
   const sourceRuntime = runtimeForGeneration(lastGeneration);
   if (!sourceRuntime || !runtimeSupports("hires", sourceRuntime)) {
@@ -4415,8 +4058,7 @@ function carryStructuredPrompt(source) {
 // 高解像度仕上げの結果を「生成結果」タブへ表示する共通処理。
 function presentHiresResult(data, description, eyebrow, title) {
   const finished = data.images[0];
-  finalImage = finished;
-  finalGeneration = {
+  const generation = {
     runtime: data.runtime ?? activeRuntime,
     mode: data.mode,
     sourceImageId: data.sourceImageId,
@@ -4437,30 +4079,7 @@ function presentHiresResult(data, description, eyebrow, title) {
     images: data.images
   };
   applyIpAdapterMetadata(data.ipAdapter);
-  elements.finalEyebrow.textContent = eyebrow;
-  elements.finalTitle.textContent = title;
-  configureThumbnailImage(elements.resultImage, finished, { eager: true });
-  elements.seedText.textContent = `Seed ${finished.seed}`;
-  elements.resolutionText.textContent = `${finished.width} × ${finished.height}`;
-  elements.downloadLink.href = originalImageUrl(finished);
-  elements.downloadLink.download = finished.filename;
-  elements.favoriteFinalButton.dataset.favoriteImage = finished.id;
-  elements.favoriteFinalButton.dataset.favoriteStyle = "label";
-  imageFavorites.set(finished.id, Boolean(finished.favorite));
-  renderFavoriteButton(elements.favoriteFinalButton, Boolean(finished.favorite));
-  if (finished.discord) discordStates.set(finished.id, finished.discord);
-  elements.finalDiscordStatus.dataset.discordImage = finished.id;
-  renderDiscordStatusNode(elements.finalDiscordStatus, finished.id);
-  if (finished.discordGeneration) discordGenerationStates.set(finished.id, finished.discordGeneration);
-  elements.finalDiscordGenerationStatus.dataset.discordGenerationImage = finished.id;
-  renderDiscordGenerationStatusNode(elements.finalDiscordGenerationStatus, finished.id);
-  elements.emptyState.classList.add("hidden");
-  elements.resultContent.classList.remove("hidden");
-  elements.studioMainPreview.classList.add("hidden");
-  elements.finalResult.classList.remove("hidden");
-  setStudioInspection(finalGeneration, finished);
-  syncStudioOutputStats(finalGeneration, finished);
-  elements.finalResult.scrollIntoView({ behavior: "smooth", block: "start" });
+  studioController.presentFinal(generation, finished, { eyebrow, title });
 }
 
 // ギャラリー画像を起点に、元画像ベース(img2img)で高解像度仕上げする。
@@ -4526,242 +4145,11 @@ async function hiresFromGallery(generation, image) {
 // ---- パラメータ比較（実験） ----
 
 async function loadExperiments() {
-  try {
-    const data = await getJson("/api/experiments?limit=50");
-    experimentParameters = data.parameters ?? {};
-    experimentLimits = data.limits ?? experimentLimits;
-    knownExperiments = data.experiments ?? [];
-  } catch {
-    knownExperiments = [];
-  }
-  renderExperimentParameterSelect();
-  renderExperimentBadge();
-  restoreExperimentMonitoring();
-}
-
-// 起動時やギャラリー再読込時に、未完了の実験が残っていれば監視を復元する。
-// サーバー側でジョブが消えた実験は取得時に終端状態へ正規化されるため、ここには出てこない。
-function restoreExperimentMonitoring() {
-  if (experimentPolling) return;
-  const running = knownExperiments.find((item) => item.status === "running");
-  if (running) {
-    activeExperimentId = running.id;
-    void pollExperiment(running.id);
-  }
-  syncExperimentControls();
-}
-
-// 比較実験は同時に1本だけ。実行中は開始ボタンを押せないようにする。
-function syncExperimentControls() {
-  const running = Boolean(activeExperimentId);
-  elements.runExperimentButton.disabled = running;
-  elements.cancelExperimentButton.disabled = !running;
-}
-
-function renderExperimentParameterSelect() {
-  const select = elements.experimentParameter;
-  const current = select.value;
-  select.replaceChildren();
-  for (const [key, definition] of Object.entries(experimentParameters)) {
-    select.append(new Option(definition.label, key));
-  }
-  if (!select.options.length) select.append(new Option("LoRA weight", "loraWeight"));
-  if ([...select.options].some((option) => option.value === current)) select.value = current;
-  syncExperimentTargetVisibility();
+  await experimentController.load();
 }
 
 function syncExperimentTargetVisibility() {
-  const parameter = elements.experimentParameter.value;
-  const needsTarget = experimentParameters[parameter]?.needsTarget === true || parameter === "loraWeight";
-  elements.experimentTargetRow.classList.toggle("hidden", !needsTarget);
-  if (!needsTarget) return;
-  const select = elements.experimentTarget;
-  const current = select.value;
-  select.replaceChildren();
-  for (const name of selectedLoras.keys()) {
-    const lora = findLoraByName(name);
-    select.append(new Option(lora?.displayName ?? name, name));
-  }
-  if (!select.options.length) select.append(new Option("LoRAを選択してください", ""));
-  if ([...select.options].some((option) => option.value === current)) select.value = current;
-}
-
-function renderExperimentBadge() {
-  const running = knownExperiments.find((item) => item.status === "running");
-  elements.experimentBadge.textContent = running
-    ? `${running.completed}/${running.total} 生成中`
-    : knownExperiments.length
-      ? `${knownExperiments.length}件の実験`
-      : "未実行";
-}
-
-async function runExperiment() {
-  clearError();
-  if (activeExperimentId) {
-    return toast.warning("別の比較実験が実行中です。完了または中断してから開始してください");
-  }
-  const parameter = elements.experimentParameter.value;
-  const definition = experimentParameters[parameter];
-  const needsTarget = definition?.needsTarget === true || parameter === "loraWeight";
-  const target = needsTarget ? elements.experimentTarget.value : "";
-  if (needsTarget && !target) return toast.warning("比較する対象LoRAを選択してください");
-
-  const values = elements.experimentValues.value
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
-  if (values.length < 2) return toast.warning("試す値をカンマ区切りで2つ以上入力してください");
-  if (values.length > experimentLimits.maxImages) {
-    return toast.warning(`比較生成は最大${experimentLimits.maxImages}枚までです`);
-  }
-  if (values.length > 4) {
-    const confirmed = await confirmModal(
-      `${values.length}枚を1枚ずつ順番に生成します。時間がかかりますがよろしいですか？`,
-      { title: "比較生成の確認", confirmText: "生成する" }
-    );
-    if (!confirmed) return;
-  }
-
-  const description = promptDescription;
-  if (!description && !currentPositivePrompt().trim()) {
-    return toast.warning("生成したい画像を日本語で入力するか、Promptを入力してください");
-  }
-  if (generationMode !== "txt2img" && !initImageReference) {
-    return toast.warning(`${generationMode === "inpaint" ? "部分修正" : "img2img"}の参照画像を選択してください`);
-  }
-
-  // Seed固定: -1のままだと値ごとに別Seedになるため、実行前に確定させる。
-  let fixedSeed = null;
-  if (elements.experimentFixSeed.checked && parameter !== "seed") {
-    let seed = Number(elements.seed.value);
-    if (!Number.isFinite(seed) || seed < 0) {
-      seed = Math.floor(Math.random() * 4294967295);
-      elements.seed.value = String(seed);
-    }
-    fixedSeed = seed;
-  }
-
-  syncLorasFromPrompt();
-  await withBusy(elements.runExperimentButton, "開始中…", async () => {
-    try {
-      if (shouldRequestPrompt(description)) {
-        elements.experimentStatus.textContent = "日本語からプロンプトを作成中…";
-        await requestPrompt(description);
-      }
-      const baseRequest = {
-        ...runtimePayload(),
-        mode: generationMode,
-        contentRating: selectedContentRating(),
-        description,
-        ...readTitlePayload(),
-        ...readPromptPayload(),
-        loras: readSelectedLoras(),
-        promptBoosts: readPromptBoosts(),
-        ...readInitImagePayload(),
-        ...readInpaintPayload(),
-        ...readIpAdapterPayload(),
-        settings: readSettings({ candidateCount: 1, hiresEnabled: false })
-      };
-      const { experiment } = await postJson("/api/experiments", {
-        baseRequest,
-        parameter,
-        target,
-        values,
-        fixedSeed
-      });
-      activeExperimentId = experiment.id;
-      toast.info(`比較生成を開始しました（${experiment.total}枚）`);
-      startQueuePolling();
-      void pollExperiment(experiment.id);
-    } catch (error) {
-      elements.experimentStatus.textContent = error.message;
-      toast.error(error.message);
-    }
-  });
-  // withBusyがdisabledを元へ戻すため、実行状態を最後に反映し直す。
-  syncExperimentControls();
-}
-
-async function pollExperiment(experimentId) {
-  // 監視は1本だけ。実行中の実験IDは上書きしない。
-  if (experimentPolling) return;
-  experimentPolling = true;
-  activeExperimentId = experimentId;
-  syncExperimentControls();
-  elements.experimentProgress.classList.remove("hidden");
-  try {
-    while (true) {
-      const { experiment } = await getJson(`/api/experiments/${experimentId}`);
-      renderExperimentProgress(experiment);
-      if (experiment.status !== "running") {
-        elements.experimentStatus.textContent = experiment.status === "cancelled"
-          ? `中断しました（完了 ${experiment.completed}/${experiment.total} 枚は履歴に残ります）`
-          : `完了: ${experiment.completed}/${experiment.total} 枚`;
-        if (experiment.status === "cancelled") toast.warning("比較生成を中断しました");
-        else toast.success(`比較生成が完了しました（${experiment.completed}枚）`);
-        await loadHistory();
-        await loadExperiments();
-        return;
-      }
-      await sleep(1000);
-    }
-  } catch (error) {
-    elements.experimentStatus.textContent = `実験の状態を取得できません: ${error.message}`;
-  } finally {
-    experimentPolling = false;
-    activeExperimentId = null;
-    syncExperimentControls();
-  }
-}
-
-function renderExperimentProgress(experiment) {
-  elements.experimentProgress.replaceChildren();
-  const heading = document.createElement("strong");
-  heading.textContent = `${experiment.name}（${experiment.completed}/${experiment.total}）`;
-  elements.experimentProgress.append(heading);
-  for (const run of experiment.runs) {
-    const row = document.createElement("div");
-    row.className = `experimentRun status-${run.status}`;
-    const label = document.createElement("span");
-    label.textContent = `${run.index}. ${experiment.target ? `${experiment.target} ` : ""}${run.value}`;
-    const state = document.createElement("span");
-    state.textContent = {
-      queued: "待機中", running: run.message || "生成中", done: "完了",
-      failed: run.error || "失敗", cancelled: "中止"
-    }[run.status] ?? run.status;
-    // 中断理由（サーバー再起動によるものなど）はツールチップで確認できる。
-    if (run.error) state.title = run.error;
-    row.append(label, state);
-    // 自動リカバリで設定を下げたrunは、公平な比較にならないことを明示する。
-    if (run.recovered) row.append(recoveredBadge(run.retryInfo));
-    elements.experimentProgress.append(row);
-  }
-  const running = experiment.runs.find((run) => run.status === "running");
-  elements.experimentStatus.textContent = running
-    ? `${running.index} / ${experiment.total} 生成中・${experiment.target ? `${experiment.target}: ` : ""}${running.value}`
-    : `${experiment.completed} / ${experiment.total} 完了`;
-  renderExperimentBadge();
-}
-
-// 「設定を下げて再試行」バッジ。何を下げたかはtitleで確認できる。
-function recoveredBadge(retryInfo) {
-  const badge = document.createElement("span");
-  badge.className = "experimentRecovered";
-  badge.textContent = "設定を下げて再試行";
-  badge.title = describeRetryInfo(retryInfo) || "自動リカバリのため設定を下げて再試行しました";
-  return badge;
-}
-
-async function cancelExperiment() {
-  if (!activeExperimentId) return;
-  await withBusy(elements.cancelExperimentButton, "中断中…", async () => {
-    try {
-      await postJson(`/api/experiments/${activeExperimentId}/cancel`, {});
-    } catch (error) {
-      toast.error(error.message);
-    }
-  });
-  syncExperimentControls();
+  experimentController.syncTargetVisibility();
 }
 
 async function requestPrompt(description) {
@@ -5522,237 +4910,12 @@ function applyImportedTriggerWords(entries, mode) {
   syncAppliedTriggerWords();
 }
 
-// ---- AI共有（上部ツールバー: Grok用に全コピー / AI共有CSVを更新） ----
-
-// 画面で手入力したTrigger Words。サーバーはこれを最優先でCSVへ入れる。
-function manualTriggerWordsPayload() {
-  return Object.fromEntries(loraTriggers);
-}
-
-function renderShareStatus(state) {
-  if (!state?.generatedAt) {
-    elements.shareBarStatus.textContent = "AI共有CSVは未作成です。「AI共有CSVを更新」で作成できます。";
-    return;
-  }
-  const text =
-    `AI共有CSV: ${state.rowCount}件（Trigger Words ${state.triggerWordCount}件）・${formatDate(state.generatedAt)}・${state.path}`;
-  elements.shareBarStatus.textContent = text;
-  // スマホでは2行に切り詰めて表示するため、全文はtitleでも見られるようにする。
-  elements.shareBarStatus.title = text;
-}
-
-async function loadShareState() {
-  try {
-    const { state } = await getJson("/api/ai-share");
-    renderShareStatus(state);
-  } catch (error) {
-    elements.shareBarStatus.textContent = `AI共有CSVの状態を取得できません: ${error.message}`;
-  }
-}
-
-async function updateShareCsv() {
-  await withBusy(elements.updateShareCsvButton, "更新中…", async () => {
-    try {
-      const result = await postJson("/api/ai-share/csv", { triggerWords: manualTriggerWordsPayload() });
-      renderShareStatus(result);
-      // 指示テンプレート側のlora_list.csvも同じ内容へ合わせる。
-      if (elements.grokLoraCsv.value !== result.csv) {
-        elements.grokLoraCsv.value = result.csv;
-        await patchJson("/api/prompt-template", { loraCsv: result.csv }).catch(() => {});
-      }
-      toast.success(
-        `AI共有CSVを更新しました: ${result.rowCount}件（Trigger Words ${result.triggerWordCount}件）\n${result.path}`
-      );
-    } catch (error) {
-      toast.error(`AI共有CSVを更新できませんでした: ${error.message}`);
-    }
-  });
-}
-
-async function copyGrokShare() {
-  await withBusy(elements.copyGrokShareButton, "作成中…", async () => {
-    try {
-      const result = await postJson("/api/ai-share/grok", { triggerWords: manualTriggerWordsPayload() });
-      await copyToClipboard(result.markdown);
-      flashLabel(elements.copyGrokShareButton, "Copied!");
-      renderShareStatus({ ...result, generatedAt: new Date().toISOString() });
-      toast.success(`Grok用データをコピーしました（LoRA ${result.rowCount}件）`, {
-        action: { label: "内容を確認", onSelect: () => openSharePreview(result.markdown) }
-      });
-    } catch (error) {
-      toast.error(`Grok用データをコピーできませんでした: ${error.message}`);
-    }
-  });
-}
-
-function openSharePreview(markdown) {
-  openModal({
-    title: "Grok用データ",
-    subtitle: "クリップボードへコピーした内容です",
-    size: "large",
-    build: (body) => {
-      const preview = document.createElement("pre");
-      preview.className = "sharePreview";
-      preview.textContent = markdown;
-      body.append(preview);
-    },
-    actions: [{ label: "閉じる", value: true, primary: true }]
-  });
-}
-
-// LoRA一覧やTrigger Wordsが変わったときの自動同期。
-// 失敗しても通常の操作を止めない（best-effort）。
-function scheduleShareCsvSync() {
-  clearTimeout(shareSyncTimer);
-  shareSyncTimer = setTimeout(() => void syncShareCsvQuietly(), SHARE_SYNC_DEBOUNCE);
-}
-
-async function syncShareCsvQuietly() {
-  clearTimeout(shareSyncTimer);
-  try {
-    const result = await postJson("/api/ai-share/csv", { triggerWords: manualTriggerWordsPayload() });
-    renderShareStatus(result);
-  } catch (error) {
-    console.warn(`[AI共有] CSVの自動更新に失敗しました: ${error.message}`);
-  }
-}
-
-// ---- Grok向け指示テンプレート ----
-
-async function loadPromptTemplate() {
-  try {
-    const { template } = await getJson("/api/prompt-template");
-    elements.grokInstructions.value = template.instructions || DEFAULT_GROK_INSTRUCTIONS;
-    elements.grokSetupDoc.value = template.setupDoc;
-    elements.grokLoraCsv.value = template.loraCsv;
-    renderPromptTemplateStatus(template);
-  } catch (error) {
-    elements.grokTemplateStatus.textContent = `指示テンプレートを取得できません: ${error.message}`;
-  }
-}
-
-function renderPromptTemplateStatus(template) {
-  const parts = [template.updatedAt ? `保存: ${formatDate(template.updatedAt)}` : "未保存"];
-  if (template.loraCsvUpdatedAt) parts.push(`lora_list.csv更新: ${formatDate(template.loraCsvUpdatedAt)}`);
-  elements.grokTemplateStatus.textContent = parts.join("・");
-}
-
-async function savePromptTemplate({ silent = false } = {}) {
-  const { template } = await patchJson("/api/prompt-template", {
-    instructions: elements.grokInstructions.value,
-    setupDoc: elements.grokSetupDoc.value,
-    loraCsv: elements.grokLoraCsv.value
-  });
-  renderPromptTemplateStatus(template);
-  if (!silent) toast.success("指示テンプレートを保存しました");
-  return template;
-}
-
-async function copyGrokTemplate() {
-  const text = buildGrokRequestText({
-    instructions: elements.grokInstructions.value,
-    setupDoc: elements.grokSetupDoc.value,
-    loraCsv: elements.grokLoraCsv.value
-  });
-  if (!text.trim()) return toast.warning("コピーできる内容がありません");
-  try {
-    await copyToClipboard(text);
-    flashLabel(elements.copyGrokTemplateButton, "Copied!");
-    // コピーした内容をそのまま次回も使えるよう、保存も済ませておく。
-    await savePromptTemplate({ silent: true });
-  } catch (error) {
-    toast.error(`コピーできませんでした: ${error.message}`);
-  }
-}
-
-// 導入済みLoRAからlora_list.csvを作り直す（生成はサーバー側のAI共有CSVと共通）。
-async function updateLoraCsvFromInstalled() {
-  await withBusy(elements.generateLoraCsvButton, "更新中…", async () => {
-    try {
-      const result = await postJson("/api/ai-share/csv", { triggerWords: manualTriggerWordsPayload() });
-      elements.grokLoraCsv.value = result.csv;
-      renderShareStatus(result);
-      await savePromptTemplate({ silent: true });
-      toast.success(`lora_list.csvを${result.rowCount}件で更新しました（Trigger Words ${result.triggerWordCount}件）`);
-    } catch (error) {
-      toast.error(`lora_list.csvを更新できませんでした: ${error.message}`);
-    }
-  });
-}
-
-async function resetGrokInstructions() {
-  const confirmed = await confirmModal("指示テンプレートを既定の内容へ戻します。よろしいですか？", {
-    title: "指示テンプレートの初期化",
-    confirmText: "戻す"
-  });
-  if (!confirmed) return;
-  elements.grokInstructions.value = DEFAULT_GROK_INSTRUCTIONS;
-  await savePromptTemplate({ silent: true });
-  toast.info("既定の指示文へ戻しました");
-}
-
 // 日本語からの自動生成が必要かどうか。
 // 分割入力に中身があれば生成せず、説明文が無い場合は自動生成そのものができない。
 function shouldRequestPrompt(description) {
   if (!description) return false;
   if (rawPromptOverride) return !elements.prompt.value.trim() || promptDescription !== description;
   return !buildCombinedPrompt().trim();
-}
-
-function renderCandidates(images) {
-  elements.candidateGrid.replaceChildren();
-  elements.candidateSummary.textContent = `${images.length}枚生成`;
-
-  images.forEach((candidate, index) => {
-    const card = document.createElement("article");
-    card.className = "candidateCard";
-    card.setAttribute("aria-label", `候補${index + 1}、Seed ${candidate.seed}`);
-
-    const image = document.createElement("img");
-    image.className = "candidateImage";
-    configureThumbnailImage(image, candidate, { eager: index < 4 });
-    image.alt = `生成候補 ${index + 1}`;
-    image.title = "クリックして選択";
-    image.addEventListener("click", () => selectCandidate(candidate, card));
-
-    const footer = document.createElement("footer");
-    const label = document.createElement("span");
-    label.textContent = `#${index + 1} · Seed ${candidate.seed}`;
-    footer.append(label);
-    card.append(image, footer);
-    elements.candidateGrid.append(card);
-  });
-
-  const first = elements.candidateGrid.firstElementChild;
-  if (images[0] && first) selectCandidate(images[0], first);
-}
-
-function selectCandidate(candidate, card) {
-  selectedCandidate = candidate;
-  for (const item of elements.candidateGrid.children) item.classList.remove("selected");
-  card.classList.add("selected");
-  const sourceRuntime = lastGeneration ? runtimeForGeneration(lastGeneration) : null;
-  elements.finishButton.disabled = !sourceRuntime || !runtimeSupports("hires", sourceRuntime);
-  elements.lockCompositionButton.disabled = false;
-  if (lastGeneration) {
-    elements.studioMainImage.src = originalImageUrl(candidate);
-    elements.studioMainImage.alt = generationTitle(lastGeneration);
-    elements.studioMainPreview.classList.remove("hidden");
-    syncCompareControl(elements.studioMainCompareButton, candidate.id);
-    setStudioInspection(lastGeneration, candidate);
-    syncStudioOutputStats(lastGeneration, candidate);
-  }
-  const finishLabel = lastGeneration?.mode === "inpaint"
-    ? "選択画像を部分修正仕上げ"
-    : lastGeneration?.mode === "img2img"
-      ? "選択画像をimg2img仕上げ"
-      : "選択画像をHires.fix";
-  elements.finishButton.textContent = lastGeneration?.mode === "txt2img" || !lastGeneration
-    ? "Hires.fix"
-    : "仕上げ";
-  elements.finishButton.title = finishLabel;
-  elements.finishButton.setAttribute("aria-label", finishLabel);
-  syncRuntimeUi();
 }
 
 async function submitGeneration(payload, { allowRecovery = true } = {}) {
@@ -5767,7 +4930,7 @@ async function submitGeneration(payload, { allowRecovery = true } = {}) {
   elements.cancelJobButton.disabled = false;
   // 生成はサーバー側のジョブとして進むので、タブを移動しても継続する。
   // 右上のキュー表示へ即座に反映させる。
-  startQueuePolling();
+  queueController.startPolling();
 
   try {
     while (true) {
@@ -5877,166 +5040,9 @@ async function cancelActiveJob() {
   }
 }
 
-// ---- ヘッダー右上のキュー表示 ----
-
-const queueHandlers = {
-  onCancelGeneration: async (entry) => {
-    try {
-      await deleteJson(`/api/jobs/${entry.id}`);
-      toast.info("生成を中止しました");
-    } catch (error) {
-      toast.error(error.message);
-    }
-    await refreshQueue();
-  },
-  onCancelComparison: async (entry) => {
-    try {
-      await postJson(`/api/experiments/${entry.id}/cancel`, {});
-      toast.warning("比較実験を中断しました");
-    } catch (error) {
-      toast.error(error.message);
-    }
-    await refreshQueue();
-    await loadExperiments();
-  },
-  onOpenComparisonResult: (entry) => void openComparisonResult(entry.id)
-};
-
-async function refreshQueue() {
-  try {
-    queueSnapshot = await getJson("/api/queue");
-  } catch {
-    // 取得できないときは前回の表示を保つ（偽の状態を出さない）
-    return null;
-  }
-  renderQueueIndicator();
-  notifyQueueChanges(queueSnapshot);
-  queuePanel?.render(queueSnapshot);
-  return queueSnapshot;
-}
-
-function startQueuePolling() {
-  if (queuePolling) return;
-  queuePolling = true;
-  void (async () => {
-    let idle = 0;
-    try {
-      while (idle < QUEUE_IDLE_TICKS) {
-        const snapshot = await refreshQueue();
-        const active = Number(snapshot?.summary?.activeCount) || 0;
-        idle = active || queuePanel ? 0 : idle + 1;
-        await sleep(QUEUE_POLL_INTERVAL);
-      }
-    } finally {
-      queuePolling = false;
-      // 「生成完了」は一時表示なので、落ち着いたら消す（失敗表示は残す）。
-      hideIdleQueueIndicator();
-    }
-  })();
-}
-
-function hideIdleQueueIndicator() {
-  if (queuePanel) return;
-  if (Number(queueSnapshot?.summary?.activeCount) || 0) return;
-  if (summarizeQueue(queueSnapshot).tone === "error") return;
-  elements.queueIndicator.classList.add("hidden");
-}
-
-function renderQueueIndicator() {
-  const summary = summarizeQueue(queueSnapshot);
-  elements.queueIndicator.classList.toggle("hidden", !summary.visible);
-  elements.queueIndicator.dataset.tone = summary.tone;
-  elements.queueIndicatorText.textContent = summary.text;
-  elements.queueIndicator.title = summary.visible
-    ? `${summary.text} / クリックで詳細`
-    : "生成キューの詳細を表示";
-}
-
-// 完了・失敗を検知して通知し、ギャラリーを自動更新する。
-function notifyQueueChanges(snapshot) {
-  const terminal = new Set();
-  const fresh = [];
-  for (const entry of [...(snapshot.generation ?? []), ...(snapshot.comparison ?? [])]) {
-    if (!QUEUE_TERMINAL_STATUSES.includes(entry.status)) continue;
-    const key = `${entry.type}:${entry.id}:${entry.status}`;
-    terminal.add(key);
-    if (queueSeenTerminal && !queueSeenTerminal.has(key)) fresh.push(entry);
-  }
-  const firstLoad = queueSeenTerminal === null;
-  queueSeenTerminal = terminal;
-  if (firstLoad || !fresh.length) return;
-
-  let refreshGallery = false;
-  for (const entry of fresh) {
-    if (entry.status === "cancelled") continue;
-    if (entry.status === "failed") {
-      toast.error(entry.type === "comparison"
-        ? `比較実験が失敗しました: ${friendlyQueueError(entry.errorMessage)}`
-        : `生成に失敗しました: ${friendlyQueueError(entry.errorMessage)}`);
-      continue;
-    }
-    refreshGallery = true;
-    if (entry.type === "comparison") {
-      const failed = Number(entry.failedCases) || 0;
-      toast.success(failed
-        ? `比較実験が終了しました（${entry.completedCases}/${entry.totalCases}完了・${failed}件失敗）`
-        : "比較実験が完了しました", {
-        action: { label: "結果を見る", onSelect: () => void openComparisonResult(entry.id) }
-      });
-      continue;
-    }
-    // 生成結果タブを見ているときは画面に出るので、通知はギャラリー閲覧中だけにする。
-    if (isGalleryTabVisible()) toast.success("生成が完了しました");
-  }
-  if (refreshGallery) void loadHistory();
-}
-
-function isGalleryTabVisible() {
-  return currentView === "gallery";
-}
-
-// 内部エラーをそのまま出さないよう、短いメッセージへ丸める。
-function friendlyQueueError(message) {
-  const text = String(message ?? "").split("\n")[0].trim();
-  if (!text) return "詳細不明のエラーです";
-  return text.length > 160 ? `${text.slice(0, 160)}…` : text;
-}
-
-function openQueuePanel() {
-  if (queuePanel) return;
-  let panelBody = null;
-  const modal = openModal({
-    title: "生成キュー",
-    subtitle: "画像生成と比較実験の実行状況",
-    size: "medium",
-    build: (body) => {
-      panelBody = body;
-      body.append(buildQueuePanel(queueSnapshot, queueHandlers));
-    },
-    actions: [{ label: "閉じる", primary: true }]
-  });
-  queuePanel = {
-    close: () => modal.close(),
-    render: (snapshot) => {
-      if (!panelBody?.isConnected) return;
-      panelBody.replaceChildren(buildQueuePanel(snapshot, queueHandlers));
-    }
-  };
-  void modal.promise.then(() => { queuePanel = null; });
-  startQueuePolling();
-}
-
 // 比較実験の結果へ移動する導線。ギャラリーの実験詳細を開く。
 async function openComparisonResult(experimentId) {
-  queuePanel?.close();
-  await loadHistory();
-  await loadExperiments();
-  const experiment = knownExperiments.find((item) => item.id === experimentId);
-  if (!experiment) return toast.warning("実験が見つかりません");
-  setResultTab("gallery");
-  setGalleryView("experiments");
-  renderExperimentCards();
-  openExperimentDetail(experiment);
+  await experimentController.openResult(experimentId);
 }
 
 // ---- 入力欄のクリア ----
@@ -6143,7 +5149,9 @@ function syncPromptClearButtons() {
 }
 
 function lockSelectedComposition() {
-  if (lastGeneration && selectedCandidate) activateCompositionLock(lastGeneration, selectedCandidate);
+  const generation = studioController.getLastGeneration();
+  const image = studioController.getSelectedCandidate();
+  if (generation && image) activateCompositionLock(generation, image);
 }
 
 async function activateCompositionLock(recipe, image) {
@@ -6203,7 +5211,7 @@ async function loadRecipeFields(recipe, image) {
   }
   syncSamplerLabels();
   elements.seed.value = image.seed;
-  syncStudioOutputStats();
+  studioController.syncOutputStats();
   elements.candidateCount.value = "1";
   handleCandidateCountChange();
   handleImg2ImgDenoisingInput();
@@ -6257,460 +5265,12 @@ function restorePromptFieldsFromRecipe(recipe) {
   setPromptFields("", negativePrompt, description, { source: "manual" });
 }
 
-async function toggleFavorite(image, button) {
-  const next = !image.favorite;
-  button.disabled = true;
-  try {
-    // 確認ダイアログは出さない。Discord送信はサーバー側で非同期に始まる。
-    const data = await patchJson(`/api/history/${image.id}/favorite`, { favorite: next });
-    image.favorite = data.image.favorite;
-    button.classList.toggle("active", image.favorite);
-    // どこから操作しても、開いている全ての表示へ即時反映する。
-    applyImageFavorite(image.id, image.favorite);
-    preferenceData = data.preferences;
-    renderPreferenceSummary();
-    applyDiscordState(image.id, data.image.discord);
-    await loadHistory();
-    await loadStudioRecent();
-  } catch (error) {
-    showError(error.message);
-  } finally {
-    button.disabled = false;
-  }
-}
-
-// ---- 画像Favoriteの表示同期 ----
-
-function rememberImageFavorites(generations) {
-  for (const generation of generations ?? []) {
-    for (const image of generation.images ?? []) {
-      if (image?.id) imageFavorites.set(image.id, Boolean(image.favorite));
-    }
-  }
-}
-
-function applyImageFavorite(imageId, favorite) {
-  imageFavorites.set(imageId, Boolean(favorite));
-  refreshFavoriteButtons(imageId);
-}
-
-// data-favorite-image を持つボタン（一覧・詳細・最新結果）をまとめて更新する。
-function refreshFavoriteButtons(imageId) {
-  const favorite = imageFavorites.get(imageId) === true;
-  const selector = `[data-favorite-image="${CSS.escape(String(imageId))}"]`;
-  for (const button of document.querySelectorAll(selector)) renderFavoriteButton(button, favorite);
-}
-
-function renderFavoriteButton(button, favorite) {
-  const accessibleLabel = favorite ? "お気に入りから削除" : "お気に入りに追加";
-  button.classList.toggle("active", favorite);
-  button.setAttribute("aria-pressed", String(favorite));
-  button.setAttribute("aria-label", accessibleLabel);
-  button.textContent = button.dataset.favoriteStyle === "label"
-    ? (favorite ? "★ Favorite" : "☆ Favorite")
-    : (favorite ? "★" : "☆");
-  button.title = accessibleLabel;
-}
-
-// 画像用のFavoriteボタン（星）。表示場所ごとにスタイルだけ変える。
-function createFavoriteButton(image, { style = "star", className = "favoriteButton" } = {}) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = className;
-  button.dataset.favoriteImage = image.id;
-  button.dataset.favoriteStyle = style;
-  imageFavorites.set(image.id, Boolean(image.favorite));
-  button.addEventListener("click", (event) => {
-    event.stopPropagation();
-    void toggleFavorite(image, button);
-  });
-  // まだDOMへ入っていないので、この場で初期表示を作る。
-  renderFavoriteButton(button, Boolean(image.favorite));
-  return button;
-}
-
-// ---- Discord送信状態の表示 ----
-
-function applyDiscordState(imageId, state) {
-  if (!imageId || !state) return;
-  discordStates.set(imageId, state);
-  refreshDiscordBadges(imageId);
-  if (state.status === "sending") void watchDiscordSend(imageId);
-}
-
-function applyDiscordGenerationState(imageId, state) {
-  if (!imageId || !state) return;
-  discordGenerationStates.set(imageId, state);
-  refreshDiscordBadges(imageId);
-  if (state.status === "sending") void watchDiscordGenerationSend(imageId);
-}
-
-function rememberDiscordStates(generations) {
-  for (const generation of generations ?? []) {
-    for (const image of generation.images ?? []) {
-      if (!image?.id) continue;
-      if (image.discord) {
-        discordStates.set(image.id, image.discord);
-        if (image.discord.status === "sending") void watchDiscordSend(image.id);
-      }
-      if (image.discordGeneration) {
-        discordGenerationStates.set(image.id, image.discordGeneration);
-        if (image.discordGeneration.status === "sending") void watchDiscordGenerationSend(image.id);
-      }
-    }
-  }
-}
-
-function createDiscordStatusNode(image) {
-  const node = document.createElement("span");
-  node.className = "discordStatus";
-  node.dataset.discordImage = image.id;
-  if (image.discord) discordStates.set(image.id, image.discord);
-  renderDiscordStatusNode(node, image.id);
-  return node;
-}
-
-function createDiscordGenerationStatusNode(image) {
-  const node = document.createElement("span");
-  node.className = "discordStatus";
-  node.dataset.discordGenerationImage = image.id;
-  if (image.discordGeneration) discordGenerationStates.set(image.id, image.discordGeneration);
-  renderDiscordGenerationStatusNode(node, image.id);
-  return node;
-}
-
-function renderDiscordStatusNode(node, imageId) {
-  const state = discordStates.get(imageId) ?? { status: "not_sent", error: "" };
-  node.replaceChildren();
-  node.className = `discordStatus status-${state.status}`;
-  node.title = state.error || "";
-  if (state.status === "not_sent") {
-    node.classList.add("hidden");
-    return;
-  }
-  const label = document.createElement("span");
-  label.textContent = DISCORD_STATUS_LABELS[state.status] ?? "";
-  node.append(label);
-  // 失敗した画像だけ再送できる（sent / sendingは再送しない）。
-  if (state.status === "failed") {
-    const retry = document.createElement("button");
-    retry.type = "button";
-    retry.className = "discordRetryButton";
-    retry.textContent = "再送";
-    retry.title = state.error || "Discordへ再送する";
-    retry.addEventListener("click", () => void resendToDiscord(imageId, retry));
-    node.append(retry);
-  }
-}
-
-function renderDiscordGenerationStatusNode(node, imageId) {
-  const state = discordGenerationStates.get(imageId) ?? { status: "not_sent", error: "" };
-  node.replaceChildren();
-  node.className = `discordStatus status-${state.status}`;
-  node.title = state.error || "";
-  if (state.status === "not_sent") {
-    node.classList.add("hidden");
-    return;
-  }
-  const label = document.createElement("span");
-  label.textContent = DISCORD_GENERATION_STATUS_LABELS[state.status] ?? "";
-  node.append(label);
-  if (state.status === "failed") {
-    const retry = document.createElement("button");
-    retry.type = "button";
-    retry.className = "discordRetryButton";
-    retry.textContent = "再送";
-    retry.title = state.error || "生成完了通知を再送する";
-    retry.addEventListener("click", () => void resendDiscordGeneration(imageId, retry));
-    node.append(retry);
-  }
-}
-
-function refreshDiscordBadges(imageId) {
-  const selector = `[data-discord-image="${CSS.escape(String(imageId))}"]`;
-  for (const node of document.querySelectorAll(selector)) renderDiscordStatusNode(node, imageId);
-  const generationSelector = `[data-discord-generation-image="${CSS.escape(String(imageId))}"]`;
-  for (const node of document.querySelectorAll(generationSelector)) {
-    renderDiscordGenerationStatusNode(node, imageId);
-  }
-  // 生成結果パネルのバッジはIDが固定なので、対象画像のときだけ更新する。
-  if (finalImage?.id === imageId) {
-    elements.finalDiscordStatus.dataset.discordImage = imageId;
-    renderDiscordStatusNode(elements.finalDiscordStatus, imageId);
-    elements.finalDiscordGenerationStatus.dataset.discordGenerationImage = imageId;
-    renderDiscordGenerationStatusNode(elements.finalDiscordGenerationStatus, imageId);
-  }
-}
-
-// 送信は非同期なので、終わるまで状態だけ見に行く。
-async function watchDiscordSend(imageId) {
-  if (discordWatchers.has(imageId)) return;
-  discordWatchers.add(imageId);
-  try {
-    for (let attempt = 0; attempt < 50; attempt += 1) {
-      await sleep(1200);
-      const { discord } = await getJson(`/api/history/${imageId}/discord`);
-      discordStates.set(imageId, discord);
-      refreshDiscordBadges(imageId);
-      if (discord.status === "sending") continue;
-      // 成功時は静かに。失敗時だけ知らせて再送できるようにする。
-      if (discord.status === "failed") notifyDiscordFailure(imageId, discord);
-      return;
-    }
-  } catch {
-    // 状態取得に失敗しても、Favoriteと画面表示は維持する。
-  } finally {
-    discordWatchers.delete(imageId);
-  }
-}
-
-// 生成完了通知もFavorite通知と同じ状態監視を別チャンネルで行う。
-async function watchDiscordGenerationSend(imageId) {
-  if (discordGenerationWatchers.has(imageId)) return;
-  discordGenerationWatchers.add(imageId);
-  try {
-    for (let attempt = 0; attempt < 50; attempt += 1) {
-      await sleep(1200);
-      const { discord } = await getJson(`/api/history/${imageId}/discord/generation`);
-      discordGenerationStates.set(imageId, discord);
-      refreshDiscordBadges(imageId);
-      if (discord.status === "sending") continue;
-      if (discord.status === "failed") notifyDiscordGenerationFailure(imageId, discord);
-      return;
-    }
-  } catch {
-    // 状態取得に失敗しても、生成結果と履歴の表示は維持する。
-  } finally {
-    discordGenerationWatchers.delete(imageId);
-  }
-}
-
-function notifyDiscordFailure(imageId, state) {
-  toast.error(`Discordへ送信できませんでした: ${state.error || "原因不明"}`, {
-    action: { label: "再送", onSelect: () => void resendToDiscord(imageId) }
-  });
-}
-
-function notifyDiscordGenerationFailure(imageId, state) {
-  toast.error(`生成完了通知をDiscordへ送信できませんでした: ${state.error || "原因不明"}`, {
-    action: { label: "再送", onSelect: () => void resendDiscordGeneration(imageId) }
-  });
-}
-
-async function resendToDiscord(imageId, button = null) {
-  if (button) button.disabled = true;
-  try {
-    const { discord } = await postJson(`/api/history/${imageId}/discord/send`, {});
-    applyDiscordState(imageId, discord);
-  } catch (error) {
-    toast.error(error.message);
-  } finally {
-    if (button) button.disabled = false;
-  }
-}
-
-async function resendDiscordGeneration(imageId, button = null) {
-  if (button) button.disabled = true;
-  try {
-    const { discord } = await postJson(`/api/history/${imageId}/discord/generation/send`, {});
-    applyDiscordGenerationState(imageId, discord);
-  } catch (error) {
-    toast.error(error.message);
-  } finally {
-    if (button) button.disabled = false;
-  }
-}
-
-// ---- Discord設定 ----
-
-async function loadDiscordSettings() {
-  try {
-    const { settings } = await getJson("/api/discord/settings");
-    elements.discordAutoSend.checked = settings.autoSend;
-    elements.discordIncludePrompt.checked = settings.includePrompt;
-    elements.discordIncludeMetadata.checked = settings.includeMetadata;
-    elements.discordGenerationAutoSend.checked = settings.generationAutoSend;
-    elements.discordGenerationIncludeImage.checked = settings.generationIncludeImage;
-    elements.discordGenerationIncludeTitle.checked = settings.generationIncludeTitle;
-    elements.discordGenerationIncludeModel.checked = settings.generationIncludeModel;
-    elements.discordGenerationIncludeSeed.checked = settings.generationIncludeSeed;
-    elements.discordGenerationIncludeDuration.checked = settings.generationIncludeDuration;
-    renderDiscordSettingsStatus(settings);
-  } catch (error) {
-    elements.discordSettingsStatus.textContent = `Discord設定を取得できません: ${error.message}`;
-  } finally {
-    syncSettingsConnectionSummary();
-  }
-}
-
-function renderDiscordSettingsStatus(settings) {
-  // Webhook URL自体は返ってこない。設定済みかどうかと、伏せ字の目印だけ出す。
-  const source = { env: "環境変数", config: "config.local.json", stored: "この画面で保存" }[settings.webhookSource];
-  elements.discordSettingsStatus.textContent = settings.webhookConfigured
-    ? `送信先: ${settings.webhookHint}（${source}）Favorite ${settings.autoSend ? "ON" : "OFF"}・生成通知 ${settings.generationAutoSend ? "ON" : "OFF"}`
-    : "送信先が未設定のため、Favorite・生成完了通知ともに送信しません";
-  elements.discordWebhook.disabled = !settings.webhookEditable;
-  elements.discordWebhook.placeholder = settings.webhookEditable
-    ? "https://discord.com/api/webhooks/…"
-    : `${source}の設定を使用中`;
-  elements.clearDiscordWebhookButton.disabled = !settings.storedWebhookConfigured;
-  syncSettingsConnectionSummary();
-}
-
-async function saveDiscordSettings() {
-  await withBusy(elements.saveDiscordSettingsButton, "保存中…", async () => {
-    try {
-      const { settings } = await patchJson("/api/discord/settings", {
-        autoSend: elements.discordAutoSend.checked,
-        includePrompt: elements.discordIncludePrompt.checked,
-        includeMetadata: elements.discordIncludeMetadata.checked,
-        generationAutoSend: elements.discordGenerationAutoSend.checked,
-        generationIncludeImage: elements.discordGenerationIncludeImage.checked,
-        generationIncludeTitle: elements.discordGenerationIncludeTitle.checked,
-        generationIncludeModel: elements.discordGenerationIncludeModel.checked,
-        generationIncludeSeed: elements.discordGenerationIncludeSeed.checked,
-        generationIncludeDuration: elements.discordGenerationIncludeDuration.checked,
-        webhookUrl: elements.discordWebhook.value
-      });
-      // 入力欄には残さない（画面・sessionStorageへ秘密情報を置かない）。
-      elements.discordWebhook.value = "";
-      renderDiscordSettingsStatus(settings);
-      toast.success("Discord設定を保存しました");
-    } catch (error) {
-      toast.error(error.message);
-    }
-  });
-}
-
-async function sendDiscordTestNotification() {
-  await withBusy(elements.sendDiscordTestButton, "送信中…", async () => {
-    try {
-      await postJson("/api/discord/test", {});
-      toast.success("Discordへテスト通知を送信しました");
-    } catch (error) {
-      toast.error(`Discordテスト通知に失敗しました: ${error.message}`);
-    }
-  });
-}
-
-async function clearDiscordWebhook() {
-  const confirmed = await confirmModal("保存済みのDiscord送信先を削除します。よろしいですか？", {
-    title: "送信先の削除",
-    confirmText: "削除する"
-  });
-  if (!confirmed) return;
-  try {
-    const { settings } = await patchJson("/api/discord/settings", { clearWebhook: true });
-    elements.discordWebhook.value = "";
-    renderDiscordSettingsStatus(settings);
-    toast.info("Discordの送信先を削除しました");
-  } catch (error) {
-    toast.error(error.message);
-  }
-}
-
 async function loadHistory({ append = false } = {}) {
-  if (historyLoading) return;
-  if (append && !historyHasMore) return;
-  historyLoading = true;
-  elements.historyLoadMoreButton.disabled = true;
-  elements.historyLoadMoreButton.textContent = append ? "読み込み中…" : "履歴を読み込み中…";
-  try {
-    const cursor = append && historyCursor ? `&cursor=${encodeURIComponent(historyCursor)}` : "";
-    const favoriteQuery = galleryFilter.kind === "favorite" ? "&favorites=1" : "";
-    const ratingQuery = galleryFilter.rating === "all"
-      ? ""
-      : `&rating=${encodeURIComponent(galleryFilter.rating)}`;
-    const historyRequest = getJson(`/api/history?limit=${HISTORY_PAGE_SIZE}${favoriteQuery}${ratingQuery}${cursor}`);
-    const [historyData, preferences] = append
-      ? [await historyRequest, null]
-      : await Promise.all([historyRequest, getJson("/api/history/preferences")]);
-    if (preferences) {
-      preferenceData = preferences;
-      renderPreferenceSummary();
-    }
-    historyCursor = historyData.nextCursor ?? null;
-    historyHasMore = historyData.hasMore === true;
-    historyTotal = Number(historyData.total) || 0;
-    lastHistoryGenerations = append
-      ? mergeHistoryGenerations(lastHistoryGenerations, historyData.generations ?? [])
-      : (historyData.generations ?? []);
-    renderHistory(lastHistoryGenerations);
-  } catch (error) {
-    if (!append) elements.historyGrid.textContent = `履歴を取得できません: ${error.message}`;
-    else toast.error(`追加の履歴を取得できません: ${error.message}`);
-  } finally {
-    historyLoading = false;
-    elements.historyLoadMoreButton.disabled = false;
-    elements.historyLoadMoreButton.textContent = `さらに${HISTORY_PAGE_SIZE}件読み込む`;
-    elements.historyLoadMoreButton.hidden = !historyHasMore;
-  }
+  await historyController.load({ append });
 }
 
-async function loadMoreHistory() {
-  await loadHistory({ append: true });
-}
-
-function mergeHistoryGenerations(current, incoming) {
-  const merged = current.map((generation) => ({
-    ...generation,
-    images: [...(generation.images ?? [])]
-  }));
-  const byGeneration = new Map(merged.map((generation) => [generation.id, generation]));
-  for (const generation of incoming) {
-    const existing = byGeneration.get(generation.id);
-    if (!existing) {
-      const added = { ...generation, images: [...(generation.images ?? [])] };
-      merged.push(added);
-      byGeneration.set(added.id, added);
-      continue;
-    }
-    const imageIds = new Set(existing.images.map((image) => image.id));
-    for (const image of generation.images ?? []) {
-      if (!imageIds.has(image.id)) {
-        existing.images.push(image);
-        imageIds.add(image.id);
-      }
-    }
-  }
-  return merged;
-}
-
-function renderHistory(generations) {
-  lastHistoryGenerations = generations ?? [];
-  rememberImageFavorites(generations);
-  // 送信中のバッジが再描画で消えないよう、最新状態を先に取り込む。
-  rememberDiscordStates(generations);
-  elements.historyGrid.replaceChildren();
-  const allEntries = toGalleryEntries(generations);
-  renderGalleryFilterOptions(allEntries);
-  const entries = sortGalleryEntries(filterGalleryEntries(allEntries, galleryFilter), gallerySort);
-  elements.galleryFilterSummary.textContent =
-    describeGalleryFilter(galleryFilter, allEntries.length, entries.length);
-  historyEntries = entries;
-  for (const [index, { generation, image }] of entries.entries()) {
-    elements.historyGrid.append(createHistoryCard(generation, image, index));
-  }
-  if (!entries.length) {
-    const empty = document.createElement("p");
-    empty.className = "hint";
-    empty.textContent = hasGalleryFilter()
-      ? "条件に一致する画像がありません"
-      : "生成すると画像とレシピがここへ保存されます";
-    elements.historyGrid.append(empty);
-  }
-  elements.galleryFilterSummary.textContent = historyTotal > allEntries.length
-    ? `${elements.galleryFilterSummary.textContent}（${historyTotal}枚中${allEntries.length}枚を取得済み）`
-    : elements.galleryFilterSummary.textContent;
-  syncGalleryFilterState();
-  updateGalleryFilterDialogSummary();
-  elements.historyLoadMoreButton.hidden = !historyHasMore;
-  const galleryUsesFavoriteDataset = galleryFilter.kind === "favorite";
-  const studioUsesFavoriteDataset = studioHistoryFilter === STUDIO_HISTORY_FILTERS.favorite;
-  if (galleryUsesFavoriteDataset === studioUsesFavoriteDataset) renderStudioRecent(generations);
-  else void loadStudioRecent();
-  renderExperimentCards();
-  updateCompareButton();
+function openHistoryDetail(generation, image) {
+  historyController.openDetail(generation, image);
 }
 
 // ---- v3生成ワークスペース: 中央ステータス / 右インスペクター ----
@@ -6777,562 +5337,8 @@ function focusGenerationSetting(targetId) {
   });
 }
 
-function syncStudioOutputStats(generation = null, image = null) {
-  const settings = generation?.settings ?? {};
-  const width = image?.width ?? settings.width ?? elements.width.value;
-  const height = image?.height ?? settings.height ?? elements.height.value;
-  const seed = image?.seed ?? settings.seed ?? elements.seed.value;
-  elements.studioResolution.textContent = width && height ? `${width}×${height}` : "--";
-  elements.studioSeed.textContent = Number(seed) >= 0 ? String(seed) : "RANDOM";
-  elements.studioSampler.textContent =
-    settings.samplerName || elements.samplerPickerValue.textContent || elements.samplerName.value || "--";
-  elements.studioCfg.textContent = String(settings.cfgScale ?? elements.cfgScale.value ?? "--");
-  elements.studioSteps.textContent = String(settings.steps ?? elements.steps.value ?? "--");
-  syncGenerationSettingsSummary();
-}
-
-function updateStudioGenerationState(busy, message = "") {
-  elements.studioGenerationStatus.classList.toggle("busy", busy);
-  if (busy) {
-    if (!studioStartedAt) studioStartedAt = Date.now();
-    elements.studioGenerationStatus.textContent = /プロンプト/.test(message) ? "PREPARING" : "GENERATING";
-    const updateElapsed = () => {
-      const seconds = Math.max(0, Math.floor((Date.now() - studioStartedAt) / 1000));
-      elements.studioGenerationTime.textContent = formatElapsed(seconds);
-    };
-    updateElapsed();
-    if (!studioElapsedTimer) studioElapsedTimer = setInterval(updateElapsed, 1000);
-    syncStudioOutputStats();
-    return;
-  }
-
-  if (studioElapsedTimer) clearInterval(studioElapsedTimer);
-  studioElapsedTimer = null;
-  if (studioStartedAt) {
-    const seconds = Math.max(0, Math.floor((Date.now() - studioStartedAt) / 1000));
-    elements.studioGenerationTime.textContent = formatElapsed(seconds);
-  }
-  studioStartedAt = 0;
-  elements.studioGenerationStatus.textContent = finalImage || lastGeneration ? "COMPLETE" : "READY";
-}
-
-function formatElapsed(seconds) {
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  return `${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
-}
-
-async function setStudioHistoryFilter(filter) {
-  studioHistoryFilter = normalizeStudioHistoryFilter(filter);
-  renderStudioHistoryFilterState();
-  await loadStudioRecent();
-}
-
-async function loadStudioRecent() {
-  const favoriteQuery = studioHistoryFilter === STUDIO_HISTORY_FILTERS.favorite
-    ? "&favorites=1"
-    : "";
-  try {
-    const data = await getJson(`/api/history?limit=${HISTORY_PAGE_SIZE}${favoriteQuery}`);
-    renderStudioRecent(data.generations ?? []);
-  } catch (error) {
-    elements.studioRecentList.replaceChildren();
-    const empty = document.createElement("p");
-    empty.className = "studioMetadataEmpty";
-    empty.textContent = `履歴を取得できません: ${error.message}`;
-    elements.studioRecentList.append(empty);
-  }
-}
-
-function renderStudioHistoryFilterState() {
-  const favoriteActive = studioHistoryFilter === STUDIO_HISTORY_FILTERS.favorite;
-  elements.studioHistoryAllButton.classList.toggle("active", !favoriteActive);
-  elements.studioHistoryAllButton.setAttribute("aria-pressed", String(!favoriteActive));
-  elements.studioHistoryFavoriteButton.classList.toggle("active", favoriteActive);
-  elements.studioHistoryFavoriteButton.setAttribute("aria-pressed", String(favoriteActive));
-}
-
-function renderStudioRecent(generations) {
-  const allEntries = toGalleryEntries(generations ?? []);
-  const filteredEntries = filterStudioHistoryEntries(allEntries, studioHistoryFilter);
-  const entries = filteredEntries.slice(0, 8);
-  elements.studioRecentCount.textContent = `${entries.length}件`;
-  elements.studioRecentList.replaceChildren();
-  renderStudioHistoryFilterState();
-
-  if (!entries.length) {
-    const empty = document.createElement("p");
-    empty.className = "studioMetadataEmpty";
-    empty.textContent = studioHistoryFilter === STUDIO_HISTORY_FILTERS.favorite
-      ? "お気に入りの画像はまだありません"
-      : "生成履歴はまだありません";
-    elements.studioRecentList.append(empty);
-    return;
-  }
-
-  for (const [index, entry] of entries.entries()) {
-    const { generation, image } = entry;
-    const card = document.createElement("article");
-    card.className = "studioRecentCard";
-    card.dataset.studioImageId = image.id;
-    card.classList.toggle("selected", studioInspection?.image?.id === image.id);
-
-    const selectButton = document.createElement("button");
-    selectButton.type = "button";
-    selectButton.className = "studioRecentSelect";
-    selectButton.setAttribute("aria-label", `${generationTitle(generation)}を選択`);
-
-    const preview = document.createElement("img");
-    configureThumbnailImage(preview, image, { eager: index < 2 });
-    preview.alt = "";
-
-    const text = document.createElement("span");
-    text.className = "studioRecentText";
-    const title = document.createElement("strong");
-    title.textContent = generationTitle(generation);
-    const meta = document.createElement("small");
-    meta.textContent = [
-      formatDate(generation.createdAt),
-      formatCheckpointBadge(generation.settings?.checkpoint),
-      `Seed ${image.seed}`
-    ].filter(Boolean).join(" · ");
-    text.append(title, meta);
-    selectButton.append(preview, text);
-    selectButton.addEventListener("click", () => setStudioInspection(generation, image, { showOnCanvas: true }));
-
-    const favoriteButton = createFavoriteButton(image, { className: "studioRecentFavorite" });
-    card.append(selectButton, favoriteButton);
-    elements.studioRecentList.append(card);
-  }
-
-  if (!studioInspection) setStudioInspection(entries[0].generation, entries[0].image);
-}
-
-function setStudioMetadataValue(element, value, fallback = "--") {
-  const text = value === null || value === undefined || String(value).trim() === ""
-    ? fallback
-    : String(value).trim();
-  element.textContent = text;
-  element.title = text === fallback ? "" : text;
-}
-
-function formatStudioCreatedAt(value) {
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return "--";
-  return new Intl.DateTimeFormat("ja-JP", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(date);
-}
-
-function studioDenoisingValue(generation, settings) {
-  if (settings.hiresEnabled) return settings.hiresDenoising;
-  if (generation.mode === "inpaint") return settings.inpaintDenoising;
-  if (generation.mode === "img2img") return settings.img2imgDenoising;
-  return null;
-}
-
-async function copyStudioInspectionValue(button, buildText) {
-  if (!studioInspection) return toast.warning("コピーする画像を選択してください");
-  let text = "";
-  try {
-    text = buildText(studioInspection.generation, studioInspection.image);
-  } catch {
-    text = "";
-  }
-  if (!String(text ?? "").trim()) return toast.warning("コピーできる情報が保存されていません");
-  try {
-    await copyToClipboard(String(text));
-    flashLabel(button, "Copied!");
-  } catch (error) {
-    toast.error(`コピーできませんでした: ${error.message}`);
-  }
-}
-
-function setStudioInspection(generation, image, { showOnCanvas = false } = {}) {
-  if (!generation || !image) return;
-  studioInspection = { generation, image };
-  const favorite = imageFavorites.has(image.id)
-    ? imageFavorites.get(image.id) === true
-    : Boolean(image.favorite);
-  image.favorite = favorite;
-  imageFavorites.set(image.id, favorite);
-  elements.studioMainFavoriteButton.dataset.favoriteImage = image.id;
-  elements.studioMainFavoriteButton.dataset.favoriteStyle = "star";
-  renderFavoriteButton(elements.studioMainFavoriteButton, favorite);
-  for (const card of elements.studioRecentList.querySelectorAll("[data-studio-image-id]")) {
-    card.classList.toggle("selected", card.dataset.studioImageId === String(image.id));
-  }
-
-  const settings = generation.settings ?? {};
-  const checkpoint = settings.checkpoint || "記録なし";
-  const sampler = settings.samplerName || "--";
-  const steps = settings.steps ?? "--";
-  const cfg = settings.cfgScale ?? "--";
-  const seed = image.seed ?? settings.seed ?? "--";
-  const resolution = image.width && image.height
-    ? `${image.width}×${image.height}`
-    : settings.width && settings.height
-      ? `${settings.width}×${settings.height}`
-      : "--";
-  const loras = generation.loras ?? [];
-  const loraText = loras.length
-    ? loras.map((lora) => {
-      const name = lora.displayName || lora.name || "LoRA";
-      return `${name}${Number.isFinite(Number(lora.weight)) ? ` ${Number(lora.weight).toFixed(2)}` : ""}`;
-    }).join(" / ")
-    : "なし";
-  const hiresText = settings.hiresEnabled
-    ? [
-        "ON",
-        settings.hiresScale ? `${settings.hiresScale}×` : "",
-        settings.hiresSteps ? `${settings.hiresSteps} steps` : "",
-        settings.hiresUpscaler
-      ].filter(Boolean).join(" · ")
-    : "OFF";
-  const vramUsage = image.vramUsage ?? generation.vramUsage ?? settings.vramUsage;
-
-  setStudioMetadataValue(elements.studioMetaResolution, resolution);
-  setStudioMetadataValue(elements.studioMetaSampler, sampler);
-  setStudioMetadataValue(elements.studioMetaSteps, steps);
-  setStudioMetadataValue(elements.studioMetaCfg, cfg);
-  setStudioMetadataValue(elements.studioMetaSeed, seed);
-  setStudioMetadataValue(elements.studioMetaModel, formatCheckpointBadge(checkpoint));
-  setStudioMetadataValue(elements.studioMetaLoraCount, `${loras.length} Active`);
-  setStudioMetadataValue(elements.studioMetaCreated, formatStudioCreatedAt(generation.createdAt));
-  setStudioMetadataValue(elements.studioMetaVram, vramUsage);
-
-  setStudioMetadataValue(elements.studioMetaCheckpoint, checkpoint);
-  setStudioMetadataValue(elements.studioMetaModelHash, settings.checkpointHash);
-  setStudioMetadataValue(elements.studioMetaParameterSampler, sampler);
-  setStudioMetadataValue(elements.studioMetaScheduler, settings.scheduler);
-  setStudioMetadataValue(elements.studioMetaParameterSteps, steps);
-  setStudioMetadataValue(elements.studioMetaParameterCfg, cfg);
-  setStudioMetadataValue(elements.studioMetaParameterSeed, seed);
-  setStudioMetadataValue(elements.studioMetaWidth, settings.width ?? image.width);
-  setStudioMetadataValue(elements.studioMetaHeight, settings.height ?? image.height);
-  setStudioMetadataValue(elements.studioMetaBatchCount, settings.candidateCount ?? generation.images?.length);
-  setStudioMetadataValue(elements.studioMetaBatchSize, settings.batchSize ?? 1);
-  setStudioMetadataValue(elements.studioMetaHires, hiresText);
-  setStudioMetadataValue(elements.studioMetaDenoising, studioDenoisingValue(generation, settings));
-  setStudioMetadataValue(elements.studioMetaVae, settings.vae);
-  setStudioMetadataValue(elements.studioMetaClipSkip, settings.clipSkip);
-  setStudioMetadataValue(elements.studioMetaLoras, loraText, "なし");
-
-  setStudioMetadataValue(
-    elements.studioMetaPositive,
-    generation.effectivePrompt || generation.prompt,
-    "（記録なし）"
-  );
-  setStudioMetadataValue(
-    elements.studioMetaNegative,
-    generation.effectiveNegativePrompt || generation.negativePrompt,
-    "（記録なし）"
-  );
-  elements.studioMetadataEmpty.classList.add("hidden");
-  elements.studioMetadataContent.classList.remove("hidden");
-
-  if (showOnCanvas) {
-    elements.emptyState.classList.add("hidden");
-    elements.loading.classList.add("hidden");
-    elements.resultContent.classList.remove("hidden");
-    elements.finalResult.classList.add("hidden");
-    elements.studioMainImage.src = originalImageUrl(image);
-    elements.studioMainImage.alt = generationTitle(generation);
-    syncCompareControl(elements.studioMainCompareButton, image.id);
-    elements.studioMainPreview.classList.remove("hidden");
-    syncStudioOutputStats(generation, image);
-  }
-  syncIpAdapterUi();
-}
-
-// ---- ギャラリーの絞り込み ----
-
-function hasGalleryFilter() {
-  return galleryFilter.kind !== "all"
-    || galleryFilter.rating !== "all"
-    || Boolean(galleryFilter.checkpoint || galleryFilter.lora || galleryFilter.period || galleryFilter.query)
-    || galleryFilter.tags.length > 0;
-}
-
-function setGalleryFilter(patch) {
-  const wasFavorite = galleryFilter.kind === "favorite";
-  const previousRating = galleryFilter.rating;
-  galleryFilter = {
-    ...galleryFilter,
-    ...patch,
-    tags: Array.isArray(patch.tags)
-      ? [...new Map(patch.tags.map((tag) => [String(tag).trim().toLowerCase(), String(tag).trim()])).values()]
-      : galleryFilter.tags
-  };
-  syncGalleryFilterState();
-  // Favoriteだけはサーバー側でも絞り込み、未取得ページ内のお気に入りを取りこぼさない。
-  if (wasFavorite !== (galleryFilter.kind === "favorite") || previousRating !== galleryFilter.rating) {
-    historyCursor = null;
-    historyHasMore = true;
-    void loadHistory();
-    return;
-  }
-  // その他の条件は取得済みページをそのまま絞り込み、追加読み込み時にも維持する。
-  renderHistory(lastHistoryGenerations);
-}
-
-function resetGalleryFilter() {
-  elements.galleryCheckpoint.value = "";
-  elements.galleryLora.value = "";
-  elements.galleryPeriod.value = "";
-  elements.gallerySearch.value = "";
-  elements.galleryTagSearch.value = "";
-  galleryTagQuery = "";
-  setGalleryFilter({ kind: "all", rating: "all", checkpoint: "", lora: "", period: "", query: "", tags: [] });
-}
-
-// Checkpoint・LoRAの候補は、いま履歴にあるものだけを出す。
-function renderGalleryFilterOptions(entries) {
-  fillFilterSelect(elements.galleryCheckpoint, collectCheckpoints(entries), galleryFilter.checkpoint);
-  fillFilterSelect(elements.galleryLora, collectLoras(entries), galleryFilter.lora);
-  renderGallerySelectedTags();
-  renderGalleryTagOptions(entries);
-  updateGalleryFilterDialogSummary();
-}
-
-function syncGalleryFilterState() {
-  for (const button of elements.galleryKindFilter.querySelectorAll("[data-gallery-kind]")) {
-    const active = button.dataset.galleryKind === galleryFilter.kind;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", String(active));
-  }
-  for (const container of [elements.galleryRatingFilter, elements.galleryRatingDialogFilter]) {
-    for (const button of container.querySelectorAll("[data-gallery-rating]")) {
-      const active = button.dataset.galleryRating === galleryFilter.rating;
-      button.classList.toggle("active", active);
-      button.setAttribute("aria-pressed", String(active));
-    }
-  }
-  const favoriteActive = galleryFilter.kind === "favorite";
-  for (const [button, active] of [[elements.galleryAllButton, !favoriteActive], [elements.galleryFavoriteButton, favoriteActive]]) {
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", String(active));
-  }
-  elements.gallerySort.value = gallerySort;
-}
-
-function openGalleryFilterDialog() {
-  renderGalleryFilterOptions(toGalleryEntries(lastHistoryGenerations));
-  if (!elements.galleryFilterDialog.open) elements.galleryFilterDialog.showModal();
-}
-
-function updateGalleryFilterDialogSummary() {
-  elements.galleryFilterDialogSummary.textContent =
-    `${elements.galleryFilterSummary.textContent}（取得済みデータのみ）`;
-}
-
-function renderGallerySelectedTags() {
-  elements.gallerySelectedTags.replaceChildren();
-  if (!galleryFilter.tags.length) {
-    const empty = document.createElement("span");
-    empty.className = "galleryTagEmpty";
-    empty.textContent = "選択中のタグはありません";
-    elements.gallerySelectedTags.append(empty);
-    return;
-  }
-  for (const tag of galleryFilter.tags) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "gallerySelectedTag";
-    button.textContent = `× ${tag}`;
-    button.title = `${tag}を解除`;
-    button.addEventListener("click", () => {
-      setGalleryFilter({ tags: galleryFilter.tags.filter((item) => item !== tag) });
-    });
-    elements.gallerySelectedTags.append(button);
-  }
-}
-
-function renderGalleryTagOptions(entries) {
-  const query = galleryTagQuery.trim().toLowerCase();
-  const tags = collectPromptTags(entries)
-    .filter((tag) => !query || tag.toLowerCase().includes(query));
-  elements.galleryTagOptions.replaceChildren();
-  if (!tags.length) {
-    const empty = document.createElement("span");
-    empty.className = "galleryTagEmpty";
-    empty.textContent = query ? "一致するタグがありません" : "取得済みPromptから候補を収集中です";
-    elements.galleryTagOptions.append(empty);
-    return;
-  }
-  for (const tag of tags) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "galleryTagOption";
-    button.textContent = tag;
-    button.setAttribute("role", "option");
-    button.setAttribute("aria-selected", String(galleryFilter.tags.some((item) => item.toLowerCase() === tag.toLowerCase())));
-    button.disabled = galleryFilter.tags.some((item) => item.toLowerCase() === tag.toLowerCase());
-    button.addEventListener("click", () => {
-      setGalleryFilter({ tags: [...galleryFilter.tags, tag] });
-    });
-    elements.galleryTagOptions.append(button);
-  }
-}
-
-function fillFilterSelect(select, values, selected) {
-  const current = selected ?? select.value;
-  select.replaceChildren(new Option("すべて", ""));
-  for (const value of values) select.append(new Option(shorten(value, 40), value));
-  select.value = values.includes(current) ? current : "";
-}
-
-// ---- Sampler / Scheduler の選択UI ----
-
-const SAMPLER_STORAGE = {
-  sampler: { favorites: "localImageChat.samplerFavorites", recent: "localImageChat.samplerRecent" },
-  scheduler: { favorites: "localImageChat.schedulerFavorites", recent: "localImageChat.schedulerRecent" }
-};
-
-function readOptionList(storageKey) {
-  const stored = readJsonStorage(storageKey, []);
-  return Array.isArray(stored) ? stored.filter((item) => typeof item === "string" && item) : [];
-}
-
-function writeOptionList(storageKey, values) {
-  localStorage.setItem(storageKey, JSON.stringify(values));
-}
-
-async function loadSamplerOptions(context = runtimeRequestContext()) {
-  try {
-    const data = await getJson(runtimeApiUrl("/api/samplers"));
-    if (!isRuntimeContextCurrent(context)) return false;
-    samplerOptions = {
-      samplers: Array.isArray(data.samplers) ? data.samplers : [],
-      schedulers: Array.isArray(data.schedulers) ? data.schedulers : []
-    };
-  } catch {
-    if (!isRuntimeContextCurrent(context)) return false;
-    // ReForgeが落ちていても選択UIは使えるようにする（保存済みの値と既定値だけ）。
-    samplerOptions = { samplers: [], schedulers: [] };
-  }
-  renderSamplerPresets();
-  syncSamplerLabels();
-  return true;
-}
-
-// 現在値をボタンへ反映する。Checkpointプロフィール適用や履歴復元の後にも呼ぶ。
-function syncSamplerLabels() {
-  elements.samplerPickerValue.textContent = elements.samplerName.value || "未設定";
-  elements.schedulerPickerValue.textContent = elements.scheduler.value || "未設定";
-  renderSamplerPresets();
-}
-
-function renderSamplerPresets() {
-  elements.samplerPresets.replaceChildren();
-  for (const preset of SAMPLER_PRESETS) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "samplerPreset";
-    button.textContent = describeSamplerPreset(preset);
-    button.classList.toggle("active", isActivePreset(preset, elements.samplerName.value, elements.scheduler.value));
-    button.addEventListener("click", () => {
-      // プリセットは両方まとめて変える。個別選択では相手を触らない。
-      applySamplerValue("sampler", preset.sampler);
-      applySamplerValue("scheduler", preset.scheduler);
-    });
-    elements.samplerPresets.append(button);
-  }
-}
-
-function applySamplerValue(kind, value) {
-  const input = kind === "sampler" ? elements.samplerName : elements.scheduler;
-  input.value = value;
-  writeOptionList(SAMPLER_STORAGE[kind].recent, rememberRecentOption(readOptionList(SAMPLER_STORAGE[kind].recent), value));
-  syncSamplerLabels();
-}
-
-async function openSamplerPicker(kind) {
-  const label = kind === "sampler" ? "Sampler" : "Scheduler";
-  const all = kind === "sampler" ? samplerOptions.samplers : samplerOptions.schedulers;
-  const input = kind === "sampler" ? elements.samplerName : elements.scheduler;
-  let favorites = readOptionList(SAMPLER_STORAGE[kind].favorites);
-  let query = "";
-
-  await openModal({
-    title: `${label}を選ぶ`,
-    subtitle: "★でお気に入り。検索でも絞り込めます",
-    size: "small",
-    dismissValue: null,
-    build: (body, close) => {
-      const search = document.createElement("input");
-      search.type = "search";
-      search.className = "optionPickerSearch";
-      search.placeholder = `${label}を検索`;
-      search.setAttribute("data-autofocus", "true");
-
-      const list = document.createElement("div");
-      list.className = "optionPickerList";
-
-      const render = () => {
-        list.replaceChildren();
-        const sections = buildOptionSections({
-          all,
-          favorites,
-          recent: readOptionList(SAMPLER_STORAGE[kind].recent),
-          query,
-          current: input.value
-        });
-        if (!sections.length) {
-          const empty = document.createElement("p");
-          empty.className = "hint";
-          empty.textContent = "候補が見つかりません";
-          list.append(empty);
-          return;
-        }
-        for (const section of sections) {
-          const heading = document.createElement("p");
-          heading.className = "optionPickerHeading";
-          heading.textContent = section.label;
-          list.append(heading);
-          for (const option of section.items) list.append(createOptionRow(option));
-        }
-      };
-
-      const createOptionRow = (option) => {
-        const row = document.createElement("div");
-        row.className = "optionPickerRow";
-        row.classList.toggle("current", option === input.value);
-        const choose = document.createElement("button");
-        choose.type = "button";
-        choose.className = "optionPickerChoice";
-        choose.textContent = option;
-        choose.addEventListener("click", () => {
-          applySamplerValue(kind, option);
-          close(option);
-        });
-        const star = document.createElement("button");
-        star.type = "button";
-        star.className = "optionPickerStar";
-        star.textContent = isFavoriteOption(favorites, option) ? "★" : "☆";
-        star.title = "お気に入り";
-        star.addEventListener("click", () => {
-          favorites = toggleFavoriteOption(favorites, option);
-          writeOptionList(SAMPLER_STORAGE[kind].favorites, favorites);
-          render();
-        });
-        row.append(choose, star);
-        return row;
-      };
-
-      search.addEventListener("input", () => {
-        query = search.value;
-        render();
-      });
-      render();
-      body.append(search, list);
-    },
-    actions: [{ label: "閉じる", value: null, variant: "secondary" }]
-  }).promise;
+async function loadStudioRecent(filter = studioController.getHistoryFilter()) {
+  await historyController.loadStudioRecent(filter);
 }
 
 // ---- 使用中LoRA（生成画面） ----
@@ -8026,587 +6032,35 @@ function renderGenerateActions() {
 }
 
 // 実験一覧は「比較」画面、画像一覧は「ギャラリー」画面が持つ。
-function setGalleryView(view) {
-  showView(view === "experiments" ? "compare" : "gallery");
-}
-
-async function openGalleryExperiments() {
-  showView("compare");
-  await loadExperiments();
-  renderExperimentCards();
-}
-
 function renderExperimentCards() {
-  elements.experimentGrid.replaceChildren();
-  if (!knownExperiments.length) {
-    const empty = document.createElement("p");
-    empty.className = "hint";
-    empty.textContent = "「パラメータ比較」で比較生成すると、ここへ実験としてまとまります。";
-    elements.experimentGrid.append(empty);
-    return;
-  }
-  for (const experiment of knownExperiments) {
-    elements.experimentGrid.append(createExperimentCard(experiment));
-  }
-}
-
-function experimentEntries(experiment) {
-  const imageIds = new Set(experiment.runs.flatMap((run) => run.imageIds ?? []));
-  const combined = [...historyEntries, ...(experimentEntryCache.get(experiment.id) ?? [])];
-  const seen = new Set();
-  return combined.filter((entry) => {
-    if (seen.has(entry.image.id)) return false;
-    if (entry.generation.experimentId !== experiment.id && !imageIds.has(entry.image.id)) return false;
-    seen.add(entry.image.id);
-    return true;
-  });
-}
-
-async function ensureExperimentEntries(experiment) {
-  const expected = new Set(experiment.runs.flatMap((run) => run.imageIds ?? []));
-  const current = experimentEntries(experiment);
-  if ([...expected].every((id) => current.some((entry) => entry.image.id === id))) return current;
-  const data = await getJson(`/api/experiments/${experiment.id}/history`);
-  const entries = toGalleryEntries(data.generations ?? []);
-  experimentEntryCache.set(experiment.id, entries);
-  return experimentEntries(experiment);
-}
-
-function createExperimentCard(experiment) {
-  const card = document.createElement("article");
-  card.className = "experimentCard";
-
-  const header = document.createElement("div");
-  header.className = "experimentCardHeader";
-  const title = document.createElement("strong");
-  title.textContent = experiment.name;
-  const status = document.createElement("span");
-  status.className = `experimentCardStatus ${experiment.status}`;
-  status.textContent = { running: "生成中", done: "完了", cancelled: "中断" }[experiment.status] ?? experiment.status;
-  header.append(title, status);
-
-  const meta = document.createElement("div");
-  meta.className = "experimentCardMeta";
-  meta.append(
-    line(`${experiment.total}枚（完了 ${experiment.completed}）`),
-    line(experiment.fixedSeed != null ? `Seed ${experiment.fixedSeed}` : "Seed 未固定"),
-    line(experiment.values.join(" / "))
-  );
-
-  const thumbs = document.createElement("div");
-  thumbs.className = "experimentCardThumbs";
-  const entries = experimentEntries(experiment);
-  for (const entry of entries.slice(0, 4)) {
-    const image = document.createElement("img");
-    configureThumbnailImage(image, entry.image);
-    image.alt = `${experiment.name} ${entry.generation.comparedValue ?? ""}`;
-    image.title = "クリックで拡大";
-    image.addEventListener("click", () => openImageModal(originalImageUrl(entry.image), experiment.name));
-    thumbs.append(image);
-  }
-
-  const actions = document.createElement("div");
-  actions.className = "experimentCardActions";
-  actions.append(
-    actionButton("開く", "secondary", () => void openExperimentDetail(experiment)),
-    actionButton("比較", "secondary", () => void openExperimentComparison(experiment)),
-    actionButton("名前変更", "ghost", () => void renameExperiment(experiment)),
-    actionButton("削除", "historyDelete", () => void deleteExperiment(experiment))
-  );
-
-  card.append(header, meta, thumbs, actions);
-  return card;
-}
-
-function line(text) {
-  const span = document.createElement("span");
-  span.textContent = text;
-  return span;
-}
-
-function actionButton(label, className, handler) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = className;
-  button.textContent = label;
-  button.addEventListener("click", handler);
-  return button;
-}
-
-async function openExperimentComparison(experiment) {
-  try {
-    const selected = (await ensureExperimentEntries(experiment)).slice(0, 4);
-    if (selected.length < 2) return toast.warning("比較できる画像が2枚以上ありません");
-    await openComparison(selected, experiment);
-  } catch (error) {
-    toast.error(`比較画像を取得できません: ${error.message}`);
-  }
-}
-
-async function openExperimentDetail(experiment) {
-  let entries;
-  try {
-    entries = await ensureExperimentEntries(experiment);
-  } catch (error) {
-    toast.error(`実験画像を取得できません: ${error.message}`);
-    return;
-  }
-  openModal({
-    title: experiment.name,
-    subtitle: `${experiment.parameter}${experiment.target ? ` / ${experiment.target}` : ""}・${experiment.total}枚`,
-    size: "large",
-    build: (body, close) => {
-      const grid = document.createElement("div");
-      grid.className = "experimentDetailGrid";
-      for (const run of experiment.runs) {
-        const entry = entries.find((item) => (run.imageIds ?? []).includes(item.image.id));
-        const cell = document.createElement("figure");
-        cell.className = "experimentDetailCell";
-        if (entry) {
-          const image = document.createElement("img");
-          configureThumbnailImage(image, entry.image);
-          image.alt = `${run.value}`;
-          image.addEventListener("click", () => openImageModal(originalImageUrl(entry.image), `${experiment.name} ${run.value}`));
-          cell.append(image);
-        } else {
-          const placeholder = document.createElement("div");
-          placeholder.className = "experimentDetailPlaceholder";
-          placeholder.textContent = { queued: "待機中", running: "生成中", failed: "失敗", cancelled: "中止" }[run.status] ?? "—";
-          if (run.error) placeholder.title = run.error;
-          cell.append(placeholder);
-        }
-        const caption = document.createElement("figcaption");
-        caption.textContent = `${run.value}`;
-        // リカバリされた画像は比較条件が変わっているため、必ず判別できるようにする。
-        if (run.recovered || entry?.generation?.retryInfo) {
-          caption.append(recoveredBadge(run.retryInfo ?? entry?.generation?.retryInfo));
-        }
-        if (entry?.image.vote) {
-          // A/B比較の結果を実験詳細でも確認できるようにする。
-          const vote = document.createElement("span");
-          vote.className = `experimentVote vote-${entry.image.vote}`;
-          vote.textContent = { win: "A/B勝ち", lose: "A/B負け", draw: "引き分け" }[entry.image.vote] ?? entry.image.vote;
-          caption.append(vote);
-        }
-        if (entry) {
-          const favorite = document.createElement("button");
-          favorite.type = "button";
-          favorite.className = `iconButton${entry.image.favorite ? " active" : ""}`;
-          favorite.textContent = "👍";
-          favorite.title = "お気に入り";
-          favorite.addEventListener("click", () => void toggleFavorite(entry.image, favorite));
-          caption.append(favorite);
-          const best = document.createElement("button");
-          best.type = "button";
-          best.className = experiment.bestImageId === entry.image.id ? "primary smallButton" : "ghost smallButton";
-          best.textContent = experiment.bestImageId === entry.image.id ? "最良" : "最良にする";
-          best.addEventListener("click", async () => {
-            await patchJson(`/api/experiments/${experiment.id}`, { bestImageId: entry.image.id });
-            toast.success("最良画像を記録しました");
-            await loadExperiments();
-            close();
-          });
-          caption.append(best);
-        }
-        cell.append(caption);
-        grid.append(cell);
-      }
-      body.append(grid);
-
-      if (experiment.bestImageId) {
-        const note = document.createElement("p");
-        note.className = "uiFieldNote";
-        note.textContent = `最良画像: ${experiment.bestImageId}`;
-        body.append(note);
-      }
-    },
-    actions: [
-      {
-        label: "比較する",
-        variant: "secondary",
-        keepOpen: true,
-        onSelect: (close) => {
-          const selected = entries.slice(0, 4);
-          if (selected.length < 2) {
-            toast.warning("比較できる画像が2枚以上ありません");
-            return false;
-          }
-          close();
-          void openComparison(selected, experiment);
-        }
-      },
-      { label: "閉じる", primary: true }
-    ]
-  });
-}
-
-async function renameExperiment(experiment) {
-  const name = await promptModal("実験名を変更", experiment.name);
-  if (!name) return;
-  try {
-    await patchJson(`/api/experiments/${experiment.id}`, { name });
-    toast.success("実験名を変更しました");
-    await loadExperiments();
-    renderExperimentCards();
-  } catch (error) {
-    toast.error(error.message);
-  }
-}
-
-async function deleteExperiment(experiment) {
-  const choice = await openModal({
-    title: "実験の一括削除",
-    subtitle: experiment.name,
-    size: "small",
-    dismissValue: null,
-    build: (body) => {
-      const message = document.createElement("p");
-      message.className = "uiModalMessage";
-      message.textContent = `${experiment.total}枚分の実験「${experiment.name}」を削除します。この操作は取り消せません。`;
-      body.append(message);
-    },
-    actions: [
-      { label: "キャンセル", value: null, variant: "secondary" },
-      { label: "履歴だけ削除", value: "history", variant: "secondary" },
-      { label: "履歴と画像を削除", value: "all", variant: "dangerButton", primary: true }
-    ]
-  }).promise;
-  if (!choice) return;
-
-  try {
-    const query = choice === "all" ? "?deleteImages=1" : "";
-    const result = await deleteJson(`/api/experiments/${experiment.id}${query}`);
-    toast.success(`実験を削除しました（履歴${result.removedGenerations}件・画像${result.removedImages}枚）`);
-    await loadHistory();
-    await loadExperiments();
-    renderExperimentCards();
-  } catch (error) {
-    toast.error(error.message);
-  }
+  experimentController.renderCards();
 }
 
 // ---- 画像比較 ----
 
 function isCompareSelected(imageId) {
-  return imageId !== undefined
-    && imageId !== null
-    && (compareSelection.has(imageId) || compareSelection.has(String(imageId)));
+  return comparisonController.isSelected(imageId);
 }
 
 function syncCompareControl(button, imageId) {
-  if (!button) return;
-  const selected = isCompareSelected(imageId);
-  const label = selected ? "比較から外す" : "比較に追加";
-  button.textContent = label;
-  button.title = label;
-  button.setAttribute("aria-label", label);
-  button.setAttribute("aria-pressed", String(selected));
-  button.classList.toggle("active", selected);
-}
-
-function updateCompareButton() {
-  const count = compareSelection.size;
-  const startLabel = count ? `画像比較を開始（${count}）` : "画像比較を開始";
-  elements.compareSelectionButton.disabled = count < 2;
-  elements.compareSelectionButton.textContent = startLabel;
-  elements.compareSelectionButton.title = count < 2
-    ? "画像比較を開始するには2枚以上を選んでください"
-    : startLabel;
-  elements.compareSelectionButton.setAttribute("aria-label", elements.compareSelectionButton.title);
-
-  elements.compareSelectionBadge.textContent = count ? String(count) : "";
-  elements.compareSelectionBadge.classList.toggle("hidden", count === 0);
-  const compareNavButton = elements.mainNav.querySelector('[data-view="compare"]');
-  compareNavButton?.setAttribute("aria-label", count ? `比較（${count}枚選択中）` : "比較");
-
-  syncCompareControl(elements.studioMainCompareButton, selectedCandidate?.id);
-  syncCompareControl(elements.studioCompareButton, finalImage?.id);
-  for (const button of document.querySelectorAll("[data-compare-image-id]")) {
-    syncCompareControl(button, button.dataset.compareImageId);
-  }
-  renderCompareTray();
-  renderImageCompareEntry();
-  updateGalleryCompareModeUi();
+  comparisonController.syncControl(button, imageId);
 }
 
 function toggleCompareSelection(image, generation, button) {
-  if (!image || image.id === undefined || image.id === null) return false;
-  const selected = compareSelection.has(image.id);
-  if (selected) {
-    compareSelection.delete(image.id);
-  } else {
-    if (compareSelection.size >= 4) {
-      toast.warning("比較は最大4枚までです");
-      return false;
-    }
-    compareSelection.set(image.id, { image, generation });
-  }
-  if (button) button.dataset.compareImageId = String(image.id);
-  updateCompareButton();
-  toast.info(selected ? "比較から外しました" : "比較に追加しました");
-  return true;
-}
-
-function clearCompareSelection() {
-  if (!compareSelection.size) return;
-  compareSelection.clear();
-  updateCompareButton();
-  toast.info("比較候補をすべて解除しました");
-}
-
-function renderCompareTray() {
-  const entries = [...compareSelection.values()];
-  elements.compareTray.classList.toggle("hidden", entries.length === 0);
-  elements.compareTrayCount.textContent = `${entries.length}枚`;
-  elements.compareTrayOpenButton.disabled = entries.length < 2;
-  elements.compareTrayOpenButton.title = entries.length < 2
-    ? "比較を開始するには2枚以上を選んでください"
-    : "選択した画像で画像比較を開始";
-  elements.compareTrayClearButton.disabled = entries.length === 0;
-  elements.compareTrayItems.replaceChildren();
-
-  for (const [index, entry] of entries.slice(0, 4).entries()) {
-    const item = document.createElement("div");
-    item.className = "compareTrayItem";
-    const preview = document.createElement("img");
-    configureThumbnailImage(preview, entry.image);
-    const title = generationTitle(entry.generation);
-    preview.alt = `比較候補${index + 1}: ${title}`;
-    preview.title = "比較候補から外すには右上のボタンを押してください";
-    const label = document.createElement("span");
-    label.className = "compareTrayItemLabel";
-    label.textContent = `${index + 1}. ${title}`;
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "compareTrayRemove";
-    remove.textContent = "×";
-    remove.setAttribute("aria-label", `${title}を比較から外す`);
-    remove.title = "この画像を比較から外す";
-    remove.addEventListener("click", () => toggleCompareSelection(entry.image, entry.generation));
-    item.append(preview, label, remove);
-    elements.compareTrayItems.append(item);
-  }
+  return comparisonController.toggle(image, generation, button);
 }
 
 function renderImageCompareEntry() {
-  if (!elements.imageCompareMessage) return;
-  const count = compareSelection.size;
-  if (count === 0) {
-    elements.imageCompareMessage.textContent = "比較する画像がありません";
-    elements.imageCompareGalleryButton.textContent = "ギャラリーで画像を選ぶ";
-  } else if (count === 1) {
-    elements.imageCompareMessage.textContent = "あと1枚追加すると比較できます";
-    elements.imageCompareGalleryButton.textContent = "ギャラリーで画像を追加";
-  } else {
-    elements.imageCompareMessage.textContent = `${count}枚を選択中です。比較を開始できます。`;
-    elements.imageCompareGalleryButton.textContent = "ギャラリーで追加";
-  }
-  elements.imageCompareStartButton.classList.toggle("hidden", count < 2);
-  elements.imageCompareStartButton.disabled = count < 2;
-}
-
-function setGalleryCompareMode(active) {
-  galleryCompareMode = Boolean(active);
-  elements.galleryCompareModeBar.classList.toggle("hidden", !galleryCompareMode);
-  elements.galleryCompareModeButton.setAttribute("aria-pressed", String(galleryCompareMode));
-  elements.galleryCompareModeButton.textContent = galleryCompareMode ? "比較モードを終了" : "比較モード";
-  syncGalleryCompareModeControls();
-  updateGalleryCompareModeUi();
-}
-
-function syncGalleryCompareModeControls() {
-  for (const checkbox of document.querySelectorAll(".historyCompareCheck")) {
-    checkbox.hidden = !galleryCompareMode;
-    checkbox.checked = isCompareSelected(checkbox.dataset.compareImageId);
-  }
-}
-
-function updateGalleryCompareModeUi() {
-  const count = compareSelection.size;
-  elements.galleryCompareModeCount.textContent = `${count}枚選択中`;
-  elements.galleryCompareModeMessage.textContent = count === 0
-    ? "あと2枚選択してください"
-    : count === 1
-      ? "あと1枚選択してください"
-      : `${count}枚を選択中です。比較を開始できます。`;
-  elements.galleryCompareClearButton.disabled = count === 0;
-  syncGalleryCompareModeControls();
+  comparisonController.renderEntry();
 }
 
 async function openComparison(entries, experiment = null) {
-  await openCompareView({
-    entries,
-    onVote: async ({ winnerImageId, result }) => {
-      try {
-        await postJson("/api/comparisons", {
-          imageIds: entries.map((entry) => entry.image.id),
-          winnerImageId,
-          result,
-          parameter: experiment?.parameter ?? entries[0]?.generation?.comparedParameter ?? ""
-        });
-        if (experiment && winnerImageId) {
-          await patchJson(`/api/experiments/${experiment.id}`, { bestImageId: winnerImageId });
-        }
-        toast.success("比較結果を記録しました");
-        await loadHistory();
-      } catch (error) {
-        toast.error(error.message);
-      }
-    }
+  return comparisonController.openEntries(entries, {
+    experimentId: experiment?.id ?? null,
+    parameter: experiment?.parameter ?? entries[0]?.generation?.comparedParameter ?? ""
   });
 }
 
-function compareCurrentSelection() {
-  const entries = [...compareSelection.values()];
-  if (entries.length < 2) return toast.warning("比較する画像を2枚以上選んでください");
-  void openComparison(entries);
-}
-
-function createHistoryCard(generation, image, index = 0) {
-  const card = document.createElement("article");
-  card.className = "historyCard";
-  const previewWrap = document.createElement("div");
-  previewWrap.className = "historyCardPreview";
-
-  const preview = document.createElement("img");
-  preview.className = "historyCardImage";
-  configureThumbnailImage(preview, image, { eager: index < 4 });
-  preview.alt = generationTitle(generation);
-  preview.title = "クリックで拡大";
-  card.addEventListener("click", (event) => {
-    if (event.target.closest("button, summary, details, input, a")) return;
-    openImageModal(originalImageUrl(image), generationTitle(generation));
-  });
-
-  const body = document.createElement("div");
-  body.className = "historyCardBody";
-
-  const meta = document.createElement("div");
-  meta.className = "historyCardMeta";
-  const title = document.createElement("strong");
-  title.className = "historyCardTitle";
-  title.textContent = generationTitle(generation);
-  const summary = document.createElement("span");
-  summary.className = "historyCardSummary";
-  const badge = generation.settings?.checkpoint
-    ? formatCheckpointBadge(generation.settings.checkpoint)
-    : null;
-  summary.textContent = [badge, historyModeLabel(generation.mode)]
-    .filter(Boolean)
-    .join("・") || "通常生成";
-  const dateLine = document.createElement("span");
-  dateLine.className = "historyCardDate";
-  dateLine.textContent = formatDate(generation.createdAt);
-  meta.append(title, summary, dateLine);
-
-  // カード右上の星（画像のFavorite）。一覧・詳細・最新結果で状態を共有する。
-  previewWrap.append(preview, createFavoriteButton(image, { className: "cardFavorite" }));
-  const contentRating = generation.contentRating === "nsfw"
-    ? "nsfw"
-    : generation.contentRating === "general" ? "general" : "unrated";
-  if (contentRating !== "general") {
-    const ratingBadge = document.createElement("span");
-    ratingBadge.className = `historyContentRatingBadge ${contentRating}`;
-    ratingBadge.textContent = contentRating === "nsfw" ? "NSFW" : "未分類";
-    previewWrap.append(ratingBadge);
-  }
-  const compareCheck = document.createElement("input");
-  compareCheck.type = "checkbox";
-  compareCheck.className = "historyCompareCheck";
-  compareCheck.dataset.compareImageId = String(image.id);
-  compareCheck.hidden = !galleryCompareMode;
-  compareCheck.checked = isCompareSelected(image.id);
-  compareCheck.setAttribute("aria-label", `${generationTitle(generation)}を比較対象に選択`);
-  compareCheck.title = "比較対象に選択";
-  compareCheck.addEventListener("click", (event) => event.stopPropagation());
-  compareCheck.addEventListener("change", () => {
-    const selected = isCompareSelected(image.id);
-    if (compareCheck.checked !== selected) toggleCompareSelection(image, generation);
-  });
-  previewWrap.append(compareCheck);
-
-  const discordBadge = createDiscordStatusNode(image);
-  const discordGenerationBadge = createDiscordGenerationStatusNode(image);
-
-  const menu = document.createElement("details");
-  menu.className = "historyCardMenu";
-  const menuSummary = document.createElement("summary");
-  menuSummary.textContent = "⋯";
-  menuSummary.setAttribute("aria-label", "画像操作");
-  menuSummary.title = "画像操作";
-  menuSummary.addEventListener("click", (event) => event.stopPropagation());
-  const menuBody = document.createElement("div");
-  menuBody.className = "historyCardMenuBody";
-  menuBody.append(discordBadge, discordGenerationBadge);
-
-  const addMenuAction = (label, className, handler, title = label) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = className;
-    button.textContent = label;
-    button.title = title;
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      menu.open = false;
-      handler(button);
-    });
-    menuBody.append(button);
-    return button;
-  };
-
-  addMenuAction("読込", "secondary", () => activateCompositionLock(generation, image), "この画像の設定を読み込む");
-
-  const compare = document.createElement("button");
-  compare.type = "button";
-  compare.className = "ghost compareToggle";
-  compare.dataset.compareImageId = String(image.id);
-  syncCompareControl(compare, image.id);
-  compare.title = "比較対象へ追加または解除";
-  compare.addEventListener("click", (event) => {
-    event.stopPropagation();
-    menu.open = false;
-    toggleCompareSelection(image, generation, compare);
-  });
-  menuBody.append(compare);
-  addMenuAction("詳細", "ghost", () => openHistoryDetail(generation, image), "生成情報を表示");
-  addMenuAction(
-    contentRating === "nsfw" ? "一般に分類" : "NSFWに分類",
-    "ghost",
-    () => void updateHistoryContentRating(image, contentRating === "nsfw" ? "general" : "nsfw"),
-    "同じ生成の候補画像をまとめて分類"
-  );
-  addMenuAction("削除", "historyDelete", (button) => void deleteHistoryImage(image, button), "この画像を削除する");
-
-  menu.append(menuSummary, menuBody);
-
-  if (generation.experimentName) {
-    const experimentBadge = document.createElement("span");
-    experimentBadge.className = "historyExperimentBadge";
-    experimentBadge.textContent = generation.comparedValue != null
-      ? `${generation.experimentName}: ${generation.comparedValue}`
-      : generation.experimentName;
-    experimentBadge.title = "実験グループ";
-    meta.append(experimentBadge);
-  }
-
-  body.append(meta, menu);
-  card.append(previewWrap, body);
-  return card;
-}
-
-async function updateHistoryContentRating(image, contentRating) {
-  try {
-    await patchJson(`/api/history/${encodeURIComponent(image.id)}/content-rating`, { contentRating });
-    toast.info(contentRating === "nsfw" ? "NSFWに分類しました" : "一般に分類しました");
-    historyCursor = null;
-    historyHasMore = true;
-    await loadHistory();
-  } catch (error) {
-    toast.error(`分類を変更できませんでした: ${error.message}`);
-  }
-}
-
-// 一覧表示専用のCheckpoint短縮名。内部データには正式名を保存する。
 function formatCheckpointBadge(name) {
   const value = String(name ?? "").toLowerCase();
   if (!value) return "Other";
@@ -8618,38 +6072,6 @@ function formatCheckpointBadge(name) {
   if (value.includes("rin")) return "RIN";
   if (value.includes("illustrious")) return "Illustrious";
   return "Other";
-}
-
-function loraCountLabel(loras) {
-  const count = Array.isArray(loras) ? loras.length : 0;
-  return count ? `LoRA ${count}` : "LoRAなし";
-}
-
-function historyModeLabel(mode) {
-  if (mode === "img2img") return "img2img";
-  if (mode === "inpaint") return "部分修正";
-  return null;
-}
-
-async function deleteHistoryImage(image, button) {
-  const confirmed = await confirmDialog("この画像を削除しますか？", {
-    confirmText: "削除する",
-    cancelText: "キャンセル",
-    danger: true
-  });
-  if (!confirmed) return;
-  button.disabled = true;
-  try {
-    const data = await deleteJson(`/api/history/${image.id}`);
-    if (data.preferences) {
-      preferenceData = data.preferences;
-      renderPreferenceSummary();
-    }
-    await loadHistory();
-  } catch (error) {
-    button.disabled = false;
-    showError(`削除できませんでした: ${error.message}`);
-  }
 }
 
 // キャンセル/実行の2択確認。共通モーダル部品へ委譲する。
@@ -8691,158 +6113,6 @@ function promptModal(title, initialValue = "", { placeholder = "", multiline = f
       }
     ]
   }).promise;
-}
-
-function openHistoryDetail(generation, image) {
-  const overlay = document.createElement("div");
-  overlay.className = "detailModal";
-  overlay.setAttribute("role", "dialog");
-  overlay.setAttribute("aria-modal", "true");
-  overlay.setAttribute("aria-label", "生成情報");
-  const box = document.createElement("div");
-  box.className = "detailBox";
-
-  const closeDetail = () => {
-    document.removeEventListener("keydown", onKey);
-    overlay.remove();
-  };
-  const onKey = (event) => { if (event.key === "Escape") closeDetail(); };
-
-  const header = document.createElement("div");
-  header.className = "detailHeader";
-  const heading = document.createElement("strong");
-  heading.textContent = generationTitle(generation);
-  const close = document.createElement("button");
-  close.type = "button";
-  close.className = "imageModalClose";
-  close.setAttribute("aria-label", "閉じる");
-  close.textContent = "×";
-  close.addEventListener("click", closeDetail);
-  header.append(heading, close);
-
-  const detailImage = document.createElement("img");
-  detailImage.className = "detailImage";
-  detailImage.src = originalImageUrl(image);
-  detailImage.alt = generationTitle(generation);
-  detailImage.title = "クリックで拡大";
-  detailImage.addEventListener("click", () => openImageModal(detailImage.src, detailImage.alt));
-
-  const settings = generation.settings ?? {};
-  const dl = document.createElement("dl");
-  dl.className = "detailFields";
-  const addField = (label, value) => {
-    if (value === null || value === undefined || value === "") return;
-    const dt = document.createElement("dt");
-    dt.textContent = label;
-    const dd = document.createElement("dd");
-    if (value instanceof Node) dd.append(value);
-    else dd.textContent = String(value);
-    dl.append(dt, dd);
-  };
-  addField("Checkpoint", settings.checkpoint || "Checkpoint記録なし");
-  addField("LoRA", buildLoraDetailNode(generation.loras));
-  addField("LoRA警告", buildLoraNoticeNode(generation.loraNotices));
-  addField("Seed", image.seed);
-  addField("Sampler", settings.samplerName);
-  addField("Scheduler", settings.scheduler);
-  if (settings.noiseSchedule && settings.noiseSchedule !== "Automatic") {
-    addField("Noise schedule", settings.noiseSchedule);
-  }
-  addField("Steps", settings.steps);
-  addField("CFG", settings.cfgScale);
-  const resolution = image.width && image.height
-    ? `${image.width}×${image.height}`
-    : (settings.width && settings.height ? `${settings.width}×${settings.height}` : null);
-  addField("解像度", resolution);
-  addField("生成モード", historyModeLabel(generation.mode) ?? "txt2img");
-  addField("生成日時", formatDate(generation.createdAt));
-
-  // コピー操作。整形はmetadata-format.jsへ分離してある。
-  const copyRow = document.createElement("div");
-  copyRow.className = "detailCopyActions";
-  copyRow.append(
-    createCopyButton("Copy Prompt", "secondary smallButton", () => buildPromptText(generation),
-      "ポジティブプロンプトだけをコピー"),
-    createCopyButton("Copy All Metadata", "secondary smallButton", () => buildMetadataText(generation, image),
-      "PNG Info形式で生成情報をコピー")
-  );
-
-  const prompts = document.createElement("div");
-  prompts.className = "detailPrompts";
-  prompts.append(buildPromptDetails("Prompt", generation.prompt));
-  prompts.append(buildPromptDetails("Negative Prompt", generation.negativePrompt));
-  for (const details of buildStructuredPromptDetails(generation)) prompts.append(details);
-  const sourceRuntime = runtimeForGeneration(generation);
-  const hiresAvailable = Boolean(sourceRuntime && runtimeSupports("hires", sourceRuntime));
-
-  const footer = document.createElement("div");
-  footer.className = "detailActions";
-  const addAction = (label, className, handler, title = "") => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = className;
-    button.textContent = label;
-    if (title) button.title = title;
-    button.addEventListener("click", handler);
-    footer.append(button);
-    return button;
-  };
-  const detailFavorite = createFavoriteButton(image, { style: "label", className: "favoriteButton" });
-  footer.append(detailFavorite);
-  addAction("img2imgへ", "secondary", () => { closeDetail(); useImageForImg2Img(image); });
-  addAction("部分修正", "secondary", () => { closeDetail(); useImageForInpaint(image); });
-  addAction("同じSeedで再生成", "secondary", () => {
-    closeDetail();
-    regenerateWithSameSeed(generation, image);
-  }, "Prompt・Seed・Checkpoint・LoRA・設定を復元して生成画面へ読み込みます");
-  addAction("LoRAだけ変更", "secondary", () => { closeDetail(); void changeLoraOnly(generation, image); });
-  addAction("衣装だけ変更", "secondary", () => { closeDetail(); void deriveWithInstruction(generation, image, "outfit"); });
-  addAction("背景だけ変更", "secondary", () => { closeDetail(); void deriveWithInstruction(generation, image, "background"); });
-  addAction("表情だけ変更", "secondary", () => { closeDetail(); void deriveWithInstruction(generation, image, "expression"); });
-  addAction("設定を複製", "ghost", () => {
-    closeDetail();
-    duplicateRecipe(generation, image);
-  }, "Seedは-1のまま設定だけ読み込みます");
-  const detailCompare = addAction("比較に追加", "ghost", () => {
-    toggleCompareSelection(image, generation, detailCompare);
-  });
-  detailCompare.dataset.compareImageId = String(image.id);
-  syncCompareControl(detailCompare, image.id);
-  const hiresAction = addAction("Hiresする", "primary", () => { closeDetail(); void hiresFromGallery(generation, image); },
-    hiresAvailable ? "この画像を元に高解像度仕上げ" : "生成元RuntimeではHiresを利用できません");
-  hiresAction.disabled = !hiresAvailable;
-
-  overlay.addEventListener("click", (event) => { if (event.target === overlay) closeDetail(); });
-  document.addEventListener("keydown", onKey);
-
-  box.append(header, detailImage, dl, copyRow, prompts, footer);
-  overlay.append(box);
-  document.body.append(overlay);
-}
-
-// コピー用ボタン。成功時だけ「Copied!」へ変え、失敗はエラーとして知らせる。
-function createCopyButton(label, className, buildText, title = "") {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = className;
-  button.textContent = label;
-  if (title) button.title = title;
-  button.addEventListener("click", async () => {
-    let text = "";
-    try {
-      text = buildText();
-    } catch {
-      text = "";
-    }
-    if (!text) return toast.warning("コピーできる情報が保存されていません");
-    try {
-      await copyToClipboard(text);
-      flashLabel(button, "Copied!");
-    } catch (error) {
-      toast.error(`コピーできませんでした: ${error.message}`);
-    }
-  });
-  return button;
 }
 
 // ---- ギャラリーからの派生生成 ----
@@ -8977,91 +6247,6 @@ function appendPromptInstruction(prompt, addition) {
   const base = String(prompt ?? "").trim();
   if (!addition) return base;
   return base ? `${base}, ${addition}` : addition;
-}
-
-function buildLoraDetailNode(loras) {
-  if (!Array.isArray(loras) || !loras.length) {
-    const span = document.createElement("span");
-    span.textContent = "LoRAなし";
-    return span;
-  }
-  const list = document.createElement("div");
-  list.className = "detailLoraList";
-  for (const lora of loras) {
-    const row = document.createElement("div");
-    row.className = "detailLoraRow";
-    const name = document.createElement("span");
-    name.className = "detailLoraName";
-    name.textContent = lora.name;
-    const weight = document.createElement("span");
-    weight.className = "detailLoraWeight";
-    // 実際に生成へ送ったWeightをそのまま出す（UIの古い値は使わない）。
-    weight.textContent = Number(lora.weight).toFixed(2);
-    row.append(name, weight);
-    if (lora.source) {
-      const source = document.createElement("small");
-      source.className = "detailLoraSource";
-      source.textContent = LORA_SOURCE_LABELS[lora.source] ?? lora.source;
-      source.title = "このLoRAの選択元";
-      row.append(source);
-    }
-    list.append(row);
-  }
-  return list;
-}
-
-const LORA_SOURCE_LABELS = { ui: "Source: ui", prompt: "Source: prompt", both: "Source: both" };
-
-// LoRAタグ同期の警告を履歴詳細でも確認できるようにする。
-function buildLoraNoticeNode(notices) {
-  if (!Array.isArray(notices) || !notices.length) return null;
-  const list = document.createElement("div");
-  list.className = "detailLoraNotices";
-  for (const notice of notices) {
-    const row = document.createElement("div");
-    row.textContent = {
-      duplicate: () => `同じLoRAが複数記述: ${notice.name}（${(notice.weights ?? []).join(" / ")} → ${notice.weight}）`,
-      unresolved: () => `未インストール: ${notice.name}`,
-      ambiguous: () => `特定不能: ${notice.name}（候補: ${(notice.candidates ?? []).join(" / ")}）`,
-      invalidWeight: () => `Weightを読み取れず1を使用: ${notice.name}`
-    }[notice.type]?.() ?? `${notice.type}: ${notice.name}`;
-    list.append(row);
-  }
-  return list;
-}
-
-// 構造化プロンプトを保存した履歴だけ、内訳とトリガーワードを追加表示する。
-function buildStructuredPromptDetails(generation) {
-  const sections = generation?.structuredPrompt;
-  if (!sections) return [];
-  const lines = PROMPT_FIELDS
-    .map((field) => [PROMPT_FIELD_LABELS[field], String(sections[field] ?? "").trim()])
-    .filter(([, value]) => value)
-    .map(([label, value]) => `${label}: ${value}`);
-  const triggers = normalizeAppliedTriggerWords(generation.appliedTriggerWords)
-    .map((trigger) => {
-      const state = trigger.enabled ? formatTriggerWord(trigger) : `${trigger.text}（無効）`;
-      return `${PROMPT_FIELD_LABELS[trigger.targetField]}: ${state}`;
-    });
-  const result = [];
-  if (lines.length) result.push(buildPromptDetails("構造化プロンプト", lines.join("\n")));
-  if (triggers.length) result.push(buildPromptDetails("LoRAトリガーワード", triggers.join("\n")));
-  if (generation.rawPromptOverride) {
-    result.push(buildPromptDetails("Raw Prompt上書き", generation.rawPrompt || generation.prompt));
-  }
-  return result;
-}
-
-function buildPromptDetails(label, text) {
-  const details = document.createElement("details");
-  details.className = "detailPrompt";
-  const summary = document.createElement("summary");
-  summary.textContent = label;
-  const body = document.createElement("p");
-  body.className = "detailPromptBody";
-  body.textContent = text || "（なし）";
-  details.append(summary, body);
-  return details;
 }
 
 function renderPreferenceSummary() {
@@ -9862,42 +7047,6 @@ function saveLoraOutfitSelections() {
   );
 }
 
-async function getJson(url) {
-  const response = await fetch(url);
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
-  return data;
-}
-
-async function postJson(url, body) {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
-  return data;
-}
-
-async function patchJson(url, body) {
-  const response = await fetch(url, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
-  return data;
-}
-
-async function deleteJson(url) {
-  const response = await fetch(url, { method: "DELETE" });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
-  return data;
-}
-
 function setBusy(busy, message = "") {
   generationBusy = busy;
   elements.generateButton.disabled = busy;
@@ -9929,13 +7078,11 @@ function setBusy(busy, message = "") {
   } else {
     updateMaskHistoryButtons();
   }
-  elements.finishButton.disabled = busy || !selectedCandidate;
-  elements.lockCompositionButton.disabled = busy || !selectedCandidate;
   syncIpAdapterUi();
   syncRuntimeUi();
   elements.loading.classList.toggle("hidden", !busy);
   if (message) elements.loadingText.textContent = message;
-  updateStudioGenerationState(busy, message);
+  studioController.updateGenerationState(busy, message);
 }
 
 function updateGenerateButton() {
