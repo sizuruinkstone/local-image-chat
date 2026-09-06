@@ -687,7 +687,7 @@ test("LoRAの基本Triggerと衣装プリセットを分離し、衣装は明示
   assert.match(app, /targetField:\s*profile\?\.category === "direction" \? undefined : "character"/);
   assert.match(app, /appendTriggersToRawPrompt\(elements\.prompt\.value,\s*automaticRawLoraTriggers\(\)\)/);
   assert.match(app, /buildFinalPrompt\(readStructuredSections\(\),\s*activeAppliedTriggerWords\(\)\)/);
-  assert.match(app, /enabled:\s*!disabledLoras\.has\(name\)/);
+  assert.match(app, /enabled:\s*!promptLoraCoordinator\.isDisabled\(name\)/);
   assert.match(app, /characterTriggerWords:\s*resolveLoraBaseTriggerWords/);
   assert.match(app, /outfitChoiceId/);
   assert.match(app, /outfitTriggerWords/);

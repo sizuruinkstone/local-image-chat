@@ -1222,7 +1222,7 @@ test("Task20 UIはRuntime切替完了後に履歴を復元し、生成元Runtime
   assert.match(app, /form: captureRuntimeFormState\(\)/);
   assert.match(app, /function captureRuntimeFormState\(\)[\s\S]*?candidateCount/);
   assert.match(app, /restoreRuntimeFormState\(snapshot\.form\)/);
-  assert.match(app, /function restoreRuntimeFormState\(snapshot\)[\s\S]*?promptDescription/);
+  assert.match(app, /function restoreRuntimeFormState\(snapshot,[\s\S]*?promptDescription/);
   assert.match(server, /app\.get\("\/api\/runtimes", async/);
   assert.match(server, /const health = await runtimeRegistry\.healthAll\(\)/);
   assert.match(server, /runtimeRegistry\.listDescriptors\(\)\.map\(\(descriptor\) =>/);
@@ -1233,10 +1233,11 @@ test("Task20 UIはRuntime切替完了後に履歴を復元し、生成元Runtime
   assert.match(server, /response\.json\(\{ loras: await civitai\.mergeWithInstalled\(loras\) \}\)/);
   assert.match(server, /const loras = provider\.descriptor\.id === "reforge"[\s\S]*?typeof provider\.refreshLoras === "function"[\s\S]*?await provider\.refreshLoras\(\)/);
   assert.doesNotMatch(server, /Forge Neo \/ AnimaのLoRA再読込は対応していません/);
-  assert.match(app, /async function loadRecipeFields\(recipe, image\)[\s\S]*?await ensureRuntimeForRecipe\(recipe\)/);
-  const recipeRestore = app.match(/async function loadRecipeFields\(recipe, image\)[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.match(app, /function loadRecipeFields\(recipe, image\)[\s\S]*?recipeWorkflow\.load\(recipe, image\)/);
+  const recipeRestore = app.match(/function loadRecipeFields\(recipe, image\)[\s\S]*?\n\}/)?.[0] ?? "";
   assert.doesNotMatch(recipeRestore, /\bactiveRuntimeId\b|\bruntimeOptions\b/);
-  assert.match(app, /async function ensureRuntimeForRecipe\(recipe\)[\s\S]*?return handleRuntimeChange\(target\.id\)/);
+  assert.match(app, /async function ensureRuntimeForRecipeDirect\(recipe\)[\s\S]*?return handleRuntimeChange\(target\.id\)/);
+  assert.match(app, /function ensureRuntimeForRecipe\(recipe\)[\s\S]*?recipeWorkflow\.ensureRuntime\(recipe\)/);
   assert.match(app, /isHiresAvailable:[\s\S]*?runtimeForGeneration\(generation\)/);
   const candidate = studio.match(/function selectCandidate\([\s\S]*?\n  \}/)?.[0] ?? "";
   assert.match(candidate, /syncWorkflowAvailability\(\)/);

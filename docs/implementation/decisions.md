@@ -11,5 +11,7 @@
 | featureの依存は小さな明示的interfaceで渡す | appをcomposition rootとして段階的に整理。navigationへDOM subsetとentry callbackを注入し、巨大なapp contextやappへの逆importを渡さない。History cache/loading等は元のownerに残す |
 | navigationの寿命とgenerationの寿命を分ける | navigationのinit/disposeは自身のlistenerだけを管理する。画面遷移・disposeでformを再生成したり、job/monitorを停止したりしない。hash/localStorageの既存復元規則を保持する |
 | repository内に引き継ぎを残す | AGENTSは作業ルール、current-stateは現在snapshot、各Phase文書は検証根拠。過去の会話を再読しなくても次の依頼範囲から再開できるようにする |
+| generation LoRA selectionとactive Prompt tag同期はcoordinatorが単独所有 | Raw override中はRaw、その他はStructuredをform portから読む。UI追加はtagを挿入せず、weight操作は既存tagのみ更新。selection/source/disabledとcatalogを分離し、recipe/Checkpoint Setはsnapshot portへ接続。trigger/profile/outfit保存mapとフォームpriorityはapp adapterに残す。既存の非対称性と更新順はPhase 17記録を参照 |
+| Runtime切替成功とRecipe後続restoreは別transaction境界 | Runtime controllerは成功時に切替snapshotを破棄し、instruction dialog cancel後も成功した切替を維持する。Recipeのcritical rollbackはRuntime readiness成功後の非Runtime owner snapshotを基準にする。旧Runtime用のform/LoRAを新Runtimeへ戻さない。checkpoint/source/maskの現行Recipe非適用と保存例外のprefix保持はPhase 21 gate記録を参照 |
 
 これらと異なる変更が明示依頼された場合は、その対象・contract影響を確認し、実際に採用した判断だけ更新する。既存機能・データを古いという理由だけで削除しない。

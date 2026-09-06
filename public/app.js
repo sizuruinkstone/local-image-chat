@@ -1,6 +1,17 @@
 import { getJson, postJson, patchJson, deleteJson } from "./core/http-client.js";
 import { createRuntimeController } from "./features/runtime-controller.js";
 import { createCheckpointSetController } from "./features/checkpoint-sets.js";
+import { createPromptLoraCoordinator } from "./features/prompt-lora-coordinator.js";
+import {
+  createReferenceImageController
+} from "./features/reference-image.js";
+import { createInpaintEditor } from "./features/inpaint-editor.js";
+import { createIpAdapterController } from "./features/ip-adapter-controller.js";
+import {
+  RecipePersistenceError,
+  createRecipeWorkflow,
+  runRecipePersistence
+} from "./features/recipe-workflow.js";
 import { createLoraLibrary } from "./features/lora-library.js";
 import { createCivitaiController } from "./features/civitai-controller.js";
 import {
@@ -51,13 +62,7 @@ import {
   splitTriggerPreview
 } from "./preset-catalog.js";
 import {
-  buildLoraNotices,
-  describeLoraNotices,
-  hasLoraTag,
-  parseLoraTags,
-  reconcilePromptLoras,
-  removeLoraTags,
-  replaceLoraWeight
+  hasLoraTag
 } from "./lora-tags.js";
 import {
   mergePromptValue,
@@ -98,7 +103,6 @@ import {
 } from "./history-title.js";
 
 const PROFILE_STORAGE_VERSION = 3;
-const MAX_INIT_IMAGE_BYTES = 20 * 1024 * 1024;
 const TITLE_STORAGE_KEYS = {
   mode: "localImageChat.titleGenerationMode",
   template: "localImageChat.titleTemplate"
@@ -243,7 +247,6 @@ const TRIGGER_PREVIEW_COUNT = 2;
 const IMPORT_SOURCE_PREFIX = "import:";
 // プロンプト入力中に同期を走らせすぎないための待ち時間。
 const LORA_SYNC_DEBOUNCE = 400;
-let loraSyncTimer = null;
 const TRIGGER_LIST_ELEMENTS = {
   character: "triggerListCharacter",
   appearance: "triggerListAppearance",
@@ -466,7 +469,7 @@ const studioController = createStudioController({
   onHistoryFilterChange: loadStudioRecent,
   onOpenDetail: openHistoryDetail,
   onLoadRecipe: activateCompositionLock,
-  onUseAsReference: setCurrentImageAsIpAdapterReference,
+  onUseAsReference: (...args) => ipAdapterController.setCurrentImageAsReference(...args),
   onToggleCompare: toggleCompareSelection,
   onRegenerate: regenerateWithSameSeed,
   onUseFinalAsImg2Img: useImageForImg2Img,
@@ -478,7 +481,7 @@ const studioController = createStudioController({
   onFocusSetting: focusGenerationSetting,
   onStateChanged: () => {
     syncRuntimeUi();
-    syncIpAdapterUi();
+    ipAdapterController.syncUi();
   }
 });
 const comparisonController = createComparisonController({
@@ -595,14 +598,13 @@ const experimentController = createExperimentController({
     description: promptDescription,
     positivePrompt: currentPositivePrompt(),
     mode: generationMode,
-    hasInitImage: Boolean(initImageReference)
+    hasInitImage: referenceImageController.hasReference()
   }),
   setSeed: (seed) => { elements.seed.value = String(seed); },
-  getSelectedLoraOptions: () => [...selectedLoras.keys()].map((name) => ({
-    value: name,
-    label: findLoraByName(name)?.displayName ?? name
-  })),
-  syncLorasFromPrompt,
+  getSelectedLoraOptions: () => promptLoraCoordinator.getSelectedOptions(
+    (name) => findLoraByName(name)?.displayName ?? name
+  ),
+  syncLorasFromPrompt: () => promptLoraCoordinator.syncFromPrompt(),
   shouldRequestPrompt,
   requestPrompt,
   getRuntimePayload: runtimePayload,
@@ -630,8 +632,6 @@ const experimentController = createExperimentController({
   sleep
 });
 const { loadOptions: loadSamplerOptions, syncLabels: syncSamplerLabels } = samplerPicker;
-// 選択したまま「今回は使わない」LoRA（ON/OFF）。選択自体は保持する。
-const disabledLoras = new Set();
 // 次の生成が「どの派生操作から来たか」を履歴へ残すための一時情報。
 let pendingDerivation = null;
 // Seedの「ランダム」はアプリ全体で-1。空欄と同じ扱いにはしない。
@@ -641,40 +641,8 @@ let clearedPromptSnapshot = null;
 // Seedクリアボタンの表示同期（setupClearableFieldsで実体を入れる）。
 let syncSeedClearButton = () => {};
 let generationMode = "txt2img";
-let initImageReference = null;
-let ipAdapterOptions = {
-  available: false,
-  family: null,
-  module: null,
-  model: null,
-  message: "利用可否を確認中…"
-};
-let ipAdapterState = {
-  enabled: false,
-  weight: 0.65,
-  guidanceStart: 0,
-  guidanceEnd: 1,
-  referenceImageId: null,
-  referenceImageUrl: null,
-  referenceImage: null,
-  previewUrl: "",
-  label: ""
-};
-let ipAdapterObjectUrl = null;
 let generationBusy = false;
-let defaultInpaintFullRes = true;
-let maskDrawing = false;
-let maskLastPoint = null;
-let maskTool = "paint";
-let maskSourceKey = "";
-let maskUndoStack = [];
-let maskRedoStack = [];
-const MAX_MASK_HISTORY = 12;
-const selectedLoras = new Map();
-// LoRAごとの選択元: "ui"（UI操作）/ "prompt"（プロンプト内タグ）/ "both"
-const loraSelectionSources = new Map();
-// 直近のLoRAタグ同期で出た警告（重複・未インストールなど）。履歴へも保存する。
-let loraSyncNotices = [];
+let recipePersistenceActive = false;
 const loraWeights = loadLoraWeights();
 const loraTriggers = loadLoraTriggers();
 const loraNegativeWords = loadStringMap("localImageChat.loraNegativeWords");
@@ -687,6 +655,72 @@ const checkpointProfileAssignments = loadStringMap("localImageChat.checkpointPro
 let checkpointSetController;
 let loraLibrary;
 let civitaiController;
+let ipAdapterController;
+let referenceImageController;
+const inpaintEditor = createInpaintEditor({
+  elements: {
+    inpaintCanvasStage: elements.inpaintCanvasStage,
+    inpaintMaskEmpty: elements.inpaintMaskEmpty,
+    inpaintBaseImage: elements.inpaintBaseImage,
+    inpaintMaskCanvas: elements.inpaintMaskCanvas,
+    maskStatus: elements.maskStatus,
+    maskPaintButton: elements.maskPaintButton,
+    maskEraseButton: elements.maskEraseButton,
+    maskUndoButton: elements.maskUndoButton,
+    maskRedoButton: elements.maskRedoButton,
+    maskClearButton: elements.maskClearButton,
+    maskBrushSize: elements.maskBrushSize,
+    maskBrushSizeValue: elements.maskBrushSizeValue,
+    inpaintDenoising: elements.inpaintDenoising,
+    inpaintDenoisingValue: elements.inpaintDenoisingValue,
+    maskBlur: elements.maskBlur,
+    inpaintFill: elements.inpaintFill,
+    inpaintFullRes: elements.inpaintFullRes,
+    inpaintFullResPadding: elements.inpaintFullResPadding
+  },
+  storage: {
+    getItem: (key) => localStorage.getItem(key),
+    setItem: setRecipeAwareStorage
+  }
+});
+referenceImageController = createReferenceImageController({
+  elements: {
+    width: elements.width,
+    height: elements.height,
+    img2imgPanel: elements.img2imgPanel,
+    img2imgDropZone: elements.img2imgDropZone,
+    initImageInput: elements.initImageInput,
+    initImageEmpty: elements.initImageEmpty,
+    initImagePreview: elements.initImagePreview,
+    chooseInitImageButton: elements.chooseInitImageButton,
+    clearInitImageButton: elements.clearInitImageButton,
+    initImageStatus: elements.initImageStatus,
+    syncInitImageSize: elements.syncInitImageSize
+  },
+  getMode: () => generationMode,
+  setMode: setGenerationMode,
+  clearError,
+  showError,
+  onClear: inpaintEditor.reset,
+  onSyncPreferenceChange: saveImg2ImgPreferences
+});
+const promptLoraCoordinator = createPromptLoraCoordinator({
+  getCatalog: () => loraLibrary?.getItems() ?? [],
+  readPromptSources: positivePromptSources,
+  writePromptSource,
+  afterPromptWrite: () => {
+    syncRawPromptFromSections();
+    syncPromptClearButtons();
+  },
+  setCachedWeight: (name, weight) => loraWeights.set(name, weight),
+  persistWeights: saveLoraWeights,
+  renderLoras: () => renderLoras(),
+  renderSelection: () => renderSelectedLoraSummary(),
+  renderNotices: renderLoraSyncNotice,
+  applyPromptSnapshot: (prompt, negativePrompt) => setPromptFields(prompt, negativePrompt, promptDescription),
+  restorePromptSnapshot: restorePromptFieldsFromRecipe,
+  debounceMs: LORA_SYNC_DEBOUNCE
+});
 const runtimeController = createRuntimeController({
   elements: {
     runtimeSelect: elements.runtimeSelect,
@@ -704,7 +738,7 @@ const runtimeController = createRuntimeController({
   loadExternalResources: (context) => [
     loadLoras(false, context),
     loadSamplerOptions(context),
-    loadIpAdapterOptions(context)
+    ipAdapterController.loadOptions(context)
   ],
   onRuntimeUiChange: syncRuntimeState,
   onCheckpointCatalogChange: syncCheckpointState,
@@ -717,8 +751,43 @@ const runtimeController = createRuntimeController({
     await checkpointSetController.applyAuto(state, context, isCurrent);
     if (!isCurrent()) return;
     void checkHealth();
-    void loadIpAdapterOptions();
+    void ipAdapterController.loadOptions();
   }
+});
+
+ipAdapterController = createIpAdapterController({
+  elements: {
+    generationSettingsDetails: elements.generationSettingsDetails,
+    ipAdapterDetails: elements.ipAdapterDetails,
+    ipAdapterEnabled: elements.ipAdapterEnabled,
+    ipAdapterInput: elements.ipAdapterInput,
+    ipAdapterDropZone: elements.ipAdapterDropZone,
+    chooseIpAdapterButton: elements.chooseIpAdapterButton,
+    clearIpAdapterButton: elements.clearIpAdapterButton,
+    ipAdapterPreview: elements.ipAdapterPreview,
+    ipAdapterEmpty: elements.ipAdapterEmpty,
+    ipAdapterStatus: elements.ipAdapterStatus,
+    ipAdapterModel: elements.ipAdapterModel,
+    ipAdapterWeight: elements.ipAdapterWeight,
+    ipAdapterGuidanceStart: elements.ipAdapterGuidanceStart,
+    ipAdapterGuidanceEnd: elements.ipAdapterGuidanceEnd,
+    ipAdapterWeightValue: elements.ipAdapterWeightValue,
+    ipAdapterGuidanceStartValue: elements.ipAdapterGuidanceStartValue,
+    ipAdapterGuidanceEndValue: elements.ipAdapterGuidanceEndValue
+  },
+  getJson,
+  runtimeApiUrl,
+  runtimeRequestContext,
+  isRuntimeContextCurrent,
+  runtimeSupports,
+  isRuntimeSwitching: () => runtimeController.getState().switching,
+  getGenerationBusy: () => generationBusy,
+  showError,
+  clearError,
+  toast,
+  shorten,
+  originalImageUrl,
+  onAvailabilityChange: (availability) => studioController.syncWorkflowAvailability(availability)
 });
 
 checkpointSetController = createCheckpointSetController({
@@ -753,7 +822,7 @@ checkpointSetController = createCheckpointSetController({
     apply: applyCheckpointSetSettings
   },
   loras: {
-    fingerprintEntries: () => selectedLoras.entries(),
+    fingerprintEntries: () => promptLoraCoordinator.fingerprintEntries(),
     readForSet: readSelectedLoras,
     restore: restoreCheckpointSetLoras,
     render: renderCheckpointSetLoras
@@ -764,7 +833,7 @@ checkpointSetController = createCheckpointSetController({
       negativePrompt: elements.negativePrompt.value,
       promptBoosts: readPromptBoosts()
     }),
-    apply: (prompt, negativePrompt) => setPromptFields(prompt, negativePrompt, promptDescription)
+    apply: (prompt, negativePrompt) => promptLoraCoordinator.applyPromptSnapshot(prompt, negativePrompt)
   }
 });
 
@@ -800,16 +869,16 @@ loraLibrary = createLoraLibrary({
     getGenerationBusy: () => generationBusy
   },
   controls: {
-    isSelected: (name) => selectedLoras.has(name),
-    selectedCount: () => selectedLoras.size,
+    isSelected: (name) => promptLoraCoordinator.isSelected(name),
+    selectedCount: () => promptLoraCoordinator.selectedCount(),
     setSelected: setLoraSelected,
     getWeight: (name) => loraWeights.get(name),
     setWeight: (name, weight, { syncPrompt = false } = {}) => {
       loraWeights.set(name, weight);
       saveLoraWeights();
-      if (selectedLoras.has(name)) {
-        selectedLoras.set(name, weight);
-        if (syncPrompt) applyLoraWeightToPrompt(name, weight);
+      promptLoraCoordinator.updateSelectedWeight(name, weight);
+      if (syncPrompt && promptLoraCoordinator.isSelected(name)) {
+        promptLoraCoordinator.rewriteWeightToPrompt(name, weight);
       }
     },
     getTrigger: resolveLoraTriggerText,
@@ -867,6 +936,62 @@ loraLibrary = createLoraLibrary({
   clearError
 });
 
+const recipeWorkflow = createRecipeWorkflow({
+  runtime: {
+    getActiveId: () => runtimeController.getState().activeRuntimeId,
+    ensure: ensureRuntimeForRecipeDirect,
+    isReadyFor: (recipe) => {
+      const state = runtimeController.getState();
+      return !state.switching && runtimeController.runtimeForGeneration(recipe)?.id === state.activeRuntimeId;
+    },
+    captureContext: () => runtimeController.runtimeRequestContext(),
+    isCurrent: (context) => runtimeController.isRuntimeContextCurrent(context)
+  },
+  form: {
+    beginApply: () => {
+      clearError();
+      recipePersistenceActive = true;
+    },
+    endApply: () => { recipePersistenceActive = false; },
+    captureState: captureFormState,
+    restoreState: (snapshot) => {
+      const restored = restoreFormState(snapshot);
+      if (restored) studioController.syncOutputStats();
+      return restored;
+    },
+    applyHeader: applyRecipeHeader,
+    applySettings: applyRecipeSettings,
+    applyLoraDetails: applyRecipeLoraDetails,
+    persistAndRender: persistAndRenderRecipe
+  },
+  promptLora: {
+    captureState: () => promptLoraCoordinator.captureState(),
+    restoreState: (snapshot) => promptLoraCoordinator.restoreState(snapshot),
+    restorePromptSnapshot: (recipe) => promptLoraCoordinator.restorePromptSnapshot(recipe),
+    restoreRecipeSelection: (loras) => promptLoraCoordinator.restoreRecipeSelection(loras),
+    syncFromPrompt: () => promptLoraCoordinator.syncFromPrompt()
+  },
+  ipAdapter: {
+    captureState: () => ipAdapterController.captureState(),
+    restoreState: (snapshot) => ipAdapterController.restoreState(snapshot),
+    restoreRecipe: (recipe) => ipAdapterController.restoreRecipe(recipe)
+  },
+  referenceImage: {
+    captureSnapshot: () => referenceImageController.captureSnapshot(),
+    restoreSnapshot: (snapshot) => referenceImageController.restoreSnapshot(snapshot, { syncSize: false })
+  },
+  inpaint: {
+    captureState: () => inpaintEditor.captureState(),
+    restoreState: (snapshot, options) => inpaintEditor.restoreState(snapshot, options)
+  },
+  reportError: (error, details) => {
+    const suffix = details?.rollback === "incomplete"
+      ? `（復元未完了: ${(details.failures ?? []).join(" / ")}）`
+      : "";
+    showError(`履歴の設定を読み込めませんでした: ${error?.message || error}${suffix}`);
+  }
+});
+
 civitaiController = createCivitaiController({
   elements: {
     civitaiUrl: elements.civitaiUrl,
@@ -919,7 +1044,7 @@ await loadConfig();
 loadTitleSettings();
 initializeCheckpointControls();
 loadImg2ImgPreferences();
-loadInpaintPreferences();
+inpaintEditor.loadPreferences();
 loadPromptPartSelections();
 restoreSessionSecrets();
 registerServiceWorker();
@@ -931,14 +1056,14 @@ syncRawPromptFromSections();
 await Promise.all([
   checkHealth(), runtimeController.loadCheckpoints(), loadLoras(), loadHistory(), loadCivitaiFolders(), loadLoraRoot(),
   loadExperiments(), checkpointSetController.load(), loadDiscordSettings(), loadPromptTemplate(),
-  loadShareState(), loadSamplerOptions(), loadStorageSettings(), loadIpAdapterOptions()
+  loadShareState(), loadSamplerOptions(), loadStorageSettings(), ipAdapterController.loadOptions()
 ]);
 checkpointSetController.markSettingsApplied();
 setGenerationMode("txt2img");
 updateGenerateButton();
 studioController.syncOutputStats();
 setupClearableFields();
-syncIpAdapterUi();
+ipAdapterController.syncUi();
 // 再読み込み後も、サーバー側で走っているジョブを拾って右上へ表示する。
 queueController.startPolling();
 
@@ -953,12 +1078,15 @@ settingsNavigation.init();
 discordSettings.init();
 storageSettings.init();
 aiShare.init();
-  queueController.init();
+queueController.init();
 imageState.init();
 studioController.init();
 comparisonController.init();
 historyController.init();
 experimentController.init();
+referenceImageController.init();
+inpaintEditor.init();
+ipAdapterController.init();
 for (const control of [
   elements.width, elements.height, elements.seed, elements.steps, elements.cfgScale,
   elements.samplerName, elements.scheduler
@@ -972,80 +1100,9 @@ elements.seedFixedToggle.addEventListener("change", toggleGenerationSeedFixed);
 elements.txt2imgModeButton.addEventListener("click", () => setGenerationMode("txt2img"));
 elements.img2imgModeButton.addEventListener("click", () => setGenerationMode("img2img"));
 elements.inpaintModeButton.addEventListener("click", () => setGenerationMode("inpaint"));
-elements.chooseInitImageButton.addEventListener("click", () => elements.initImageInput.click());
-elements.initImageInput.addEventListener("change", () => {
-  const [file] = elements.initImageInput.files ?? [];
-  if (file) void loadInitImageFile(file);
-});
-elements.clearInitImageButton.addEventListener("click", clearInitImageReference);
-elements.chooseIpAdapterButton.addEventListener("click", () => elements.ipAdapterInput.click());
-elements.ipAdapterInput.addEventListener("change", () => {
-  const [file] = elements.ipAdapterInput.files ?? [];
-  if (file) void loadIpAdapterFile(file);
-});
-for (const eventName of ["dragenter", "dragover"]) {
-  elements.ipAdapterDropZone.addEventListener(eventName, (event) => {
-    event.preventDefault();
-    elements.ipAdapterDropZone.classList.add("dragging");
-  });
-}
-for (const eventName of ["dragleave", "drop"]) {
-  elements.ipAdapterDropZone.addEventListener(eventName, (event) => {
-    event.preventDefault();
-    elements.ipAdapterDropZone.classList.remove("dragging");
-  });
-}
-elements.ipAdapterDropZone.addEventListener("drop", (event) => {
-  const [file] = event.dataTransfer?.files ?? [];
-  if (file) void loadIpAdapterFile(file);
-});
-elements.clearIpAdapterButton.addEventListener("click", () => clearIpAdapterReference());
-elements.ipAdapterEnabled.addEventListener("change", toggleIpAdapterEnabled);
-elements.ipAdapterWeight.addEventListener("input", syncIpAdapterNumbers);
-elements.ipAdapterGuidanceStart.addEventListener("input", syncIpAdapterNumbers);
-elements.ipAdapterGuidanceEnd.addEventListener("input", syncIpAdapterNumbers);
 elements.img2imgPreset.addEventListener("change", handleImg2ImgPresetChange);
 elements.img2imgDenoising.addEventListener("input", handleImg2ImgDenoisingInput);
 elements.img2imgResizeMode.addEventListener("change", saveImg2ImgPreferences);
-elements.syncInitImageSize.addEventListener("change", () => {
-  saveImg2ImgPreferences();
-  if (elements.syncInitImageSize.checked && initImageReference?.width && initImageReference?.height) {
-    syncResolutionToReference(initImageReference.width, initImageReference.height);
-  }
-});
-elements.maskPaintButton.addEventListener("click", () => setMaskTool("paint"));
-elements.maskEraseButton.addEventListener("click", () => setMaskTool("erase"));
-elements.maskUndoButton.addEventListener("click", undoMask);
-elements.maskRedoButton.addEventListener("click", redoMask);
-elements.maskClearButton.addEventListener("click", () => clearMask());
-elements.maskBrushSize.addEventListener("input", updateMaskBrushSize);
-elements.inpaintDenoising.addEventListener("input", handleInpaintSettingsChange);
-for (const element of [
-  elements.maskBlur, elements.inpaintFill, elements.inpaintFullRes, elements.inpaintFullResPadding
-]) {
-  element.addEventListener("change", handleInpaintSettingsChange);
-}
-elements.inpaintMaskCanvas.addEventListener("pointerdown", beginMaskStroke);
-elements.inpaintMaskCanvas.addEventListener("pointermove", continueMaskStroke);
-for (const eventName of ["pointerup", "pointercancel", "pointerleave"]) {
-  elements.inpaintMaskCanvas.addEventListener(eventName, endMaskStroke);
-}
-for (const eventName of ["dragenter", "dragover"]) {
-  elements.img2imgDropZone.addEventListener(eventName, (event) => {
-    event.preventDefault();
-    elements.img2imgDropZone.classList.add("dragging");
-  });
-}
-for (const eventName of ["dragleave", "drop"]) {
-  elements.img2imgDropZone.addEventListener(eventName, (event) => {
-    event.preventDefault();
-    elements.img2imgDropZone.classList.remove("dragging");
-  });
-}
-elements.img2imgDropZone.addEventListener("drop", (event) => {
-  const [file] = event.dataTransfer?.files ?? [];
-  if (file) void loadInitImageFile(file);
-});
 elements.lockCompositionButton.addEventListener("click", lockSelectedComposition);
 elements.unlockCompositionButton.addEventListener("click", unlockComposition);
 elements.cancelJobButton.addEventListener("click", cancelActiveJob);
@@ -1133,8 +1190,8 @@ async function loadConfig() {
   for (const [key, value] of Object.entries(defaults)) {
     if (!elements[key]) continue;
     if (key === "inpaintFullRes") {
-      defaultInpaintFullRes = value !== false;
-      elements.inpaintFullRes.checked = defaultInpaintFullRes;
+      inpaintEditor.setDefaultFullRes(value);
+      elements.inpaintFullRes.checked = value !== false;
     } else {
       elements[key].value = value;
     }
@@ -1184,11 +1241,8 @@ function captureRuntimeState() {
     form: captureRuntimeFormState(),
     installedLoras: loraLibrary.getItems(),
     samplerOptions: samplerPicker.getOptions(),
-    ipAdapterOptions,
-    ipAdapterState: { ...ipAdapterState },
-    selectedLoras: new Map(selectedLoras),
-    loraSelectionSources: new Map(loraSelectionSources),
-    disabledLoras: new Set(disabledLoras)
+    ipAdapter: ipAdapterController.captureState(),
+    promptLora: promptLoraCoordinator.captureState()
   };
 }
 
@@ -1196,20 +1250,14 @@ function restoreRuntimeState(snapshot) {
   if (!snapshot) return;
   loraLibrary.setItems(snapshot.installedLoras, { publish: false, renderNow: false });
   samplerPicker.setOptions(snapshot.samplerOptions);
-  ipAdapterOptions = snapshot.ipAdapterOptions;
-  ipAdapterState = snapshot.ipAdapterState;
-  selectedLoras.clear();
-  for (const [name, weight] of snapshot.selectedLoras) selectedLoras.set(name, weight);
-  loraSelectionSources.clear();
-  for (const [name, source] of snapshot.loraSelectionSources) loraSelectionSources.set(name, source);
-  disabledLoras.clear();
-  for (const name of snapshot.disabledLoras) disabledLoras.add(name);
+  ipAdapterController.restoreState(snapshot.ipAdapter, { render: false });
+  promptLoraCoordinator.restoreState(snapshot.promptLora);
 }
 
 function finalizeRuntimeStateRestore(snapshot) {
   if (!snapshot) return;
   restoreRuntimeFormState(snapshot.form);
-  syncIpAdapterUi();
+  ipAdapterController.syncUi();
 }
 
 function captureRuntimeFormState() {
@@ -1229,16 +1277,16 @@ function captureRuntimeFormState() {
       .map((id) => [id, elements[id].checked])),
     promptDescription,
     structuredPrompt: readStructuredSections(),
-    appliedTriggerWords: [...appliedTriggerWords],
+    appliedTriggerWords: copyAppliedTriggerWords(appliedTriggerWords),
     rawPromptOverride,
     rawPromptOverrideSource,
     promptMode,
     generationMode,
-    initImageReference: initImageReference ? { ...initImageReference } : null
+    initImageReference: referenceImageController.captureSnapshot()
   };
 }
 
-function restoreRuntimeFormState(snapshot) {
+function restoreRuntimeFormState(snapshot, { syncReferenceSize = true } = {}) {
   if (!snapshot) return;
   for (const [id, value] of Object.entries(snapshot.values ?? {})) {
     if (elements[id]) elements[id].value = value;
@@ -1247,25 +1295,65 @@ function restoreRuntimeFormState(snapshot) {
     if (elements[id]) elements[id].checked = checked === true;
   }
   promptDescription = String(snapshot.promptDescription ?? "");
-  appliedTriggerWords = Array.isArray(snapshot.appliedTriggerWords)
-    ? [...snapshot.appliedTriggerWords]
-    : [];
+  appliedTriggerWords = copyAppliedTriggerWords(snapshot.appliedTriggerWords);
   rawPromptOverride = snapshot.rawPromptOverride === true;
   rawPromptOverrideSource = snapshot.rawPromptOverrideSource === "generated" ? "generated" : "manual";
   writeStructuredSections(snapshot.structuredPrompt ?? {});
   setPromptMode(snapshot.promptMode);
   syncRawPromptFromSections();
   renderPromptModeState();
-  if (snapshot.initImageReference) {
-    setImageReference({ ...snapshot.initImageReference }, { mode: snapshot.generationMode });
-  } else if (initImageReference) {
-    clearInitImageReference();
-  }
+  referenceImageController.restoreSnapshot(snapshot.initImageReference ?? null, {
+    mode: snapshot.generationMode,
+    syncSize: syncReferenceSize
+  });
   setGenerationMode(snapshot.generationMode);
   syncSamplerLabels();
   handleCandidateCountChange();
   handleImg2ImgDenoisingInput();
-  handleInpaintSettingsChange();
+  inpaintEditor.savePreferences();
+}
+
+function copyAppliedTriggerWords(values) {
+  if (!Array.isArray(values)) return [];
+  return values.map((trigger) => ({
+    ...trigger,
+    sourceLoraIds: Array.isArray(trigger?.sourceLoraIds) ? [...trigger.sourceLoraIds] : []
+  }));
+}
+
+function captureFormState() {
+  return {
+    form: captureRuntimeFormState(),
+    contentRating: selectedContentRating(),
+    loraWeights: [...loraWeights],
+    loraTriggers: [...loraTriggers],
+    loraNegativeWords: [...loraNegativeWords],
+    loraOutfitSelections: [...loraOutfitSelections]
+  };
+}
+
+function replaceMap(target, entries) {
+  target.clear();
+  for (const [name, value] of entries ?? []) target.set(name, value);
+}
+
+function restoreFormState(snapshot) {
+  if (!snapshot) return false;
+  replaceMap(loraWeights, snapshot.loraWeights);
+  replaceMap(loraTriggers, snapshot.loraTriggers);
+  replaceMap(loraNegativeWords, snapshot.loraNegativeWords);
+  replaceMap(loraOutfitSelections, snapshot.loraOutfitSelections);
+  restoreRuntimeFormState(snapshot.form, { syncReferenceSize: false });
+  setContentRating(snapshot.contentRating);
+  saveLoraWeights();
+  saveLoraTriggers();
+  saveLoraNegativeWords();
+  saveLoraOutfitSelections();
+  renderLoras();
+  renderSelectedLoraSummary();
+  renderTriggerLists();
+  renderPromptFieldPreviews();
+  return true;
 }
 
 function runtimeSupports(feature, runtime = runtimeController.getState().activeRuntime) {
@@ -1328,7 +1416,6 @@ function syncRuntimeUi() {
   elements.refreshCheckpointsButton.disabled = busy || checkpointRefreshInFlight;
   elements.img2imgModeButton.disabled = busy || !runtimeSupports("img2img");
   elements.inpaintModeButton.disabled = busy || !runtimeSupports("inpaint");
-  elements.ipAdapterEnabled.disabled = busy || !runtimeSupports("ipAdapter");
   for (const control of [
     elements.hiresScale,
     elements.hiresSteps,
@@ -1338,11 +1425,7 @@ function syncRuntimeUi() {
   if (!runtimeSwitching && !runtimeSupports("img2img") && ["img2img", "inpaint"].includes(generationMode)) {
     setGenerationMode("txt2img");
   }
-  studioController.syncWorkflowAvailability({
-    runtimeSwitching,
-    ipAdapterAvailable: Boolean(ipAdapterOptions.available && runtimeSupports("ipAdapter"))
-  });
-  syncIpAdapterUi();
+  ipAdapterController.syncUi();
 }
 
 async function handleRuntimeChange(requestedRuntimeId = elements.runtimeSelect.value) {
@@ -1483,7 +1566,8 @@ function setGenerationMode(mode) {
   elements.img2imgPanel.classList.toggle("hidden", !usesSource);
   elements.img2imgSettings.classList.toggle("hidden", !isImg2Img);
   elements.inpaintPanel.classList.toggle("hidden", !isInpaint);
-  if (isInpaint && initImageReference) void initializeInpaintEditor(initImageReference);
+  const initImageReference = referenceImageController.getReference();
+  if (isInpaint && initImageReference) void inpaintEditor.setSource(initImageReference);
   syncRuntimeUi();
   updateGenerateButton();
 }
@@ -1524,117 +1608,18 @@ function setResultTab(tab) {
   showView(tab === "gallery" ? "gallery" : "generate");
 }
 
-async function loadInitImageFile(file) {
-  clearError();
-  const mimeType = inferImageMimeType(file);
-  if (!mimeType) {
-    return showError("参照画像はPNG・JPEG・WebPを選択してください");
-  }
-  if (file.size > MAX_INIT_IMAGE_BYTES) {
-    return showError("参照画像は20MB以下にしてください");
-  }
-
-  try {
-    const loadedDataUrl = await fileToDataUrl(file);
-    const dataUrl = loadedDataUrl.replace(/^data:[^;]*;/, `data:${mimeType};`);
-    const dimensions = await imageDimensions(dataUrl);
-    setImageReference({
-      dataUrl,
-      imageUrl: dataUrl,
-      imageId: null,
-      filename: file.name,
-      ...dimensions
-    }, { mode: generationMode === "inpaint" ? "inpaint" : "img2img" });
-  } catch (error) {
-    showError(`参照画像を読み込めませんでした: ${error.message}`);
-  }
-}
-
-function inferImageMimeType(file) {
-  if (["image/png", "image/jpeg", "image/webp"].includes(file.type)) return file.type;
-  const extension = file.name.split(".").pop()?.toLowerCase();
-  return extension === "png"
-    ? "image/png"
-    : ["jpg", "jpeg"].includes(extension)
-      ? "image/jpeg"
-      : extension === "webp"
-        ? "image/webp"
-        : "";
-}
-
 function useImageForImg2Img(image) {
-  setImageReference({
-    dataUrl: null,
+  referenceImageController.useImage(image, {
     imageUrl: originalImageUrl(image),
-    imageId: image.id,
-    filename: image.filename,
-    width: image.width,
-    height: image.height
-  }, { scroll: true, mode: "img2img" });
+    mode: "img2img"
+  });
 }
 
 function useImageForInpaint(image) {
-  setImageReference({
-    dataUrl: null,
+  referenceImageController.useImage(image, {
     imageUrl: originalImageUrl(image),
-    imageId: image.id,
-    filename: image.filename,
-    width: image.width,
-    height: image.height
-  }, { scroll: true, mode: "inpaint" });
-}
-
-function setImageReference(reference, { scroll = false, mode = "img2img" } = {}) {
-  reference.maskKey = reference.imageId ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  initImageReference = reference;
-  setGenerationMode(mode);
-  elements.initImagePreview.src = reference.imageUrl;
-  elements.initImagePreview.classList.remove("hidden");
-  elements.initImageEmpty.classList.add("hidden");
-  elements.initImageStatus.textContent = reference.imageId
-    ? `履歴から使用: ${reference.filename ?? reference.imageId}`
-    : `アップロード: ${reference.filename ?? "参照画像"}`;
-  elements.clearInitImageButton.disabled = false;
-  elements.initImageInput.value = "";
-
-  if (reference.width && reference.height) {
-    if (elements.syncInitImageSize.checked) syncResolutionToReference(reference.width, reference.height);
-  } else {
-    void imageDimensions(reference.imageUrl).then(({ width, height }) => {
-      if (initImageReference !== reference) return;
-      initImageReference.width = width;
-      initImageReference.height = height;
-      if (elements.syncInitImageSize.checked) syncResolutionToReference(width, height);
-    }).catch(() => {});
-  }
-
-  if (scroll) elements.img2imgPanel.scrollIntoView({ behavior: "smooth", block: "center" });
-}
-
-function clearInitImageReference() {
-  initImageReference = null;
-  elements.initImageInput.value = "";
-  elements.initImagePreview.removeAttribute("src");
-  elements.initImagePreview.classList.add("hidden");
-  elements.initImageEmpty.classList.remove("hidden");
-  elements.initImageStatus.textContent = "参照画像が未選択です";
-  elements.clearInitImageButton.disabled = true;
-  resetInpaintEditor();
-}
-
-function syncResolutionToReference(sourceWidth, sourceHeight) {
-  const width = Number(sourceWidth);
-  const height = Number(sourceHeight);
-  if (!(width > 0 && height > 0)) return;
-  const longEdge = Math.min(1536, Math.max(512, Math.max(
-    Number(elements.width.value) || 896,
-    Number(elements.height.value) || 1152
-  )));
-  const ratio = width / height;
-  const targetWidth = ratio >= 1 ? longEdge : longEdge * ratio;
-  const targetHeight = ratio >= 1 ? longEdge / ratio : longEdge;
-  elements.width.value = clampRound(targetWidth, 256, 1536, 64);
-  elements.height.value = clampRound(targetHeight, 256, 1536, 64);
+    mode: "inpaint"
+  });
 }
 
 function handleImg2ImgPresetChange() {
@@ -1669,272 +1654,9 @@ function loadImg2ImgPreferences() {
 }
 
 function saveImg2ImgPreferences() {
-  localStorage.setItem("localImageChat.img2imgDenoising", elements.img2imgDenoising.value);
-  localStorage.setItem("localImageChat.img2imgResizeMode", elements.img2imgResizeMode.value);
-  localStorage.setItem("localImageChat.syncInitImageSize", String(elements.syncInitImageSize.checked));
-}
-
-function loadInpaintPreferences() {
-  const saved = {
-    inpaintDenoising: localStorage.getItem("localImageChat.inpaintDenoising"),
-    maskBlur: localStorage.getItem("localImageChat.maskBlur"),
-    inpaintFill: localStorage.getItem("localImageChat.inpaintFill"),
-    inpaintFullResPadding: localStorage.getItem("localImageChat.inpaintFullResPadding")
-  };
-  if (Number(saved.inpaintDenoising) >= 0.05 && Number(saved.inpaintDenoising) <= 0.95) {
-    elements.inpaintDenoising.value = saved.inpaintDenoising;
-  }
-  if (saved.maskBlur !== null && Number(saved.maskBlur) >= 0 && Number(saved.maskBlur) <= 64) {
-    elements.maskBlur.value = saved.maskBlur;
-  }
-  if (["0", "1", "2", "3"].includes(saved.inpaintFill)) {
-    elements.inpaintFill.value = saved.inpaintFill;
-  }
-  if (
-    saved.inpaintFullResPadding !== null
-    && Number(saved.inpaintFullResPadding) >= 0
-    && Number(saved.inpaintFullResPadding) <= 256
-  ) {
-    elements.inpaintFullResPadding.value = saved.inpaintFullResPadding;
-  }
-  const fullRes = localStorage.getItem("localImageChat.inpaintFullRes");
-  elements.inpaintFullRes.checked = fullRes === null ? defaultInpaintFullRes : fullRes !== "false";
-  handleInpaintSettingsChange();
-  updateMaskBrushSize();
-  setMaskTool("paint");
-  updateMaskHistoryButtons();
-}
-
-function handleInpaintSettingsChange() {
-  elements.inpaintDenoisingValue.value = Number(elements.inpaintDenoising.value).toFixed(2);
-  localStorage.setItem("localImageChat.inpaintDenoising", elements.inpaintDenoising.value);
-  localStorage.setItem("localImageChat.maskBlur", elements.maskBlur.value);
-  localStorage.setItem("localImageChat.inpaintFill", elements.inpaintFill.value);
-  localStorage.setItem("localImageChat.inpaintFullRes", String(elements.inpaintFullRes.checked));
-  localStorage.setItem("localImageChat.inpaintFullResPadding", elements.inpaintFullResPadding.value);
-}
-
-function updateMaskBrushSize() {
-  elements.maskBrushSizeValue.value = elements.maskBrushSize.value;
-}
-
-function setMaskTool(tool) {
-  maskTool = tool === "erase" ? "erase" : "paint";
-  const painting = maskTool === "paint";
-  elements.maskPaintButton.classList.toggle("active", painting);
-  elements.maskPaintButton.setAttribute("aria-pressed", String(painting));
-  elements.maskEraseButton.classList.toggle("active", !painting);
-  elements.maskEraseButton.setAttribute("aria-pressed", String(!painting));
-}
-
-async function initializeInpaintEditor(reference) {
-  const sourceKey = reference.maskKey ?? reference.imageId ?? reference.imageUrl;
-  if (maskSourceKey === sourceKey && elements.inpaintMaskCanvas.width) return;
-  maskSourceKey = sourceKey;
-  elements.inpaintBaseImage.src = reference.imageUrl;
-  try {
-    await waitForImage(elements.inpaintBaseImage);
-  } catch {
-    if (maskSourceKey === sourceKey) elements.maskStatus.textContent = "画像を表示できませんでした";
-    return;
-  }
-  if (maskSourceKey !== sourceKey) return;
-
-  const width = elements.inpaintBaseImage.naturalWidth;
-  const height = elements.inpaintBaseImage.naturalHeight;
-  elements.inpaintMaskCanvas.width = width;
-  elements.inpaintMaskCanvas.height = height;
-  elements.inpaintCanvasStage.classList.add("hasImage");
-  elements.inpaintBaseImage.classList.remove("hidden");
-  elements.inpaintMaskCanvas.classList.remove("hidden");
-  elements.inpaintMaskEmpty.classList.add("hidden");
-  maskUndoStack = [];
-  maskRedoStack = [];
-  clearMask(false);
-  elements.maskStatus.textContent = `${width}×${height}・未塗り`;
-}
-
-function waitForImage(image) {
-  if (image.complete && image.naturalWidth) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    image.addEventListener("load", resolve, { once: true });
-    image.addEventListener("error", () => reject(new Error("画像読込エラー")), { once: true });
-  });
-}
-
-function resetInpaintEditor() {
-  maskSourceKey = "";
-  maskUndoStack = [];
-  maskRedoStack = [];
-  maskDrawing = false;
-  maskLastPoint = null;
-  elements.inpaintBaseImage.removeAttribute("src");
-  elements.inpaintBaseImage.classList.add("hidden");
-  elements.inpaintMaskCanvas.width = 0;
-  elements.inpaintMaskCanvas.height = 0;
-  elements.inpaintMaskCanvas.classList.add("hidden");
-  elements.inpaintMaskEmpty.classList.remove("hidden");
-  elements.inpaintCanvasStage.classList.remove("hasImage");
-  elements.maskStatus.textContent = "画像を選択してください";
-  updateMaskHistoryButtons();
-}
-
-function beginMaskStroke(event) {
-  if (!elements.inpaintMaskCanvas.width) return;
-  event.preventDefault();
-  elements.inpaintMaskCanvas.setPointerCapture?.(event.pointerId);
-  pushMaskUndo();
-  maskRedoStack = [];
-  maskDrawing = true;
-  maskLastPoint = maskPointFromEvent(event);
-  drawMaskLine(maskLastPoint, maskLastPoint);
-  updateMaskHistoryButtons();
-}
-
-function continueMaskStroke(event) {
-  if (!maskDrawing || !maskLastPoint) return;
-  event.preventDefault();
-  const nextPoint = maskPointFromEvent(event);
-  drawMaskLine(maskLastPoint, nextPoint);
-  maskLastPoint = nextPoint;
-}
-
-function endMaskStroke(event) {
-  if (!maskDrawing) return;
-  event.preventDefault();
-  maskDrawing = false;
-  maskLastPoint = null;
-  elements.maskStatus.textContent = maskHasWhitePixels() ? "修正範囲あり" : "未塗り";
-  updateMaskHistoryButtons();
-}
-
-function maskPointFromEvent(event) {
-  const rect = elements.inpaintMaskCanvas.getBoundingClientRect();
-  return {
-    x: (event.clientX - rect.left) * elements.inpaintMaskCanvas.width / rect.width,
-    y: (event.clientY - rect.top) * elements.inpaintMaskCanvas.height / rect.height
-  };
-}
-
-function drawMaskLine(from, to) {
-  const context = elements.inpaintMaskCanvas.getContext("2d", { willReadFrequently: true });
-  context.save();
-  const color = maskTool === "paint" ? "#ffffff" : "#000000";
-  const lineWidth = Number(elements.maskBrushSize.value);
-  context.strokeStyle = color;
-  context.fillStyle = color;
-  context.lineWidth = lineWidth;
-  context.lineCap = "round";
-  context.lineJoin = "round";
-  context.beginPath();
-  context.moveTo(from.x, from.y);
-  context.lineTo(to.x, to.y);
-  context.stroke();
-  if (from.x === to.x && from.y === to.y) {
-    context.beginPath();
-    context.arc(from.x, from.y, lineWidth / 2, 0, Math.PI * 2);
-    context.fill();
-  }
-  context.restore();
-}
-
-function clearMask(record = true) {
-  const canvas = elements.inpaintMaskCanvas;
-  if (!canvas.width) return;
-  if (record) pushMaskUndo();
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  context.save();
-  context.globalCompositeOperation = "source-over";
-  context.fillStyle = "#000000";
-  context.fillRect(0, 0, canvas.width, canvas.height);
-  context.restore();
-  if (record) maskRedoStack = [];
-  elements.maskStatus.textContent = "未塗り";
-  updateMaskHistoryButtons();
-}
-
-function captureMaskSnapshot() {
-  return elements.inpaintMaskCanvas.width
-    ? elements.inpaintMaskCanvas.toDataURL("image/png")
-    : null;
-}
-
-function pushMaskUndo() {
-  const snapshot = captureMaskSnapshot();
-  if (!snapshot) return;
-  maskUndoStack.push(snapshot);
-  if (maskUndoStack.length > MAX_MASK_HISTORY) maskUndoStack.shift();
-}
-
-async function undoMask() {
-  const snapshot = maskUndoStack.pop();
-  if (!snapshot) return;
-  const current = captureMaskSnapshot();
-  if (current) maskRedoStack.push(current);
-  await restoreMaskSnapshot(snapshot);
-}
-
-async function redoMask() {
-  const snapshot = maskRedoStack.pop();
-  if (!snapshot) return;
-  const current = captureMaskSnapshot();
-  if (current) maskUndoStack.push(current);
-  await restoreMaskSnapshot(snapshot);
-}
-
-async function restoreMaskSnapshot(dataUrl) {
-  const image = new Image();
-  image.src = dataUrl;
-  await waitForImage(image);
-  const canvas = elements.inpaintMaskCanvas;
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  context.clearRect(0, 0, canvas.width, canvas.height);
-  context.drawImage(image, 0, 0, canvas.width, canvas.height);
-  elements.maskStatus.textContent = maskHasWhitePixels() ? "修正範囲あり" : "未塗り";
-  updateMaskHistoryButtons();
-}
-
-function maskHasWhitePixels() {
-  const canvas = elements.inpaintMaskCanvas;
-  if (!canvas.width) return false;
-  const pixels = canvas.getContext("2d", { willReadFrequently: true })
-    .getImageData(0, 0, canvas.width, canvas.height).data;
-  for (let index = 0; index < pixels.length; index += 4) {
-    if (pixels[index] > 16) return true;
-  }
-  return false;
-}
-
-function updateMaskHistoryButtons() {
-  const available = Boolean(elements.inpaintMaskCanvas.width);
-  elements.maskUndoButton.disabled = !available || !maskUndoStack.length;
-  elements.maskRedoButton.disabled = !available || !maskRedoStack.length;
-  elements.maskClearButton.disabled = !available;
-}
-
-function fileToDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.addEventListener("load", () => resolve(String(reader.result)));
-    reader.addEventListener("error", () => reject(reader.error ?? new Error("ファイル読込エラー")));
-    reader.readAsDataURL(file);
-  });
-}
-
-function imageDimensions(source) {
-  return new Promise((resolve, reject) => {
-    const image = new Image();
-    image.addEventListener("load", () => resolve({
-      width: image.naturalWidth,
-      height: image.naturalHeight
-    }), { once: true });
-    image.addEventListener("error", () => reject(new Error("画像形式を認識できません")), { once: true });
-    image.src = source;
-  });
-}
-
-function clampRound(value, minimum, maximum, multiple) {
-  return Math.min(maximum, Math.max(minimum, Math.round(value / multiple) * multiple));
+  setRecipeAwareStorage("localImageChat.img2imgDenoising", elements.img2imgDenoising.value);
+  setRecipeAwareStorage("localImageChat.img2imgResizeMode", elements.img2imgResizeMode.value);
+  setRecipeAwareStorage("localImageChat.syncInitImageSize", String(elements.syncInitImageSize.checked));
 }
 
 function initializeCheckpointControls() {
@@ -2024,15 +1746,11 @@ function applyCheckpointSetSettings(settings = {}) {
 }
 
 function restoreCheckpointSetLoras(loras = []) {
-  selectedLoras.clear();
-  const missing = [];
+  const missing = promptLoraCoordinator.restoreCheckpointSelection(loras);
   for (const lora of loras) {
     if (!loraLibrary.getItems().some((item) => item.name === lora.name)) {
-      missing.push(lora.name);
       continue;
     }
-    selectedLoras.set(lora.name, Number(lora.weight));
-    loraWeights.set(lora.name, Number(lora.weight));
     if (lora.triggerWords) loraTriggers.set(lora.name, lora.triggerWords);
     if (lora.negativeWords) loraNegativeWords.set(lora.name, lora.negativeWords);
   }
@@ -2075,10 +1793,7 @@ function publishLoraCatalog() {
   registerDetectedProfiles();
   registerCivitaiDefaults();
   migrateCharacterProfileDefaults();
-  const available = new Set(loraLibrary.getItems().map((item) => item.name));
-  for (const name of selectedLoras.keys()) {
-    if (!available.has(name)) selectedLoras.delete(name);
-  }
+  promptLoraCoordinator.pruneMissing();
   renderSelectedLoraSummary();
   scheduleShareCsvSync();
 }
@@ -2219,7 +1934,7 @@ function applyProfileSelection(loraName, profile, preset, addon = null) {
   if (addon?.clearNegativeWords) loraNegativeWords.delete(loraName);
   else if (preset.negativeWords) loraNegativeWords.set(loraName, preset.negativeWords);
   else loraNegativeWords.delete(loraName);
-  if (selectedLoras.has(loraName)) selectedLoras.set(loraName, weight);
+  promptLoraCoordinator.updateSelectedWeight(loraName, weight);
   saveLoraWeights();
   saveLoraTriggers();
   saveLoraNegativeWords();
@@ -2240,12 +1955,12 @@ function renderSelectedLoraSummary() {
   // トリガーワード枠の追加・削除もここで同期する。
   syncAppliedTriggerWords();
   renderUsedLoras();
-  const items = [...selectedLoras].map(([name, weight]) => {
+  const items = promptLoraCoordinator.getSelectedEntries().map(([name, weight]) => {
     const triggerWords = loraTriggers.get(name);
     const suppressesOutfit = Boolean(loraNegativeWords.get(name));
     return `${name} ${Number(weight).toFixed(2)}${triggerWords ? `・${triggerWords}` : ""}${suppressesOutfit ? "・標準衣装を抑制" : ""}`;
   });
-  const compatibilityWarnings = [...selectedLoras.keys()]
+  const compatibilityWarnings = promptLoraCoordinator.getSelectedNames()
     .map((name) => loraLibrary.findByName(name))
     .filter(Boolean)
     .map((lora) => ({ lora, compatibility: getLoraCompatibility(lora) }))
@@ -2301,284 +2016,6 @@ async function checkHealth() {
   }
 }
 
-async function loadIpAdapterFile(file) {
-  clearError();
-  if (!ipAdapterOptions.available) return showError(ipAdapterOptions.message);
-  const mimeType = inferImageMimeType(file);
-  if (!mimeType) return showError("IP-Adapter参照画像はPNG・JPEG・WebPを選択してください");
-  if (file.size > MAX_INIT_IMAGE_BYTES) return showError("参照画像は20MB以下にしてください");
-
-  const objectUrl = URL.createObjectURL(file);
-  try {
-    const loadedDataUrl = await fileToDataUrl(file);
-    const dataUrl = loadedDataUrl.replace(/^data:[^;]*;/, `data:${mimeType};`);
-    setIpAdapterReference({
-      dataUrl,
-      previewUrl: objectUrl,
-      objectUrl,
-      label: file.name
-    }, { focus: true });
-  } catch (error) {
-    revokeIpAdapterObjectUrl(objectUrl);
-    showError(`IP-Adapter参照画像を読み込めませんでした: ${error.message}`);
-  }
-}
-
-async function loadIpAdapterOptions(context = runtimeRequestContext()) {
-  if (!isRuntimeContextCurrent(context)) return false;
-  ipAdapterOptions = {
-    available: false,
-    family: null,
-    module: null,
-    model: null,
-    message: "IP-Adapterの利用可否を確認中…"
-  };
-  syncIpAdapterUi();
-  try {
-    const data = await getJson(runtimeApiUrl("/api/reforge/ip-adapter/options"));
-    if (!isRuntimeContextCurrent(context)) return false;
-    ipAdapterOptions = {
-      available: data.available === true,
-      family: typeof data.family === "string" ? data.family : null,
-      module: typeof data.module === "string" ? data.module : null,
-      model: typeof data.model === "string" ? data.model : null,
-      message: String(data.message ?? "IP-Adapterを利用できません")
-    };
-  } catch (error) {
-    if (!isRuntimeContextCurrent(context)) return false;
-    ipAdapterOptions = {
-      available: false,
-      family: null,
-      module: null,
-      model: null,
-      message: `IP-Adapterを利用できません: ${error.message}`
-    };
-  }
-  if (!ipAdapterOptions.available) ipAdapterState.enabled = false;
-  syncIpAdapterUi();
-  return ipAdapterOptions.available || Boolean(ipAdapterOptions.message);
-}
-
-function setIpAdapterReference(reference, { focus = false, silent = false } = {}) {
-  if (!ipAdapterOptions.available) {
-    if (!silent) showError(ipAdapterOptions.message);
-    return false;
-  }
-  const imageId = reference?.imageId ? String(reference.imageId) : null;
-  const referenceImageId = reference?.referenceImageId ? String(reference.referenceImageId) : imageId;
-  const imageUrl = reference?.imageUrl ? String(reference.imageUrl) : null;
-  const dataUrl = reference?.dataUrl ? String(reference.dataUrl) : null;
-  if (!referenceImageId && !imageUrl && !dataUrl) {
-    if (!silent) showError("IP-Adapter参照画像を選択してください");
-    return false;
-  }
-
-  const sameReference = referenceImageId === ipAdapterState.referenceImageId
-    && imageUrl === ipAdapterState.referenceImageUrl
-    && dataUrl === ipAdapterState.referenceImage;
-  let previewUrl = String(reference.previewUrl ?? imageUrl ?? dataUrl ?? "");
-  if (!sameReference) revokeIpAdapterObjectUrl();
-  if (reference.objectUrl) {
-    if (sameReference && ipAdapterObjectUrl && ipAdapterObjectUrl !== reference.objectUrl) {
-      revokeIpAdapterObjectUrl(reference.objectUrl);
-      previewUrl = ipAdapterState.previewUrl;
-    } else {
-      ipAdapterObjectUrl = reference.objectUrl;
-    }
-  }
-  ipAdapterState = {
-    ...ipAdapterState,
-    enabled: true,
-    referenceImageId,
-    referenceImageUrl: imageUrl,
-    referenceImage: dataUrl,
-    previewUrl,
-    label: String(reference.label ?? referenceImageId ?? imageUrl ?? "参照画像")
-  };
-  // 同じ画像を再指定してもWeight / Start / Endは読み直さない。
-  if (sameReference) {
-    ipAdapterState.weight = Number(elements.ipAdapterWeight.value);
-    ipAdapterState.guidanceStart = Number(elements.ipAdapterGuidanceStart.value);
-    ipAdapterState.guidanceEnd = Number(elements.ipAdapterGuidanceEnd.value);
-  }
-  syncIpAdapterUi();
-  if (focus) openIpAdapterSettings();
-  return true;
-}
-
-function setCurrentImageAsIpAdapterReference(image, { focus = false } = {}) {
-  if (!image?.id) {
-    showError("この画像はIP-Adapter参照に使用できません");
-    return false;
-  }
-  if (!ipAdapterOptions.available) {
-    showError(ipAdapterOptions.message);
-    return false;
-  }
-  return setIpAdapterReference({
-    referenceImageId: image.id,
-    previewUrl: image.thumbnailUrl || originalImageUrl(image),
-    label: image.filename || image.id
-  }, { focus });
-}
-
-function clearIpAdapterReference({ silent = false } = {}) {
-  revokeIpAdapterObjectUrl();
-  ipAdapterState = {
-    ...ipAdapterState,
-    enabled: false,
-    referenceImageId: null,
-    referenceImageUrl: null,
-    referenceImage: null,
-    previewUrl: "",
-    label: ""
-  };
-  elements.ipAdapterInput.value = "";
-  syncIpAdapterUi();
-  if (!silent) toast.info("IP-Adapter参照を解除しました");
-}
-
-function toggleIpAdapterEnabled() {
-  if (!elements.ipAdapterEnabled.checked) {
-    ipAdapterState.enabled = false;
-    syncIpAdapterUi();
-    return;
-  }
-  if (!ipAdapterOptions.available || !hasIpAdapterReference()) {
-    elements.ipAdapterEnabled.checked = false;
-    ipAdapterState.enabled = false;
-    showError(ipAdapterOptions.available
-      ? "IP-Adapter参照画像を選択してください"
-      : ipAdapterOptions.message);
-    syncIpAdapterUi();
-    return;
-  }
-  ipAdapterState.enabled = true;
-  syncIpAdapterUi();
-}
-
-function syncIpAdapterNumbers() {
-  ipAdapterState.weight = Number(elements.ipAdapterWeight.value);
-  ipAdapterState.guidanceStart = Number(elements.ipAdapterGuidanceStart.value);
-  ipAdapterState.guidanceEnd = Number(elements.ipAdapterGuidanceEnd.value);
-  syncIpAdapterValueLabels();
-}
-
-function hasIpAdapterReference() {
-  return Boolean(
-    ipAdapterState.referenceImageId
-    || ipAdapterState.referenceImageUrl
-    || ipAdapterState.referenceImage
-  );
-}
-
-function syncIpAdapterUi() {
-  const hasReference = hasIpAdapterReference();
-  const available = ipAdapterOptions.available === true;
-  const runtimeSwitching = runtimeController.getState().switching;
-  const disabled = generationBusy || runtimeSwitching || !available;
-  elements.ipAdapterModel.textContent = available
-    ? shorten(ipAdapterOptions.model || ipAdapterOptions.module || "利用可能", 28)
-    : "利用不可";
-  elements.ipAdapterModel.title = available ? ipAdapterOptions.model || "" : ipAdapterOptions.message;
-  elements.ipAdapterEnabled.checked = Boolean(ipAdapterState.enabled && hasReference && available);
-  elements.ipAdapterEnabled.disabled = disabled || !hasReference;
-  elements.chooseIpAdapterButton.disabled = disabled;
-  elements.ipAdapterInput.disabled = disabled;
-  elements.clearIpAdapterButton.disabled = generationBusy || !hasReference;
-  for (const control of [
-    elements.ipAdapterWeight,
-    elements.ipAdapterGuidanceStart,
-    elements.ipAdapterGuidanceEnd
-  ]) control.disabled = disabled || !hasReference;
-
-  elements.ipAdapterWeight.value = String(ipAdapterState.weight);
-  elements.ipAdapterGuidanceStart.value = String(ipAdapterState.guidanceStart);
-  elements.ipAdapterGuidanceEnd.value = String(ipAdapterState.guidanceEnd);
-  syncIpAdapterValueLabels();
-  if (ipAdapterState.previewUrl) {
-    if (elements.ipAdapterPreview.getAttribute("src") !== ipAdapterState.previewUrl) {
-      elements.ipAdapterPreview.src = ipAdapterState.previewUrl;
-    }
-    elements.ipAdapterPreview.classList.remove("hidden");
-    elements.ipAdapterEmpty.classList.add("hidden");
-  } else {
-    elements.ipAdapterPreview.removeAttribute("src");
-    elements.ipAdapterPreview.classList.add("hidden");
-    elements.ipAdapterEmpty.classList.remove("hidden");
-  }
-  elements.ipAdapterStatus.textContent = !available
-    ? ipAdapterOptions.message
-    : generationBusy || runtimeSwitching
-      ? "生成中はIP-Adapterを変更できません"
-      : ipAdapterState.enabled && hasReference
-        ? `この画像を参照中: ${shorten(ipAdapterState.label, 42)}`
-        : hasReference
-          ? `参照画像を設定済み（OFF）: ${shorten(ipAdapterState.label, 42)}`
-          : "参照画像を選択してください";
-  studioController.syncWorkflowAvailability({ runtimeSwitching, ipAdapterAvailable: available });
-}
-
-function openIpAdapterSettings() {
-  elements.generationSettingsDetails.open = true;
-  elements.ipAdapterDetails.open = true;
-  requestAnimationFrame(() => {
-    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
-    elements.ipAdapterDetails.scrollIntoView({
-      behavior: reducedMotion ? "auto" : "smooth",
-      block: "nearest"
-    });
-  });
-}
-
-function syncIpAdapterValueLabels() {
-  elements.ipAdapterWeightValue.textContent = Number(elements.ipAdapterWeight.value).toFixed(2);
-  elements.ipAdapterGuidanceStartValue.textContent = Number(elements.ipAdapterGuidanceStart.value).toFixed(2);
-  elements.ipAdapterGuidanceEndValue.textContent = Number(elements.ipAdapterGuidanceEnd.value).toFixed(2);
-}
-
-function revokeIpAdapterObjectUrl(url = ipAdapterObjectUrl) {
-  if (!url) return;
-  URL.revokeObjectURL(url);
-  if (url === ipAdapterObjectUrl) ipAdapterObjectUrl = null;
-}
-
-function applyIpAdapterMetadata(value) {
-  revokeIpAdapterObjectUrl();
-  const imageId = value?.enabled && value.referenceImageId ? String(value.referenceImageId) : null;
-  const imageUrl = value?.enabled && value.referenceImageUrl ? String(value.referenceImageUrl) : null;
-  if (!imageId && !imageUrl) {
-    clearIpAdapterReference({ silent: true });
-    return;
-  }
-  ipAdapterState = {
-    ...ipAdapterState,
-    enabled: ipAdapterOptions.available === true,
-    weight: Number(value.weight ?? ipAdapterState.weight),
-    guidanceStart: Number(value.guidanceStart ?? ipAdapterState.guidanceStart),
-    guidanceEnd: Number(value.guidanceEnd ?? ipAdapterState.guidanceEnd),
-    referenceImageId: imageId,
-    referenceImageUrl: imageUrl,
-    referenceImage: null,
-    previewUrl: imageId
-      ? `/api/images/${encodeURIComponent(imageId)}/thumbnail`
-      : imageUrl,
-    label: imageId || imageUrl
-  };
-  syncIpAdapterUi();
-}
-
-function restoreIpAdapterFromRecipe(recipe) {
-  const value = recipe?.ipAdapter;
-  if (!value?.enabled || (!value.referenceImageId && !value.referenceImageUrl)) {
-    clearIpAdapterReference({ silent: true });
-    return;
-  }
-  applyIpAdapterMetadata(value);
-}
-
-window.addEventListener("beforeunload", () => revokeIpAdapterObjectUrl());
-
 async function buildPrompt() {
   clearError();
   const description = promptDescription;
@@ -2604,16 +2041,16 @@ async function generateCandidates() {
   if (!description && !currentPositivePrompt().trim()) {
     return showError("生成したい画像を日本語で入力するか、Promptを入力してくれ");
   }
-  if (generationMode !== "txt2img" && !initImageReference) {
+  if (generationMode !== "txt2img" && !referenceImageController.hasReference()) {
     setGenerationMode(generationMode);
     return showError(`${generationMode === "inpaint" ? "部分修正" : "img2img"}の参照画像を選択してください`);
   }
-  if (generationMode === "inpaint" && !maskHasWhitePixels()) {
+  if (generationMode === "inpaint" && !inpaintEditor.hasMask()) {
     return showError("修正したい範囲を白く塗ってください");
   }
 
   // プロンプト内のLoRAタグとUI選択を先に揃えてから、送信内容を組み立てる。
-  syncLorasFromPrompt();
+  promptLoraCoordinator.syncFromPrompt();
   setResultTab("result");
   elements.emptyState.classList.add("hidden");
   studioController.resetForGeneration();
@@ -2668,7 +2105,7 @@ async function generateCandidates() {
       loras: data.loras,
       images: data.images
     };
-    applyIpAdapterMetadata(data.ipAdapter);
+    ipAdapterController.applyMetadata(data.ipAdapter);
     applyGeneratedPromptResult(data, description);
     elements.explanation.textContent = data.explanation;
     studioController.setCandidates(generation, data.images);
@@ -2778,7 +2215,7 @@ function presentHiresResult(data, description, eyebrow, title) {
     loras: data.loras,
     images: data.images
   };
-  applyIpAdapterMetadata(data.ipAdapter);
+  ipAdapterController.applyMetadata(data.ipAdapter);
   studioController.presentFinal(generation, finished, { eyebrow, title });
 }
 
@@ -2913,9 +2350,7 @@ function currentPositivePrompt() {
 }
 
 function removeDisabledLoraTags(prompt) {
-  let result = String(prompt ?? "");
-  for (const name of disabledLoras) result = removeLoraTags(result, name).text;
-  return result;
+  return promptLoraCoordinator.removeDisabledTags(prompt);
 }
 
 // Raw Promptは、上書き中でなければ結合結果のミラーとして保つ。
@@ -2969,7 +2404,7 @@ function handleStructuredPromptInput() {
   markPromptAsCurrent();
   syncRawPromptFromSections();
   renderPromptFieldPreviews();
-  scheduleLoraSync();
+  promptLoraCoordinator.scheduleSync();
 }
 
 // 折りたたみ中でも中身が分かるように、見出しへ状態と先頭の内容を出す。
@@ -3028,7 +2463,7 @@ function handleRawPromptInput() {
   rawPromptOverride = true;
   rawPromptOverrideSource = "manual";
   renderPromptModeState();
-  scheduleLoraSync();
+  promptLoraCoordinator.scheduleSync();
 }
 
 // ---- プロンプト内LoRAタグとLoRA選択UIの同期 ----
@@ -3050,42 +2485,6 @@ function writePromptSource(key, text) {
   promptFieldElement(key).value = text;
 }
 
-function currentSelectionState() {
-  return [...selectedLoras].map(([name, weight]) => ({
-    name,
-    weight,
-    source: loraSelectionSources.get(name) ?? "ui"
-  }));
-}
-
-// 入力のたびに走らせない。少し待ってからまとめて同期する。
-function scheduleLoraSync() {
-  clearTimeout(loraSyncTimer);
-  loraSyncTimer = setTimeout(() => syncLorasFromPrompt(), LORA_SYNC_DEBOUNCE);
-}
-
-// プロンプト → UI。プロンプトに書かれたWeightを正としてUI側を合わせる。
-function syncLorasFromPrompt() {
-  clearTimeout(loraSyncTimer);
-  if (!loraLibrary.getItems().length) return;
-  const text = positivePromptSources().map((source) => source.value).join("\n");
-  const result = reconcilePromptLoras(parseLoraTags(text), currentSelectionState(), loraLibrary.getItems());
-  loraSyncNotices = buildLoraNotices(result);
-  renderLoraSyncNotice(describeLoraNotices(result));
-  if (!result.changed) return;
-
-  selectedLoras.clear();
-  loraSelectionSources.clear();
-  for (const item of result.selected) {
-    selectedLoras.set(item.name, item.weight);
-    loraSelectionSources.set(item.name, item.source);
-    loraWeights.set(item.name, item.weight);
-  }
-  saveLoraWeights();
-  renderLoras();
-  renderSelectedLoraSummary();
-}
-
 function renderLoraSyncNotice(messages) {
   const targets = [elements.loraSyncNotice, elements.settingsLoraSyncNotice].filter(Boolean);
   for (const target of targets) {
@@ -3099,49 +2498,10 @@ function renderLoraSyncNotice(messages) {
   }
 }
 
-// UI → プロンプト。既存タグのWeight部分だけを書き換える（末尾へ追加しない）。
-function applyLoraWeightToPrompt(name, weight) {
-  let changed = false;
-  for (const source of positivePromptSources()) {
-    const next = replaceLoraWeight(source.value, name, weight);
-    if (next === source.value) continue;
-    writePromptSource(source.key, next);
-    changed = true;
-  }
-  if (!changed) return false;
-  syncRawPromptFromSections();
-  syncPromptClearButtons();
-  return true;
-}
-
-// UIでLoRAを外したとき、プロンプトに残ったタグも消す（UIと生成内容をずらさない）。
-function removeLoraTagsFromPrompt(name) {
-  let removed = 0;
-  for (const source of positivePromptSources()) {
-    const result = removeLoraTags(source.value, name);
-    if (!result.removed) continue;
-    writePromptSource(source.key, result.text);
-    removed += result.removed;
-  }
-  if (!removed) return 0;
-  syncRawPromptFromSections();
-  syncPromptClearButtons();
-  return removed;
-}
-
 // チェックボックスとプレビューの選択・解除を1か所に集める。
 function setLoraSelected(name, selected, weight) {
-  if (selected) {
-    selectedLoras.set(name, Number(weight));
-    const source = loraSelectionSources.get(name);
-    loraSelectionSources.set(name, source === "prompt" || source === "both" ? "both" : "ui");
-    return;
-  }
-  selectedLoras.delete(name);
-  loraSelectionSources.delete(name);
-  disabledLoras.delete(name);
-  const removed = removeLoraTagsFromPrompt(name);
-  if (removed) toast.info(`プロンプト内の <lora:${name}> も削除しました`);
+  const { removedTags } = promptLoraCoordinator.setSelected(name, selected, weight);
+  if (removedTags) toast.info(`プロンプト内の <lora:${name}> も削除しました`);
 }
 
 // Raw Promptの上書きをやめ、分割入力の結合結果へ戻す。
@@ -3175,7 +2535,7 @@ function resolveLoraTriggerText(name) {
 }
 
 function loraTriggerSources() {
-  const sources = [...selectedLoras.keys()].map((name) => {
+  const sources = promptLoraCoordinator.getSelectedNames().map((name) => {
     const lora = findLoraByName(name);
     const profile = resolveProfile(lora);
     const structuredPresets = typeof lora?.registry?.characterTriggerWords === "string";
@@ -3196,7 +2556,7 @@ function loraTriggerSources() {
 
 function loraOutfitTriggerSources() {
   const sources = [];
-  for (const name of selectedLoras.keys()) {
+  for (const name of promptLoraCoordinator.getSelectedNames()) {
     const lora = findLoraByName(name);
     const profile = resolveProfile(lora);
     const choices = listLoraOutfitChoices(profile);
@@ -3236,13 +2596,13 @@ function triggerSourceLoraName(sourceId) {
 function activeAppliedTriggerWords() {
   return activeTriggersForSources(appliedTriggerWords, (sourceId) => {
     const loraName = triggerSourceLoraName(sourceId);
-    return !selectedLoras.has(loraName) || !disabledLoras.has(loraName);
+    return !promptLoraCoordinator.isSelected(loraName) || !promptLoraCoordinator.isDisabled(loraName);
   });
 }
 
 function isAutomaticLoraTrigger(trigger) {
   return trigger?.sourceLoraIds?.some((sourceId) =>
-    selectedLoras.has(triggerSourceLoraName(sourceId))
+    promptLoraCoordinator.isSelected(triggerSourceLoraName(sourceId))
   ) === true;
 }
 
@@ -3396,7 +2756,7 @@ function readPromptPayload() {
     rawPrompt: rawPromptOverride ? elements.prompt.value : "",
     appliedTriggerWords: appliedTriggerWords.map((trigger) => ({ ...trigger })),
     // LoRAタグ同期の警告（重複・未インストールなど）も履歴へ残す。
-    loraNotices: loraSyncNotices.map((notice) => ({ ...notice }))
+    loraNotices: promptLoraCoordinator.getNotices()
   };
 }
 
@@ -3871,7 +3231,7 @@ function unlockComposition() {
   syncSeedClearButton();
 }
 
-async function ensureRuntimeForRecipe(recipe) {
+async function ensureRuntimeForRecipeDirect(recipe) {
   const { runtimeOptions, activeRuntimeId } = runtimeController.getState();
   const targetId = safeRuntimeId(recipe?.runtime?.id) || "reforge";
   const target = runtimeOptions.find((item) => item.id === targetId && isRuntimeSelectable(item));
@@ -3886,13 +3246,18 @@ async function ensureRuntimeForRecipe(recipe) {
   return handleRuntimeChange(target.id);
 }
 
-async function loadRecipeFields(recipe, image) {
-  if (!await ensureRuntimeForRecipe(recipe)) return false;
+function ensureRuntimeForRecipe(recipe) {
+  return recipeWorkflow.ensureRuntime(recipe);
+}
+
+function applyRecipeHeader(recipe) {
   promptDescription = recipe.description ?? "";
   elements.generationTitle.value = normalizeManualTitle(recipe.title);
-  setContentRating(recipe.contentRating === "nsfw" ? "nsfw" : "general");
-  restorePromptFieldsFromRecipe(recipe);
-  restoreIpAdapterFromRecipe(recipe);
+  const rating = setContentRating(recipe.contentRating === "nsfw" ? "nsfw" : "general", { persist: false });
+  runRecipePersistence(() => localStorage.setItem("localImageChat.contentRating", rating));
+}
+
+function applyRecipeSettings(recipe, image) {
   const settings = recipe.settings ?? {};
   for (const key of [
     "width", "height", "steps", "cfgScale", "samplerName", "scheduler", "noiseSchedule",
@@ -3911,30 +3276,29 @@ async function loadRecipeFields(recipe, image) {
   elements.candidateCount.value = "1";
   handleCandidateCountChange();
   handleImg2ImgDenoisingInput();
-  handleInpaintSettingsChange();
+  inpaintEditor.savePreferences();
+}
 
-  selectedLoras.clear();
-  loraSelectionSources.clear();
-  disabledLoras.clear();
+function applyRecipeLoraDetails(recipe) {
   for (const lora of recipe.loras ?? []) {
     if (!loraLibrary.getItems().some((item) => item.name === lora.name)) continue;
     // 履歴のWeightは実際に生成へ使った実効値。選択元もそのまま復元する。
-    selectedLoras.set(lora.name, Number(lora.weight));
-    loraSelectionSources.set(lora.name, ["ui", "prompt", "both"].includes(lora.source) ? lora.source : "ui");
-    loraWeights.set(lora.name, Number(lora.weight));
-    if (lora.enabled === false) disabledLoras.add(lora.name);
     if (lora.triggerWords) loraTriggers.set(lora.name, lora.triggerWords);
     if (lora.negativeWords) loraNegativeWords.set(lora.name, lora.negativeWords);
   }
   restoreLoraOutfitsFromRecipe(recipe);
-  saveLoraWeights();
-  saveLoraTriggers();
-  saveLoraNegativeWords();
+}
+
+function persistAndRenderRecipe() {
+  runRecipePersistence(saveLoraWeights);
+  runRecipePersistence(saveLoraTriggers);
+  runRecipePersistence(saveLoraNegativeWords);
   renderLoras();
   renderSelectedLoraSummary();
-  // 復元直後からプロンプト表示とUI表示を一致させる。
-  syncLorasFromPrompt();
-  return true;
+}
+
+function loadRecipeFields(recipe, image) {
+  return recipeWorkflow.load(recipe, image);
 }
 
 // 履歴からのプロンプト復元。
@@ -4041,14 +3405,14 @@ async function loadStudioRecent(filter = studioController.getHistoryFilter()) {
 
 function renderUsedLoras() {
   elements.usedLoraList.replaceChildren();
-  elements.loraUseCount.textContent = `${selectedLoras.size}件`;
-  const selectedNames = [...selectedLoras.keys()]
+  elements.loraUseCount.textContent = `${promptLoraCoordinator.selectedCount()}件`;
+  const selectedNames = promptLoraCoordinator.getSelectedNames()
     .map((name) => findLoraByName(name)?.displayName ?? name);
   elements.loraUseSummary.textContent = selectedNames.length
     ? `${selectedNames.slice(0, 2).join(" / ")}${selectedNames.length > 2 ? ` ほか${selectedNames.length - 2}件` : ""}`
     : "未選択";
   elements.loraUseSummary.classList.toggle("filled", selectedNames.length > 0);
-  if (!selectedLoras.size) {
+  if (!promptLoraCoordinator.selectedCount()) {
     const empty = document.createElement("p");
     empty.className = "hint";
     empty.textContent = "LoRAは未選択です。「LoRA追加」から選ぶか、プロンプトへ <lora:名前:0.8> と書くと追加されます。";
@@ -4056,7 +3420,7 @@ function renderUsedLoras() {
     return;
   }
 
-  for (const [name, weight] of selectedLoras) {
+  for (const [name, weight] of promptLoraCoordinator.getSelectedEntries()) {
     const lora = findLoraByName(name);
     const row = document.createElement("div");
     row.className = "usedLoraRow";
@@ -4068,7 +3432,7 @@ function renderUsedLoras() {
     const source = document.createElement("small");
     source.className = "usedLoraSource";
     source.textContent = { ui: "UI選択", prompt: "プロンプト由来", both: "UI+プロンプト" }[
-      loraSelectionSources.get(name) ?? "ui"
+      promptLoraCoordinator.getSource(name)
     ];
     title.append(source);
 
@@ -4085,11 +3449,10 @@ function renderUsedLoras() {
     weightInput.addEventListener("change", () => {
       const next = clampLoraWeightValue(weightInput.value);
       weightInput.value = next.toFixed(2);
-      loraWeights.set(name, next);
-      selectedLoras.set(name, next);
+      promptLoraCoordinator.setWeight(name, next, { syncPrompt: false });
       saveLoraWeights();
       // プロンプト内に同じタグがあれば、そのWeightだけを書き換える。
-      applyLoraWeightToPrompt(name, next);
+      promptLoraCoordinator.rewriteWeightToPrompt(name, next);
       renderSelectedLoraSummary();
       renderLoras();
     });
@@ -4098,13 +3461,12 @@ function renderUsedLoras() {
     const toggle = document.createElement("button");
     toggle.type = "button";
     toggle.className = "usedLoraToggle";
-    const enabled = !disabledLoras.has(name);
+    const enabled = !promptLoraCoordinator.isDisabled(name);
     toggle.textContent = enabled ? "ON" : "OFF";
     toggle.classList.toggle("off", !enabled);
     toggle.title = enabled ? "この生成では使わない" : "この生成で使う";
     toggle.addEventListener("click", () => {
-      if (disabledLoras.has(name)) disabledLoras.delete(name);
-      else disabledLoras.add(name);
+      promptLoraCoordinator.toggleDisabled(name);
       renderUsedLoras();
       renderSelectedLoraSummary();
     });
@@ -4163,7 +3525,7 @@ function renderUsedLoras() {
 
 function ensureSelectedLoraOutfits() {
   let changed = false;
-  for (const name of selectedLoras.keys()) {
+  for (const name of promptLoraCoordinator.getSelectedNames()) {
     if (loraOutfitSelections.has(name)) continue;
     const profile = resolveProfile(findLoraByName(name));
     if (!listLoraOutfitChoices(profile).length) continue;
@@ -4529,8 +3891,8 @@ function loraThumbnail(lora) {
 
 // 生成フォームへLoRAを1件足す（LoRAマスタは書き換えない）。
 function addLoraToForm(loraName) {
-  if (selectedLoras.has(loraName)) return true;
-  if (selectedLoras.size >= loraConfig.maxSelected) {
+  if (promptLoraCoordinator.isSelected(loraName)) return true;
+  if (promptLoraCoordinator.selectedCount() >= loraConfig.maxSelected) {
     toast.warning(`LoRAは最大${loraConfig.maxSelected}個までです`);
     return false;
   }
@@ -4801,7 +4163,7 @@ async function duplicateRecipe(generation, image) {
 async function changeLoraOnly(generation, image) {
   if (!await loadRecipeFields(generation, image)) return;
   pendingDerivation = { type: "lora", instruction: "", parentGenerationId: generation.id };
-  const working = new Map(selectedLoras);
+  const working = new Map(promptLoraCoordinator.getSelectedEntries());
 
   const applied = await openModal({
     title: "LoRAだけ変更",
@@ -4857,11 +4219,7 @@ async function changeLoraOnly(generation, image) {
   }).promise;
 
   if (!applied) return;
-  selectedLoras.clear();
-  for (const [name, weight] of working) {
-    selectedLoras.set(name, Number(weight));
-    loraWeights.set(name, Number(weight));
-  }
+  promptLoraCoordinator.replaceSelection(working);
   saveLoraWeights();
   renderLoras();
   renderSelectedLoraSummary();
@@ -5121,30 +4479,15 @@ function readTitlePayload() {
 }
 
 function readInitImagePayload() {
-  if (generationMode === "txt2img" || !initImageReference) return {};
-  return initImageReference.imageId
-    ? { initImageId: initImageReference.imageId }
-    : { initImage: initImageReference.dataUrl };
+  return referenceImageController.readPayload(generationMode);
 }
 
 function readIpAdapterPayload() {
-  if (!ipAdapterState.enabled || !hasIpAdapterReference()) return {};
-  const ipAdapter = {
-    enabled: true,
-    weight: Number(ipAdapterState.weight),
-    guidanceStart: Number(ipAdapterState.guidanceStart),
-    guidanceEnd: Number(ipAdapterState.guidanceEnd)
-  };
-  if (ipAdapterState.referenceImageId) ipAdapter.referenceImageId = ipAdapterState.referenceImageId;
-  else if (ipAdapterState.referenceImageUrl) ipAdapter.referenceImageUrl = ipAdapterState.referenceImageUrl;
-  else if (ipAdapterState.referenceImage) ipAdapter.referenceImage = ipAdapterState.referenceImage;
-  else return {};
-  return { ipAdapter };
+  return ipAdapterController.readPayload();
 }
 
 function readInpaintPayload() {
-  if (generationMode !== "inpaint" || !elements.inpaintMaskCanvas.width) return {};
-  return { maskImage: elements.inpaintMaskCanvas.toDataURL("image/png") };
+  return inpaintEditor.readPayload(generationMode);
 }
 
 // 派生生成の由来を1回分だけ送る（送信後にクリアする）。
@@ -5160,8 +4503,8 @@ function readDerivationPayload() {
 
 function readSelectedLoras() {
   // 生成直前にプロンプト内のタグと突き合わせて、実効Weightのまま送る。
-  syncLorasFromPrompt();
-  return [...selectedLoras]
+  promptLoraCoordinator.syncFromPrompt();
+  return promptLoraCoordinator.getSelectedEntries()
     .map(([name, weight]) => {
       const lora = findLoraByName(name);
       const profile = resolveProfile(lora);
@@ -5170,8 +4513,8 @@ function readSelectedLoras() {
       return {
         name,
         weight,
-        enabled: !disabledLoras.has(name),
-        source: loraSelectionSources.get(name) ?? "ui",
+        enabled: !promptLoraCoordinator.isDisabled(name),
+        source: promptLoraCoordinator.getSource(name),
         characterTriggerWords: resolveLoraBaseTriggerWords(
           profile,
           loraPresetSelections.get(name),
@@ -5259,15 +4602,24 @@ function loadLoraOutfitSelections() {
 }
 
 function saveLoraWeights() {
-  localStorage.setItem("localImageChat.loraWeights", JSON.stringify(Object.fromEntries(loraWeights)));
+  setRecipeAwareStorage("localImageChat.loraWeights", JSON.stringify(Object.fromEntries(loraWeights)));
 }
 
 function saveLoraTriggers() {
-  localStorage.setItem("localImageChat.loraTriggers", JSON.stringify(Object.fromEntries(loraTriggers)));
+  setRecipeAwareStorage("localImageChat.loraTriggers", JSON.stringify(Object.fromEntries(loraTriggers)));
 }
 
 function saveLoraNegativeWords() {
-  localStorage.setItem("localImageChat.loraNegativeWords", JSON.stringify(Object.fromEntries(loraNegativeWords)));
+  setRecipeAwareStorage("localImageChat.loraNegativeWords", JSON.stringify(Object.fromEntries(loraNegativeWords)));
+}
+
+function setRecipeAwareStorage(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch (error) {
+    if (recipePersistenceActive) throw new RecipePersistenceError(error);
+    throw error;
+  }
 }
 
 function saveProfileSettings() {
@@ -5277,7 +4629,7 @@ function saveProfileSettings() {
 }
 
 function saveLoraOutfitSelections() {
-  localStorage.setItem(
+  setRecipeAwareStorage(
     "localImageChat.generationLoraOutfits",
     JSON.stringify(Object.fromEntries(loraOutfitSelections))
   );
@@ -5292,29 +4644,12 @@ function setBusy(busy, message = "") {
   elements.txt2imgModeButton.disabled = busy;
   elements.img2imgModeButton.disabled = busy;
   elements.inpaintModeButton.disabled = busy;
-  elements.chooseInitImageButton.disabled = busy;
-  elements.initImageInput.disabled = busy;
-  elements.clearInitImageButton.disabled = busy || !initImageReference;
+  referenceImageController.setBusy(busy);
   elements.img2imgPreset.disabled = busy;
   elements.img2imgDenoising.disabled = busy;
   elements.img2imgResizeMode.disabled = busy;
-  elements.syncInitImageSize.disabled = busy;
-  elements.maskPaintButton.disabled = busy;
-  elements.maskEraseButton.disabled = busy;
-  elements.maskBrushSize.disabled = busy;
-  elements.inpaintDenoising.disabled = busy;
-  elements.maskBlur.disabled = busy;
-  elements.inpaintFill.disabled = busy;
-  elements.inpaintFullRes.disabled = busy;
-  elements.inpaintFullResPadding.disabled = busy;
-  if (busy) {
-    elements.maskUndoButton.disabled = true;
-    elements.maskRedoButton.disabled = true;
-    elements.maskClearButton.disabled = true;
-  } else {
-    updateMaskHistoryButtons();
-  }
-  syncIpAdapterUi();
+  inpaintEditor.setBusy(busy);
+  ipAdapterController.syncUi();
   syncRuntimeUi();
   elements.loading.classList.toggle("hidden", !busy);
   if (message) elements.loadingText.textContent = message;
@@ -5340,7 +4675,7 @@ function updateGenerateButton() {
 function handleCandidateCountChange() {
   const value = elements.candidateCount.value;
   if (isValidCandidateCount(value)) {
-    localStorage.setItem("localImageChat.candidateCount", String(Number(value)));
+    setRecipeAwareStorage("localImageChat.candidateCount", String(Number(value)));
   }
   updateGenerateButton();
 }
