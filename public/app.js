@@ -1,3 +1,4 @@
+import { recipeParameterPatch, settingsWithCheckpoint } from "./core/generation-settings.js";
 import { getJson, postJson, patchJson, deleteJson } from "./core/http-client.js";
 import {
   PREFERENCE_KEYS,
@@ -3015,17 +3016,11 @@ function applyRecipeHeader(recipe) {
 }
 
 function applyRecipeSettings(recipe, image) {
-  const settings = recipe.settings ?? {};
-  for (const key of [
-    "width", "height", "steps", "cfgScale", "samplerName", "scheduler", "noiseSchedule",
-    "img2imgDenoising", "img2imgResizeMode",
-    "inpaintDenoising", "maskBlur", "inpaintFill", "inpaintFullResPadding",
-    "hiresScale", "hiresSteps", "hiresDenoising", "hiresUpscaler"
-  ]) {
-    if (settings[key] !== undefined && elements[key]) elements[key].value = settings[key];
-  }
-  if (settings.inpaintFullRes !== undefined) {
-    elements.inpaintFullRes.checked = settings.inpaintFullRes === true;
+  const settings = recipeParameterPatch(recipe, image);
+  for (const [key, value] of Object.entries(settings)) {
+    if (key === "seed" || key === "candidateCount") continue;
+    if (key === "inpaintFullRes") elements.inpaintFullRes.checked = value;
+    else if (elements[key]) elements[key].value = value;
   }
   syncSamplerLabels();
   elements.seed.value = image.seed;
@@ -4136,7 +4131,7 @@ function sleep(milliseconds) {
 
 function readSettings(overrides = {}) {
   const { selectedCheckpoint } = runtimeController.getState();
-  return {
+  return settingsWithCheckpoint({
     width: elements.width.value,
     height: elements.height.value,
     steps: elements.steps.value,
@@ -4145,10 +4140,6 @@ function readSettings(overrides = {}) {
     samplerName: elements.samplerName.value,
     scheduler: elements.scheduler.value,
     noiseSchedule: elements.noiseSchedule.value,
-    checkpoint: selectedCheckpoint?.title ?? "",
-    checkpointHash: selectedCheckpoint?.hash ?? "",
-    checkpointModelName: selectedCheckpoint?.modelName ?? "",
-    checkpointFilename: selectedCheckpoint?.filename ?? "",
     candidateCount: elements.candidateCount.value,
     img2imgDenoising: elements.img2imgDenoising.value,
     img2imgResizeMode: elements.img2imgResizeMode.value,
@@ -4161,9 +4152,7 @@ function readSettings(overrides = {}) {
     hiresSteps: elements.hiresSteps.value,
     hiresDenoising: elements.hiresDenoising.value,
     hiresUpscaler: elements.hiresUpscaler.value,
-    hiresEnabled: false,
-    ...overrides
-  };
+  }, selectedCheckpoint, overrides);
 }
 
 function readTitlePayload() {

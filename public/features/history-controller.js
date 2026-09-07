@@ -1,3 +1,4 @@
+import { createRecentHistoryService } from "../core/recent-history-service.js";
 import {
   collectCheckpoints,
   collectLoras,
@@ -93,6 +94,7 @@ export function createHistoryController({
   let cursor = null;
   let hasMore = true;
   let loading = false;
+  const recentHistory = createRecentHistoryService({ getJson, onData: onStudioRecentData, onError: onStudioRecentError });
   let total = 0;
   let filter = { ...DEFAULT_FILTER, tags: [] };
   let sort = "newest";
@@ -130,6 +132,7 @@ export function createHistoryController({
   }
 
   function dispose() {
+    recentHistory.dispose();
     for (const closeDetail of [...activeDetailClosers]) closeDetail();
     if (!initialized) return;
     for (const [element, type, listener] of listeners.splice(0)) element.removeEventListener(type, listener);
@@ -173,13 +176,7 @@ export function createHistoryController({
   }
 
   async function loadStudioRecent(studioFilter = getStudioHistoryFilter()) {
-    const favoriteQuery = studioFilter === "favorite" ? "&favorites=1" : "";
-    try {
-      const data = await getJson(`/api/history?limit=${HISTORY_PAGE_SIZE}${favoriteQuery}`);
-      onStudioRecentData(data.generations ?? []);
-    } catch (error) {
-      onStudioRecentError(error.message);
-    }
+    await recentHistory.load(studioFilter);
   }
 
   function render(nextGenerations = generations) {
@@ -210,7 +207,7 @@ export function createHistoryController({
     elements.historyLoadMoreButton.hidden = !hasMore;
     const galleryUsesFavoriteDataset = filter.kind === "favorite";
     const studioUsesFavoriteDataset = getStudioHistoryFilter() === "favorite";
-    if (galleryUsesFavoriteDataset === studioUsesFavoriteDataset) onStudioRecentData(generations);
+    if (galleryUsesFavoriteDataset === studioUsesFavoriteDataset) recentHistory.replace(generations);
     else void loadStudioRecent();
     onRendered(generations, entries);
   }

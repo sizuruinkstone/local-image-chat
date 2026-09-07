@@ -1201,7 +1201,8 @@ test("MCPのgenerate_image／regenerate_imageはruntimeIdをBackendへ渡す", a
 test("Task20 UIはRuntime切替完了後に履歴を復元し、生成元RuntimeでHiresを判定する", async () => {
   const app = await fs.readFile("public/app.js", "utf8");
   const loraLibrary = await fs.readFile("public/features/lora-library.js", "utf8");
-  const runtimeController = await fs.readFile("public/features/runtime-controller.js", "utf8");
+  const runtimeController = await fs.readFile("public/core/runtime-service.js", "utf8")
+    + await fs.readFile("public/features/runtime-controller.js", "utf8");
   const studio = await fs.readFile("public/features/studio-controller.js", "utf8");
   const historyController = await fs.readFile("public/features/history-controller.js", "utf8");
   const generationController = await fs.readFile("public/features/generation-controller.js", "utf8");
@@ -1216,7 +1217,8 @@ test("Task20 UIはRuntime切替完了後に履歴を復元し、生成元Runtime
   assert.doesNotMatch(runtimeController.match(/async function loadCheckpoints[\s\S]*?\n  \}/)?.[0] ?? "", /refresh-checkpoints/);
   assert.match(app, /const liveResponse = await fetch\("\/api\/runtimes"\)/);
   assert.match(runtimeController, /async function applyHealth\(health/);
-  assert.match(runtimeController, /option\.disabled = !isRuntimeSelectable\(item\)/);
+  assert.match(runtimeController, /selectable: isRuntimeSelectable\(runtime\)/);
+  assert.match(runtimeController, /option\.disabled = !runtime\.selectable/);
   assert.match(runtimeController, /\$\{label\}（未接続）/);
   assert.match(app, /await runtimeController\.applyHealth\(data\.runtimes, healthRequest\);[\s\S]*?if \(!runtimeController\.isHealthRequestCurrent\(healthRequest\)\) return false/);
   assert.match(app, /const runtimeText = runtimeHealth\?\.ok/);

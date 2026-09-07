@@ -1,3 +1,5 @@
+import { buildGenerationRequest } from "../core/generation-request.js";
+
 const GALLERY_HIRES_DEFAULTS = { scale: 1.5, steps: 12, denoising: 0.28 };
 
 // Owns only the active frontend operation. Feature state and the global queue
@@ -32,6 +34,7 @@ export function createGenerationController({ form, owners, ui, transport, timing
     let request = payload;
     let mayRecover = true;
     while (true) {
+      if (!isCurrent(operation)) throw new Error("生成処理が置き換えられました");
       const postedRequest = { ...request, autoRetry: form.readAutoRetry() };
       const { job } = await transport.postJson("/api/jobs", postedRequest);
       if (!isCurrent(operation)) throw new Error("生成処理が置き換えられました");
@@ -43,6 +46,7 @@ export function createGenerationController({ form, owners, ui, transport, timing
 
       while (true) {
         await sleep(850);
+        if (!isCurrent(operation)) throw new Error("生成処理が置き換えられました");
         const current = (await transport.getJson(`/api/jobs/${job.id}`)).job;
         if (!isCurrent(operation) || activeJobId !== job.id) throw new Error("生成処理が置き換えられました");
         ui.setJobProgress(current);
@@ -180,21 +184,7 @@ export function createGenerationController({ form, owners, ui, transport, timing
   // consumes at its historical position: after IP, before settings and POST.
   // Failures before that read preserve pending metadata; later ones do not.
   function prepareGeneration(description, count) {
-    return {
-      ...form.readRuntimePayload(),
-      mode: form.readMode(),
-      contentRating: form.readContentRating(),
-      description,
-      ...form.readTitlePayload(),
-      ...form.readPromptPayload(),
-      loras: form.readSelectedLoras(),
-      promptBoosts: form.readPromptBoosts(),
-      ...form.readInitImagePayload(),
-      ...form.readInpaintPayload(),
-      ...form.readIpAdapterPayload(),
-      ...form.readDerivationPayload(),
-      settings: form.readSettings({ candidateCount: count, hiresEnabled: false })
-    };
+    return buildGenerationRequest(form, description, count);
   }
 
   function finishSelected() {
@@ -301,5 +291,30 @@ export function createGenerationController({ form, owners, ui, transport, timing
     }
   }
 
-  return { buildPrompt, generateCandidates, finishSelected, hiresFromGallery, cancel, getState: state, isBusy: () => Boolean(activeOperation) };
+  // Reattach only to an explicitly saved job. This path never POSTs or retries it.
+  function reattach(jobId) {
+    return run("進行中の生成へ再接続しています…", async operation => {
+      activeJobId = jobId; notify();
+      while (isCurrent(operation)) {
+        const {job} = await transport.getJson(`/api/jobs/${encodeURIComponent(jobId)}`);
+        if (!isCurrent(operation)) return;
+        ui.setJobProgress(job);
+        if (job.status === "done") {
+          const record = generationRecord(job.result, job.result.description ?? "");
+          owners.setCandidates(record, job.result.images); ui.showResults(); await owners.loadHistory(); return;
+        }
+        if (job.status === "cancelled") throw new Error("生成を中止しました");
+        if (job.status === "failed") throw new Error(job.error || job.message || "生成に失敗しました");
+        await sleep(850);
+      }
+    });
+  }
+
+  return {
+    buildPrompt, generateCandidates, finishSelected, hiresFromGallery, cancel, reattach,
+    getState: state, isBusy: () => Boolean(activeOperation),
+    // Detach an app entry without cancelling the backend Job. Late transport
+    // responses cannot commit results into an entry that no longer exists.
+    dispose() { operationVersion += 1; activeOperation = null; activeJobId = null; }
+  };
 }

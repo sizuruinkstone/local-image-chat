@@ -3,6 +3,8 @@ import fs from "node:fs/promises";
 import test from "node:test";
 import { createForgeNeoProvider, normalizeForgeNeoConfig } from "../src/forge-neo.js";
 import { createJobManager } from "../src/job-manager.js";
+import { createRuntimeService } from "../public/core/runtime-service.js";
+import { settingsWithCheckpoint } from "../public/core/generation-settings.js";
 
 const ONE_PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
@@ -509,34 +511,48 @@ test("Task 22のqueued jobは実行時のProfileを各Jobごとに適用し、�
   ]);
 });
 
-test("Task 22の既存Checkpoint selectorは選択時にLocal APIだけを呼び、Neo options POSTはqueue側に残す", async () => {
-  const controller = await fs.readFile("public/features/runtime-controller.js", "utf8");
+// These contracts previously inspected the old controller's source location.
+// Exercise the extracted service directly so a future view cannot weaken them.
+async function selectorFixture() {
+  const calls = [], messages = [];
+  const runtime = createRuntimeService({
+    storage: { getItem: () => null, setItem() {}, removeItem() {} },
+    getJson: async () => ({ checkpoints: [
+      { title: "A", hash: "aaa" }, { title: "B", hash: "bbb" }
+    ], activeCheckpoint: "A" }),
+    postJson: async (url, body) => { calls.push({ url, body }); return { checkpoint: body.checkpoint }; },
+    presentation: { checkpointStatus: (message) => messages.push(message) }
+  });
+  runtime.init();
+  runtime.configure([{ id: "forge-neo-anima", label: "Neo", provider: "forge-neo", available: true, features: { txt2img: true } }], "forge-neo-anima");
+  await runtime.loadCheckpoints();
+  return { runtime, calls, messages };
+}
+
+test("Task 22の既存Checkpoint selectorは選択時にLocal APIだけを呼び、Neo options POSTはqueue側に残す", async (t) => {
+  const { runtime, calls } = await selectorFixture();
+  t.after(() => runtime.dispose());
+  assert.equal(await runtime.selectCheckpoint("B"), true);
+  assert.deepEqual(calls, [{ url: "/api/checkpoints/select", body: { checkpoint: "B", runtimeId: "forge-neo-anima" } }]);
   const server = await fs.readFile("src/server.js", "utf8");
-  const selection = controller.match(/async function selectCheckpoint\(\)[\s\S]*?\n  \}/)?.[0] ?? "";
-  assert.match(selection, /postJson\("\/api\/checkpoints\/select", \{ checkpoint: selectedTitle, \.\.\.runtimePayload\(\) \}\)/);
-  assert.doesNotMatch(selection, /sdapi\/v1\/options|forge_preset|forge_additional_modules/);
   assert.match(server, /if \(provider\.descriptor\.id !== "reforge"\)[\s\S]*?provider\.resolveV1Checkpoint\(selected\)/);
 });
 
-test("Task 22のNeo selectorはselectedとactiveを分離し、次回生成へ選択値を渡す", async () => {
-  const app = await fs.readFile("public/app.js", "utf8");
-  const controller = await fs.readFile("public/features/runtime-controller.js", "utf8");
-  const selection = controller.match(/async function selectCheckpoint\(\)[\s\S]*?\n  \}/)?.[0] ?? "";
-  const settings = app.match(/function readSettings\(overrides = \{\}\)[\s\S]*?\n\}/)?.[0] ?? "";
-  assert.match(controller, /let activeCheckpoint = null;[\s\S]*?let selectedCheckpoint = null;/);
-  assert.match(selection, /const nextCheckpoint = selected \?\? findCheckpoint\(data\.checkpoint\)/);
-  assert.match(selection, /selectedCheckpoint = nextCheckpoint/);
-  assert.match(selection, /neoSelection\s*\? `次回生成で切替:/);
-  assert.doesNotMatch(selection, /切替完了: \$\{activeCheckpoint\.title\}/);
-  assert.match(settings, /checkpoint: selectedCheckpoint\?\.title/);
-  assert.match(settings, /checkpointHash: selectedCheckpoint\?\.hash/);
-  assert.match(controller, /function renderCheckpointStatus\(prefix = ""\)/);
-  assert.match(controller, /使用中: \$\{activeCheckpoint\.title\}（次回生成で切替: \$\{selectedCheckpoint\.title\}）/);
-  assert.match(app, /runtimeController\.updateActiveCheckpoint\(healthCheckpoint, healthRequest\)/);
-  assert.match(controller, /\? `次回生成用のCheckpointを確認中: \$\{selectedTitle\}`/);
-  assert.match(controller, /: `切替中: \$\{selectedTitle\}（モデル読込に時間がかかる場合があります）`/);
-  assert.match(selection, /if \(!neoSelection\) activeCheckpoint = nextCheckpoint/);
-  assert.match(selection, /: `切替完了: \$\{selectedCheckpoint\.title\}`/);
+test("Task 22のNeo selectorはselectedとactiveを分離し、次回生成へ選択値を渡す", async (t) => {
+  const { runtime, messages } = await selectorFixture();
+  t.after(() => runtime.dispose());
+  await runtime.selectCheckpoint("B");
+  const state = runtime.getState();
+  assert.equal(state.selectedCheckpoint.title, "B");
+  assert.equal(state.activeCheckpoint.title, "A");
+  const settings = settingsWithCheckpoint({ seed: 4 }, state.selectedCheckpoint);
+  assert.equal(settings.checkpoint, "B");
+  assert.equal(settings.checkpointHash, "bbb");
+  assert.ok(messages.some((message) => message.includes("次回生成で切替: B")));
+  assert.ok(messages.some((message) => message.includes("現在の使用中: A")));
+  runtime.updateActiveCheckpoint("B");
+  assert.equal(runtime.getState().activeCheckpoint.title, "B");
+  assert.equal(runtime.getState().selectedCheckpoint.title, "B");
 });
 
 test("Task 22のCivitai追加は選択RuntimeのLoRA一覧を再取得する", async () => {

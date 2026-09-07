@@ -25,7 +25,8 @@ export function createPromptLoraCoordinator({
   restorePromptSnapshot,
   debounceMs = 400,
   setTimer = setTimeout,
-  clearTimer = clearTimeout
+  clearTimer = clearTimeout,
+  preserveSelectionOrder = false
 }) {
   const selected = new Map();
   const sources = new Map();
@@ -123,6 +124,10 @@ export function createPromptLoraCoordinator({
       notices = buildLoraNotices(result);
       renderNotices(describeLoraNotices(result));
       if (!result.changed) return false;
+      if (preserveSelectionOrder) {
+        const order = new Map([...selected.keys()].map((name, index) => [name, index]));
+        result.selected.sort((left, right) => (order.get(left.name) ?? Infinity) - (order.get(right.name) ?? Infinity));
+      }
       selected.clear();
       sources.clear();
       for (const item of result.selected) {
@@ -220,6 +225,12 @@ export function createPromptLoraCoordinator({
     setWeight,
     updateSelectedWeight,
     replaceSelection,
+    reorderSelection(names) {
+      if (names.length !== selected.size || new Set(names).size !== selected.size || names.some((name) => !selected.has(name))) throw new Error("LoRA order must contain every selected LoRA exactly once");
+      const values = names.map((name) => [name, selected.get(name)]);
+      selected.clear();
+      for (const [name, weight] of values) selected.set(name, weight);
+    },
     rewriteWeightToPrompt: (name, weight) => rewritePrompt(
       name,
       (text) => replaceLoraWeight(text, name, weight)
