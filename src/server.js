@@ -1,4 +1,5 @@
 import express from "express";
+import { installFrontendEntry } from "./frontend-entry.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -207,7 +208,7 @@ const generationService = createGenerationService({
 const app = express();
 app.use("/api/v1/assets/images", createReferenceAssetBodyParser());
 app.use(express.json({ limit: "50mb" }));
-app.use(express.static(path.join(rootDir, "public")));
+installFrontendEntry(app, path.join(rootDir, "public"));
 const immutableImageStaticOptions = {
   etag: true,
   lastModified: true,

@@ -1,3 +1,4 @@
+// Frontend revision: studio-production-r7 (network-only; no offline asset cache).
 // ホーム画面へ追加できるようにするためだけのService Worker。
 // 画像生成はローカルのサーバーが必要なので、オフライン用のキャッシュは持たない。
 // 古いフロントエンドが残らないよう、fetchは常にネットワークへ素通しし、

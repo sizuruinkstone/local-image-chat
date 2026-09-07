@@ -1,0 +1,8 @@
+import {createRequire} from 'node:module';import os from 'node:os';import path from 'node:path';import {writeFile} from 'node:fs/promises';import assert from 'node:assert/strict';
+const require=createRequire(import.meta.url),{chromium}=require(path.join(os.homedir(),'.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright'));
+const browser=await chromium.launch({channel:'chrome',headless:true}),page=await browser.newPage({viewport:{width:390,height:844},storageState:'workbench/final/browser-session.json'});const errors=[],requests=[];page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>{if(r.method()==='POST'&&r.url().endsWith('/api/jobs'))requests.push(r.postDataJSON());});
+try{
+ const jobs=(await(await page.request.get('http://127.0.0.1:3030/api/jobs')).json()).jobs??[];assert.equal(jobs.filter(j=>['queued','running'].includes(j.status)).length,0);
+ await page.goto('http://127.0.0.1:3030/');await page.waitForFunction(()=>!document.querySelector('.prompt-open').disabled);await page.getByRole('button',{name:'Studio',exact:true}).click();
+ await page.getByRole('button',{name:'Generate',exact:true}).click();await page.getByRole('button',{name:'Cancel',exact:true}).click();await page.waitForFunction(()=>document.querySelector('.canvas-stage').dataset.state==='cancelled');assert.equal(requests.length,1);assert.deepEqual(errors,[]);await page.screenshot({path:'workbench/final/mobile-cancel-390.png',animations:'disabled'});await writeFile('workbench/final/mobile-job-report.json',JSON.stringify({result:'PASS',requests:requests.length,errors},null,2));console.log('Production 390px real Generate / Cancel PASS');
+}finally{await browser.close();}

@@ -21,3 +21,9 @@
 # Structured Prompt primary workflow (2026-09-07)
 
 新Studioでは既存Structured Promptの6sectionをPrimary Workflowとする。通常Dockはsection summary、展開先の専用Prompt Workspaceで独立編集し、Raw・Negative・Final Prompt previewを同じ制作フローへ置く。単一Positive textareaを最終UXにしない。Final previewはR1 canonical promptを読み、UIで別の結合規則を持たない。Structured / Raw切替は双方の編集を保持する。Production切替の許可とは別の要件として継続する。
+
+## Production Studio boundary (2026-09-08)
+
+R7で通常entryをNew Studioへ切替。native ESM/static配布を維持し、`/?legacy=1`のみ旧bootstrapを選ぶ。新旧DOMを同時に起動しない。R1 workspaceを高度生成へ拡張し、Promptのcanonical buildRequestと既存generation controllerのrequest/recovery契約を保持する。
+
+Libraryのsearch/sortはbackendの全保持履歴に適用してからページ分割する。既存storage/cursor/retentionを変更しない。制作sessionは追加のversion付きkeyに保存し、旧preset IDをStructured本文へ推測変換しない。Job reattachは保存済みIDへのGETのみで、再POSTしない。Runtime非対応機能を仮実装・fake progressで隠さない。詳しくは[最終記録](frontend-full-rebuild-final.md)。
