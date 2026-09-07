@@ -79,7 +79,8 @@ function make(overrides = {}) {
     revokeObjectUrl: (url) => calls.revoked.push(url),
     makeMaskKey: () => "local-mask-key",
     maxFileBytes: overrides.maxFileBytes ?? 20,
-    windowTarget: overrides.windowTarget ?? eventTarget()
+    windowTarget: overrides.windowTarget ?? eventTarget(),
+    managePageLifecycle: overrides.managePageLifecycle ?? true
   });
   return { controller, elements, calls, getMode: () => mode, removedAttributes };
 }
@@ -304,6 +305,14 @@ test("init wires chooser, drag/drop and preference sync; dispose removes listene
   assert.equal(windowTarget.listenerCount("beforeunload"), 0);
 });
 
+test("app-owned page lifecycle can disable the controller beforeunload listener", () => {
+  const windowTarget = eventTarget();
+  const f = make({ windowTarget, managePageLifecycle: false });
+  f.controller.init();
+  assert.equal(windowTarget.listenerCount("beforeunload"), 0);
+  f.controller.dispose();
+});
+
 test("app composes the controller through narrow query and callback ports", async () => {
   const source = await fs.readFile("public/app.js", "utf8");
   assert.match(source, /createReferenceImageController\(\{/);
@@ -311,6 +320,7 @@ test("app composes the controller through narrow query and callback ports", asyn
   assert.match(source, /referenceImageController\.restoreSnapshot\(snapshot\.initImageReference/);
   assert.match(source, /return referenceImageController\.readPayload\(generationMode\)/);
   assert.match(source, /onClear:\s*inpaintEditor\.reset/);
+  assert.match(source, /managePageLifecycle:\s*false/);
   assert.doesNotMatch(source, /let initImageReference\s*=/);
   assert.doesNotMatch(source, /async function loadInitImageFile\(/);
 });

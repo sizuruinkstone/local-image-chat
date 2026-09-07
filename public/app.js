@@ -1,4 +1,13 @@
 import { getJson, postJson, patchJson, deleteJson } from "./core/http-client.js";
+import {
+  PREFERENCE_KEYS,
+  PROFILE_STORAGE_VERSION,
+  createPreferences
+} from "./core/preferences.js";
+import {
+  createAppBootstrap,
+  registerServiceWorker
+} from "./app/bootstrap.js";
 import { createRuntimeController } from "./features/runtime-controller.js";
 import { createCheckpointSetController } from "./features/checkpoint-sets.js";
 import { createPromptLoraCoordinator } from "./features/prompt-lora-coordinator.js";
@@ -47,6 +56,7 @@ import { createHistoryController } from "./features/history-controller.js";
 import { createComparisonController } from "./features/comparison-controller.js";
 import { createExperimentController } from "./features/experiment-controller.js";
 import { createGenerationController } from "./features/generation-controller.js";
+import { createSettingsUpdate } from "./features/settings-update.js";
 import {
   LORA_ROOT_FOLDER,
   MAX_CANDIDATE_COUNT,
@@ -102,12 +112,6 @@ import {
   normalizeTitleMode,
   normalizeTitleTemplate
 } from "./history-title.js";
-
-const PROFILE_STORAGE_VERSION = 3;
-const TITLE_STORAGE_KEYS = {
-  mode: "localImageChat.titleGenerationMode",
-  template: "localImageChat.titleTemplate"
-};
 
 const elements = Object.fromEntries(
   [
@@ -226,6 +230,8 @@ const elements = Object.fromEntries(
   ].map((id) => [id, document.getElementById(id)])
 );
 
+const preferences = createPreferences({ storage: localStorage, session: sessionStorage });
+
 // プロンプト部品だけを設定画面へ移す。生成に使う設定フォームは左カラムへ集約する。
 // 同じinput要素をそのまま使うため、生成APIへ渡す設定値や復元処理は変わらない。
 elements.studioGenerationSettingsMount.append(elements.promptPartsDetails);
@@ -269,7 +275,6 @@ let loraConfig = { defaultWeight: 0.7, maxSelected: 4 };
 let compositionLock = null;
 let preferenceData = { favoriteCount: 0, topTags: [], topLoras: [], topSettings: [] };
 let preferenceBoosts = [];
-let updateInfo = null;
 // 表示中のトップレベル画面。生成の進行状況はサーバー側のジョブが持つので、
 // ここを切り替えても生成は止まらない。
 const navigation = createNavigation({
@@ -317,6 +322,23 @@ const settingsNavigation = createSettingsNavigation({
   document,
   window,
   requestAnimationFrame
+});
+const settingsUpdate = createSettingsUpdate({
+  elements: {
+    githubToken: elements.githubToken,
+    checkUpdateButton: elements.checkUpdateButton,
+    applyUpdateButton: elements.applyUpdateButton,
+    updateStatusButton: elements.updateStatusButton,
+    versionContractStatus: elements.versionContractStatus,
+    updateStatus: elements.updateStatus
+  },
+  document,
+  preferences,
+  postJson,
+  fetchImpl: (...args) => fetch(...args),
+  describeRuntime,
+  onStatusChanged: syncSettingsConnectionSummary,
+  onOpenSettings: () => settingsNavigation.activate("appInfo", { targetId: "updateDetails" })
 });
 const discordSettings = createDiscordSettings({
   elements: {
@@ -642,14 +664,14 @@ let clearedPromptSnapshot = null;
 let syncSeedClearButton = () => {};
 let generationMode = "txt2img";
 let recipePersistenceActive = false;
-const loraWeights = loadLoraWeights();
-const loraTriggers = loadLoraTriggers();
-const loraNegativeWords = loadStringMap("localImageChat.loraNegativeWords");
-const loraProfileAssignments = loadStringMap("localImageChat.loraProfileAssignments");
-const loraPresetSelections = loadStringMap("localImageChat.loraPresetSelections");
-const loraAddonSelections = loadStringMap("localImageChat.loraAddonSelections");
-const loraOutfitSelections = loadLoraOutfitSelections();
-const checkpointProfileAssignments = loadStringMap("localImageChat.checkpointProfileAssignments");
+const loraWeights = preferences.readLoraWeights();
+const loraTriggers = preferences.readLoraTriggers();
+const loraNegativeWords = preferences.readStringMap(PREFERENCE_KEYS.loraNegativeWords);
+const loraProfileAssignments = preferences.readStringMap(PREFERENCE_KEYS.loraProfileAssignments);
+const loraPresetSelections = preferences.readStringMap(PREFERENCE_KEYS.loraPresetSelections);
+const loraAddonSelections = preferences.readStringMap(PREFERENCE_KEYS.loraAddonSelections);
+const loraOutfitSelections = preferences.readLoraOutfits();
+const checkpointProfileAssignments = preferences.readStringMap(PREFERENCE_KEYS.checkpointProfileAssignments);
 
 let checkpointSetController;
 let loraLibrary;
@@ -678,7 +700,7 @@ const inpaintEditor = createInpaintEditor({
     inpaintFullResPadding: elements.inpaintFullResPadding
   },
   storage: {
-    getItem: (key) => localStorage.getItem(key),
+    getItem: (key) => preferences.get(key),
     setItem: setRecipeAwareStorage
   }
 });
@@ -701,7 +723,8 @@ referenceImageController = createReferenceImageController({
   clearError,
   showError,
   onClear: inpaintEditor.reset,
-  onSyncPreferenceChange: saveImg2ImgPreferences
+  onSyncPreferenceChange: saveImg2ImgPreferences,
+  managePageLifecycle: false
 });
 const promptLoraCoordinator = createPromptLoraCoordinator({
   getCatalog: () => loraLibrary?.getItems() ?? [],
@@ -786,7 +809,8 @@ ipAdapterController = createIpAdapterController({
   toast,
   shorten,
   originalImageUrl,
-  onAvailabilityChange: (availability) => studioController.syncWorkflowAvailability(availability)
+  onAvailabilityChange: (availability) => studioController.syncWorkflowAvailability(availability),
+  managePageLifecycle: false
 });
 
 checkpointSetController = createCheckpointSetController({
@@ -1121,145 +1145,186 @@ function syncCheckpointState(state) {
   renderSelectedLoraSummary();
 }
 
-runtimeController.init();
-checkpointSetController.init();
-loraLibrary.init();
-civitaiController.init();
-await loadConfig();
-loadTitleSettings();
-initializeCheckpointControls();
-loadImg2ImgPreferences();
-inpaintEditor.loadPreferences();
-loadPromptPartSelections();
-restoreSessionSecrets();
-registerServiceWorker();
-setupPromptFieldAccordions();
-setPromptMode(promptMode);
-renderTriggerLists();
-renderPromptModeState();
-syncRawPromptFromSections();
-await Promise.all([
-  checkHealth(), runtimeController.loadCheckpoints(), loadLoras(), loadHistory(), loadCivitaiFolders(), loadLoraRoot(),
-  loadExperiments(), checkpointSetController.load(), loadDiscordSettings(), loadPromptTemplate(),
-  loadShareState(), loadSamplerOptions(), loadStorageSettings(), ipAdapterController.loadOptions()
-]);
-checkpointSetController.markSettingsApplied();
-setGenerationMode("txt2img");
-updateGenerateButton();
-studioController.syncOutputStats();
-setupClearableFields();
-ipAdapterController.syncUi();
-// 再読み込み後も、サーバー側で走っているジョブを拾って右上へ表示する。
-queueController.startPolling();
+const preConfigControllers = [
+  runtimeController,
+  checkpointSetController,
+  loraLibrary,
+  civitaiController
+];
 
-elements.healthButton.addEventListener("click", checkHealth);
-elements.titleGenerationMode.addEventListener("change", saveTitleSettings);
-elements.titleTemplate.addEventListener("input", saveTitleSettings);
-elements.generateButton.addEventListener("click", () => generationController.generateCandidates());
-elements.finishButton.addEventListener("click", () => generationController.finishSelected());
-navigation.init();
-samplerPicker.init();
-settingsNavigation.init();
-discordSettings.init();
-storageSettings.init();
-aiShare.init();
-queueController.init();
-imageState.init();
-studioController.init();
-comparisonController.init();
-historyController.init();
-experimentController.init();
-referenceImageController.init();
-inpaintEditor.init();
-ipAdapterController.init();
-for (const control of [
-  elements.width, elements.height, elements.seed, elements.steps, elements.cfgScale,
-  elements.samplerName, elements.scheduler
-]) {
-  control.addEventListener("input", () => studioController.syncOutputStats());
-  control.addEventListener("change", () => studioController.syncOutputStats());
+const controllerInitOrder = [
+  navigation,
+  samplerPicker,
+  settingsNavigation,
+  discordSettings,
+  storageSettings,
+  aiShare,
+  queueController,
+  imageState,
+  studioController,
+  comparisonController,
+  historyController,
+  experimentController,
+  referenceImageController,
+  inpaintEditor,
+  ipAdapterController
+];
+
+function restoreStartupPreferences() {
+  loadTitleSettings();
+  initializeCheckpointControls();
+  loadImg2ImgPreferences();
+  inpaintEditor.loadPreferences();
+  loadPromptPartSelections();
+  settingsUpdate.restoreSessionSecret();
 }
-elements.resolutionPreset.addEventListener("change", applyResolutionPreset);
-elements.randomizeSeedButton.addEventListener("click", randomizeGenerationSeed);
-elements.seedFixedToggle.addEventListener("change", toggleGenerationSeedFixed);
-elements.txt2imgModeButton.addEventListener("click", () => setGenerationMode("txt2img"));
-elements.img2imgModeButton.addEventListener("click", () => setGenerationMode("img2img"));
-elements.inpaintModeButton.addEventListener("click", () => setGenerationMode("inpaint"));
-elements.img2imgPreset.addEventListener("change", handleImg2ImgPresetChange);
-elements.img2imgDenoising.addEventListener("input", handleImg2ImgDenoisingInput);
-elements.img2imgResizeMode.addEventListener("change", saveImg2ImgPreferences);
-elements.lockCompositionButton.addEventListener("click", lockSelectedComposition);
-elements.unlockCompositionButton.addEventListener("click", unlockComposition);
-elements.cancelJobButton.addEventListener("click", () => generationController.cancel());
-elements.clearPromptsButton.addEventListener("click", clearBothPrompts);
-elements.candidateCount.addEventListener("change", normalizeCandidateCount);
-for (const radio of [elements.contentRatingGeneral, elements.contentRatingNsfw]) {
-  radio.addEventListener("change", () => {
-    if (radio.checked) localStorage.setItem("localImageChat.contentRating", radio.value);
+
+function prepareInitialUi() {
+  setupPromptFieldAccordions();
+  setPromptMode(promptMode);
+  renderTriggerLists();
+  renderPromptModeState();
+  syncRawPromptFromSections();
+}
+
+async function loadInitialData() {
+  await Promise.all([
+    checkHealth(), runtimeController.loadCheckpoints(), loadLoras(), loadHistory(), civitaiController.loadFolders(), loraLibrary.loadRoot(),
+    loadExperiments(), checkpointSetController.load(), loadDiscordSettings(), loadPromptTemplate(),
+    loadShareState(), loadSamplerOptions(), loadStorageSettings(), ipAdapterController.loadOptions()
+  ]);
+}
+
+function finalizeInitialState() {
+  checkpointSetController.markSettingsApplied();
+  setGenerationMode("txt2img");
+  updateGenerateButton();
+  studioController.syncOutputStats();
+  setupClearableFields();
+  ipAdapterController.syncUi();
+}
+
+function bindPrimaryListeners(listen) {
+  listen(elements.healthButton, "click", checkHealth);
+  listen(elements.titleGenerationMode, "change", saveTitleSettings);
+  listen(elements.titleTemplate, "input", saveTitleSettings);
+  listen(elements.generateButton, "click", () => generationController.generateCandidates());
+  listen(elements.finishButton, "click", () => generationController.finishSelected());
+}
+
+function bindFeatureListeners(listen) {
+  for (const control of [
+    elements.width, elements.height, elements.seed, elements.steps, elements.cfgScale,
+    elements.samplerName, elements.scheduler
+  ]) {
+    listen(control, "input", () => studioController.syncOutputStats());
+    listen(control, "change", () => studioController.syncOutputStats());
+  }
+  listen(elements.resolutionPreset, "change", applyResolutionPreset);
+  listen(elements.randomizeSeedButton, "click", randomizeGenerationSeed);
+  listen(elements.seedFixedToggle, "change", toggleGenerationSeedFixed);
+  listen(elements.txt2imgModeButton, "click", () => setGenerationMode("txt2img"));
+  listen(elements.img2imgModeButton, "click", () => setGenerationMode("img2img"));
+  listen(elements.inpaintModeButton, "click", () => setGenerationMode("inpaint"));
+  listen(elements.img2imgPreset, "change", handleImg2ImgPresetChange);
+  listen(elements.img2imgDenoising, "input", handleImg2ImgDenoisingInput);
+  listen(elements.img2imgResizeMode, "change", saveImg2ImgPreferences);
+  listen(elements.lockCompositionButton, "click", lockSelectedComposition);
+  listen(elements.unlockCompositionButton, "click", unlockComposition);
+  listen(elements.cancelJobButton, "click", () => generationController.cancel());
+  listen(elements.clearPromptsButton, "click", clearBothPrompts);
+  listen(elements.candidateCount, "change", normalizeCandidateCount);
+  for (const radio of [elements.contentRatingGeneral, elements.contentRatingNsfw]) {
+    listen(radio, "change", () => {
+      if (radio.checked) preferences.set(PREFERENCE_KEYS.contentRating, radio.value);
+    });
+  }
+  listen(elements.prompt, "input", handleRawPromptInput);
+  listen(elements.negativePrompt, "input", () => {
+    markPromptAsCurrent();
+    renderPromptFieldPreviews();
+  });
+  listen(elements.structuredPromptTabButton, "click", () => setPromptMode("structured"));
+  listen(elements.rawPromptTabButton, "click", () => setPromptMode("raw"));
+  listen(elements.useStructuredPromptButton, "click", useStructuredPrompt);
+  listen(elements.appendTriggersToRawButton, "click", appendTriggersToRaw);
+  for (const field of PROMPT_FIELDS) {
+    listen(promptFieldElement(field), "input", handleStructuredPromptInput);
+  }
+  listen(elements.checkpointProfileSelect, "change", handleCheckpointProfileChange);
+  listen(elements.checkpointAutoApply, "change", () => {
+    preferences.set(PREFERENCE_KEYS.checkpointAutoApply, String(elements.checkpointAutoApply.checked));
+  });
+  listen(elements.importAiPromptButton, "click", openAiPromptImport);
+  settingsUpdate.init();
+  listen(elements.showCombinedPromptButton, "click", showCombinedPrompt);
+  listen(elements.compareShortcutButton, "click", sendToCompare);
+  listen(elements.compareShortcutDetails, "toggle", () => {
+    if (elements.compareShortcutDetails.open) syncCompareShortcut();
+  });
+  listen(elements.compareShortcutParameter, "change", () => {
+    // 実体は比較画面のフォーム。ここは入り口なので、値だけ渡す。
+    elements.experimentParameter.value = elements.compareShortcutParameter.value;
+    syncExperimentTargetVisibility();
+  });
+  listen(elements.compareShortcutValues, "input", () => {
+    elements.experimentValues.value = elements.compareShortcutValues.value;
+  });
+  listen(elements.cancelGenerateButton, "click", () => generationController.cancel());
+  listen(elements.addLoraButton, "click", () => void loraLibrary.openPicker());
+  listen(elements.candidateCountDown, "click", () => stepCandidateCount(-1));
+  listen(elements.candidateCountUp, "click", () => stepCandidateCount(1));
+  listen(elements.candidateCount, "input", handleCandidateCountChange);
+  listen(elements.candidateCount, "blur", normalizeCandidateCount);
+  listen(elements.openLoraManagementButton, "click", () => {
+    showView("settings");
+    settingsNavigation.activate("lora", { targetId: "settingsLoraDetails", focus: true });
   });
 }
-elements.prompt.addEventListener("input", handleRawPromptInput);
-elements.negativePrompt.addEventListener("input", () => {
-  markPromptAsCurrent();
-  renderPromptFieldPreviews();
-});
-elements.structuredPromptTabButton.addEventListener("click", () => setPromptMode("structured"));
-elements.rawPromptTabButton.addEventListener("click", () => setPromptMode("raw"));
-elements.useStructuredPromptButton.addEventListener("click", useStructuredPrompt);
-elements.appendTriggersToRawButton.addEventListener("click", appendTriggersToRaw);
-for (const field of PROMPT_FIELDS) {
-  promptFieldElement(field).addEventListener("input", handleStructuredPromptInput);
-}
-elements.checkpointProfileSelect.addEventListener("change", handleCheckpointProfileChange);
-elements.checkpointAutoApply.addEventListener("change", () => {
-  localStorage.setItem("localImageChat.checkpointAutoApply", String(elements.checkpointAutoApply.checked));
-});
-elements.importAiPromptButton.addEventListener("click", openAiPromptImport);
-elements.checkUpdateButton.addEventListener("click", checkForUpdate);
-elements.applyUpdateButton.addEventListener("click", applyUpdate);
-elements.updateStatusButton.addEventListener("click", () => {
-  settingsNavigation.activate("appInfo", { targetId: "updateDetails" });
-  void checkForUpdate();
-});
-elements.showCombinedPromptButton.addEventListener("click", showCombinedPrompt);
-elements.compareShortcutButton.addEventListener("click", sendToCompare);
-elements.compareShortcutDetails.addEventListener("toggle", () => {
-  if (elements.compareShortcutDetails.open) syncCompareShortcut();
-});
-elements.compareShortcutParameter.addEventListener("change", () => {
-  // 実体は比較画面のフォーム。ここは入り口なので、値だけ渡す。
-  elements.experimentParameter.value = elements.compareShortcutParameter.value;
-  syncExperimentTargetVisibility();
-});
-elements.compareShortcutValues.addEventListener("input", () => {
-  elements.experimentValues.value = elements.compareShortcutValues.value;
-});
-elements.cancelGenerateButton.addEventListener("click", () => generationController.cancel());
-elements.addLoraButton.addEventListener("click", () => void loraLibrary.openPicker());
-elements.candidateCountDown.addEventListener("click", () => stepCandidateCount(-1));
-elements.candidateCountUp.addEventListener("click", () => stepCandidateCount(1));
-elements.candidateCount.addEventListener("input", handleCandidateCountChange);
-elements.candidateCount.addEventListener("blur", normalizeCandidateCount);
-elements.openLoraManagementButton.addEventListener("click", () => {
-  showView("settings");
-  settingsNavigation.activate("lora", { targetId: "settingsLoraDetails", focus: true });
-});
-settingsNavigation.activate("general");
-showView(loadInitialView(), { remember: false });
-comparisonController.sync();
-elements.applyPreferenceButton.addEventListener("click", applyPreferenceTags);
-elements.clearPromptPartsButton.addEventListener("click", clearPromptParts);
-for (const element of [
-  elements.stylePreset, elements.compositionPreset, elements.lightingPreset, elements.moodPreset,
-  elements.outfitOverride
-]) {
-  element.addEventListener(element.tagName === "INPUT" ? "input" : "change", handlePromptPartChange);
+
+function activateInitialView() {
+  settingsNavigation.activate("general");
+  showView(loadInitialView(), { remember: false });
+  comparisonController.sync();
 }
 
-async function loadConfig() {
+function bindLateListeners(listen) {
+  listen(elements.applyPreferenceButton, "click", applyPreferenceTags);
+  listen(elements.clearPromptPartsButton, "click", clearPromptParts);
+  for (const element of [
+    elements.stylePreset, elements.compositionPreset, elements.lightingPreset, elements.moodPreset,
+    elements.outfitOverride
+  ]) {
+    listen(element, element.tagName === "INPUT" ? "input" : "change", handlePromptPartChange);
+  }
+}
+
+const appBootstrap = createAppBootstrap({
+  lifecycleTarget: window,
+  preConfigControllers,
+  restoreConfig: loadConfig,
+  restorePreferences: restoreStartupPreferences,
+  registerPwa: () => registerServiceWorker({ navigator }),
+  prepareInitialUi,
+  loadInitialData,
+  finalizeInitialState,
+  // Queue and restored Experiment monitors are application-lifetime, not view-lifetime.
+  startAppMonitors: () => queueController.startPolling(),
+  bindPrimaryListeners,
+  controllers: controllerInitOrder,
+  bindFeatureListeners,
+  activateInitialView,
+  bindLateListeners,
+  lifecycleControllers: [...preConfigControllers, ...controllerInitOrder, settingsUpdate],
+  teardown: [promptLoraCoordinator.cancelScheduledSync, imageModal.close]
+});
+
+await appBootstrap.start();
+
+async function loadConfig(listen) {
   const response = await fetch("/api/config");
   const { defaults, lora, version, runtime, runtimes, defaultRuntimeId } = await response.json();
-  void loadVersionContract(version, runtime);
+  void settingsUpdate.loadVersionContract(version, runtime);
   let liveRuntimeData = null;
   try {
     const liveResponse = await fetch("/api/runtimes");
@@ -1267,7 +1332,7 @@ async function loadConfig() {
   } catch {
     // live healthが取得できなくても、静的configで既存UIの初期化を続ける。
   }
-  configureRuntimeOptions(
+  runtimeController.configure(
     liveRuntimeData?.runtimes ?? runtimes,
     liveRuntimeData?.defaultRuntimeId ?? defaultRuntimeId
   );
@@ -1281,20 +1346,16 @@ async function loadConfig() {
       elements[key].value = value;
     }
   }
-  const savedCount = localStorage.getItem("localImageChat.candidateCount");
+  const savedCount = preferences.get(PREFERENCE_KEYS.candidateCount);
   if (["1", "2", "3", "4"].includes(savedCount)) elements.candidateCount.value = savedCount;
-  setContentRating(localStorage.getItem("localImageChat.contentRating") === "nsfw" ? "nsfw" : "general", {
+  setContentRating(preferences.get(PREFERENCE_KEYS.contentRating) === "nsfw" ? "nsfw" : "general", {
     persist: false
   });
-  elements.autoRetryOnFailure.checked = localStorage.getItem("localImageChat.autoRetry") === "true";
-  elements.autoRetryOnFailure.addEventListener("change", () => {
-    localStorage.setItem("localImageChat.autoRetry", String(elements.autoRetryOnFailure.checked));
+  elements.autoRetryOnFailure.checked = preferences.get(PREFERENCE_KEYS.autoRetry) === "true";
+  listen(elements.autoRetryOnFailure, "change", () => {
+    preferences.set(PREFERENCE_KEYS.autoRetry, String(elements.autoRetryOnFailure.checked));
   });
   syncSamplerLabels();
-}
-
-function configureRuntimeOptions(options, defaultRuntimeId) {
-  runtimeController.configure(options, defaultRuntimeId);
 }
 
 function selectedContentRating() {
@@ -1305,7 +1366,7 @@ function setContentRating(value, { persist = true } = {}) {
   const rating = value === "nsfw" ? "nsfw" : "general";
   elements.contentRatingGeneral.checked = rating === "general";
   elements.contentRatingNsfw.checked = rating === "nsfw";
-  if (persist) localStorage.setItem("localImageChat.contentRating", rating);
+  if (persist) preferences.set(PREFERENCE_KEYS.contentRating, rating);
   return rating;
 }
 
@@ -1517,38 +1578,6 @@ async function handleRuntimeChange(requestedRuntimeId = elements.runtimeSelect.v
   return runtimeController.selectRuntime(requestedRuntimeId);
 }
 
-async function loadVersionContract(serverVersion, runtime) {
-  if (!elements.versionContractStatus) return;
-  try {
-    const response = await fetch("/version.json", { cache: "no-cache" });
-    if (!response.ok) throw new Error(`version.json: ${response.status}`);
-    const { version: staticVersion } = await response.json();
-    const diskVersion = String(staticVersion ?? "").trim();
-    const runtimeVersion = String(serverVersion ?? "").trim();
-    if (!diskVersion || !runtimeVersion) {
-      renderVersionContractStatus("バージョン情報を確認できません。", runtime);
-      return;
-    }
-    renderVersionContractStatus(
-      diskVersion === runtimeVersion
-        ? `Version ${diskVersion}　最新ファイルを使用中`
-        : `画面 ${diskVersion} / サーバー ${runtimeVersion}　更新を反映するにはサーバーを再起動してください`,
-      runtime
-    );
-  } catch {
-    // バージョン確認の失敗は、生成・ギャラリー・設定の初期化を妨げない。
-    renderVersionContractStatus("画面バージョンを確認できません。", runtime);
-  }
-}
-
-function renderVersionContractStatus(message, runtime) {
-  const status = elements.versionContractStatus;
-  status.replaceChildren(document.createTextNode(message));
-  const runtimeSummary = describeRuntime(runtime);
-  if (!runtimeSummary) return;
-  status.append(document.createElement("br"), document.createTextNode(runtimeSummary));
-}
-
 function describeRuntime(runtime) {
   if (!runtime || typeof runtime !== "object") return "";
   const parts = [];
@@ -1590,25 +1619,13 @@ function formatRuntimeDate(value) {
 }
 
 function loadTitleSettings() {
-  let storedMode = "";
-  let storedTemplate = "";
-  try {
-    storedMode = localStorage.getItem(TITLE_STORAGE_KEYS.mode) ?? "";
-    storedTemplate = localStorage.getItem(TITLE_STORAGE_KEYS.template) ?? "";
-  } catch {
-    // localStorageが使えない環境でも、画面の既定値で生成を続ける。
-  }
+  const { mode: storedMode, template: storedTemplate } = preferences.readTitleSettings();
   const mode = normalizeTitleMode(storedMode || DEFAULT_TITLE_MODE);
   const template = normalizeTitleTemplate(storedTemplate);
   elements.titleGenerationMode.value = mode;
   elements.titleTemplate.value = template;
   syncTitleTemplateVisibility();
-  try {
-    localStorage.setItem(TITLE_STORAGE_KEYS.mode, mode);
-    localStorage.setItem(TITLE_STORAGE_KEYS.template, template);
-  } catch {
-    // 設定の保存失敗は画像生成を妨げない。
-  }
+  preferences.writeTitleSettings(mode, template);
 }
 
 function saveTitleSettings() {
@@ -1617,12 +1634,7 @@ function saveTitleSettings() {
   elements.titleGenerationMode.value = mode;
   elements.titleTemplate.value = template;
   syncTitleTemplateVisibility();
-  try {
-    localStorage.setItem(TITLE_STORAGE_KEYS.mode, mode);
-    localStorage.setItem(TITLE_STORAGE_KEYS.template, template);
-  } catch {
-    // 設定の保存失敗は画像生成を妨げない。
-  }
+  preferences.writeTitleSettings(mode, template);
 }
 
 function syncTitleTemplateVisibility() {
@@ -1677,12 +1689,7 @@ function syncSettingsConnectionSummary() {
         : discordText.includes("取得できません") || discordText.includes("失敗")
           ? "エラー"
           : "未確認";
-  const updateText = elements.updateStatus.textContent ?? "";
-  const updateStatus = updateInfo?.updateAvailable || updateText.includes("更新できます")
-    ? "更新あり"
-    : updateInfo && updateText.includes("最新版")
-      ? "最新"
-      : "未確認";
+  const updateStatus = settingsUpdate.getConnectionStatus();
   elements.settingsReforgeStatus.textContent = reforgeStatus;
   elements.settingsDiscordStatus.textContent = discordStatus;
   elements.settingsUpdateStatus.textContent = updateStatus;
@@ -1728,20 +1735,20 @@ function updateImg2ImgDenoisingDisplay() {
 }
 
 function loadImg2ImgPreferences() {
-  const denoising = Number(localStorage.getItem("localImageChat.img2imgDenoising"));
+  const denoising = Number(preferences.get(PREFERENCE_KEYS.img2imgDenoising));
   if (Number.isFinite(denoising) && denoising >= 0.05 && denoising <= 0.95) {
     elements.img2imgDenoising.value = denoising;
   }
-  const resizeMode = localStorage.getItem("localImageChat.img2imgResizeMode");
+  const resizeMode = preferences.get(PREFERENCE_KEYS.img2imgResizeMode);
   if (["0", "1", "2"].includes(resizeMode)) elements.img2imgResizeMode.value = resizeMode;
-  elements.syncInitImageSize.checked = localStorage.getItem("localImageChat.syncInitImageSize") !== "false";
+  elements.syncInitImageSize.checked = preferences.get(PREFERENCE_KEYS.syncInitImageSize) !== "false";
   handleImg2ImgDenoisingInput();
 }
 
 function saveImg2ImgPreferences() {
-  setRecipeAwareStorage("localImageChat.img2imgDenoising", elements.img2imgDenoising.value);
-  setRecipeAwareStorage("localImageChat.img2imgResizeMode", elements.img2imgResizeMode.value);
-  setRecipeAwareStorage("localImageChat.syncInitImageSize", String(elements.syncInitImageSize.checked));
+  setRecipeAwareStorage(PREFERENCE_KEYS.img2imgDenoising, elements.img2imgDenoising.value);
+  setRecipeAwareStorage(PREFERENCE_KEYS.img2imgResizeMode, elements.img2imgResizeMode.value);
+  setRecipeAwareStorage(PREFERENCE_KEYS.syncInitImageSize, String(elements.syncInitImageSize.checked));
 }
 
 function initializeCheckpointControls() {
@@ -1749,7 +1756,7 @@ function initializeCheckpointControls() {
   for (const profile of CHECKPOINT_PROFILES) {
     elements.checkpointProfileSelect.append(new Option(profile.name, profile.id));
   }
-  const savedAutoApply = localStorage.getItem("localImageChat.checkpointAutoApply");
+  const savedAutoApply = preferences.get(PREFERENCE_KEYS.checkpointAutoApply);
   elements.checkpointAutoApply.checked = savedAutoApply !== "false";
 }
 
@@ -1759,8 +1766,8 @@ function handleCheckpointProfileChange() {
   const selection = elements.checkpointProfileSelect.value;
   if (selection === "auto") checkpointProfileAssignments.delete(selectedCheckpoint.title);
   else checkpointProfileAssignments.set(selectedCheckpoint.title, selection);
-  localStorage.setItem(
-    "localImageChat.checkpointProfileAssignments",
+  preferences.set(
+    PREFERENCE_KEYS.checkpointProfileAssignments,
     JSON.stringify(Object.fromEntries(checkpointProfileAssignments))
   );
   const profile = resolveCheckpointProfile(selectedCheckpoint);
@@ -1957,7 +1964,7 @@ function registerCivitaiDefaults() {
 }
 
 function migrateCharacterProfileDefaults() {
-  const currentVersion = Number(localStorage.getItem("localImageChat.loraProfileVersion") ?? 0);
+  const currentVersion = Number(preferences.get(PREFERENCE_KEYS.loraProfileVersion, 0));
   if (currentVersion >= PROFILE_STORAGE_VERSION) return;
 
   for (const lora of loraLibrary.getItems()) {
@@ -1976,7 +1983,7 @@ function migrateCharacterProfileDefaults() {
     applyProfilePreset(lora.name, profile, identityPreset);
   }
 
-  localStorage.setItem("localImageChat.loraProfileVersion", String(PROFILE_STORAGE_VERSION));
+  preferences.set(PREFERENCE_KEYS.loraProfileVersion, String(PROFILE_STORAGE_VERSION));
   saveProfileSettings();
 }
 
@@ -3004,7 +3011,7 @@ function applyRecipeHeader(recipe) {
   promptDescription = recipe.description ?? "";
   elements.generationTitle.value = normalizeManualTitle(recipe.title);
   const rating = setContentRating(recipe.contentRating === "nsfw" ? "nsfw" : "general", { persist: false });
-  runRecipePersistence(() => localStorage.setItem("localImageChat.contentRating", rating));
+  runRecipePersistence(() => preferences.set(PREFERENCE_KEYS.contentRating, rating));
 }
 
 function applyRecipeSettings(recipe, image) {
@@ -4081,25 +4088,21 @@ function updatePromptPartsSummary() {
 }
 
 function loadPromptPartSelections() {
-  try {
-    const saved = JSON.parse(localStorage.getItem("localImageChat.promptParts") ?? "{}");
-    for (const [key, element] of Object.entries({
-      style: elements.stylePreset,
-      composition: elements.compositionPreset,
-      lighting: elements.lightingPreset,
-      mood: elements.moodPreset
-    })) {
-      if ([...element.options].some((option) => option.value === saved[key])) element.value = saved[key];
-    }
-    if (typeof saved.outfit === "string") elements.outfitOverride.value = saved.outfit.slice(0, 500);
-  } catch {
-    // 壊れたブラウザ設定は無視する。
+  const saved = preferences.readJson(PREFERENCE_KEYS.promptParts, {});
+  for (const [key, element] of Object.entries({
+    style: elements.stylePreset,
+    composition: elements.compositionPreset,
+    lighting: elements.lightingPreset,
+    mood: elements.moodPreset
+  })) {
+    if ([...element.options].some((option) => option.value === saved?.[key])) element.value = saved[key];
   }
+  if (typeof saved?.outfit === "string") elements.outfitOverride.value = saved.outfit.slice(0, 500);
   updatePromptPartsSummary();
 }
 
 function savePromptPartSelections() {
-  localStorage.setItem("localImageChat.promptParts", JSON.stringify({
+  preferences.set(PREFERENCE_KEYS.promptParts, JSON.stringify({
     style: elements.stylePreset.value,
     composition: elements.compositionPreset.value,
     lighting: elements.lightingPreset.value,
@@ -4108,66 +4111,6 @@ function savePromptPartSelections() {
   }));
 }
 
-async function loadCivitaiFolders() {
-  return civitaiController.loadFolders();
-}
-
-async function loadLoraRoot() {
-  return loraLibrary.loadRoot();
-}
-async function checkForUpdate() {
-  rememberSessionSecrets();
-  elements.checkUpdateButton.disabled = true;
-  elements.applyUpdateButton.disabled = true;
-  elements.updateStatus.textContent = "GitHubの最新版を確認中…";
-  syncSettingsConnectionSummary();
-  try {
-    updateInfo = await postJson("/api/update/check", {
-      token: elements.githubToken.value
-    });
-    if (updateInfo.updateAvailable) {
-      elements.updateStatus.textContent = `v${updateInfo.currentVersion} → v${updateInfo.latestVersion}へ更新できます。`;
-      elements.applyUpdateButton.disabled = false;
-    } else {
-      elements.updateStatus.textContent = `v${updateInfo.currentVersion}が最新版です。`;
-    }
-  } catch (error) {
-    updateInfo = null;
-    elements.updateStatus.textContent = error.message;
-  } finally {
-    elements.checkUpdateButton.disabled = false;
-    syncSettingsConnectionSummary();
-  }
-}
-
-async function applyUpdate() {
-  if (!updateInfo?.updateAvailable) return;
-  rememberSessionSecrets();
-  elements.checkUpdateButton.disabled = true;
-  elements.applyUpdateButton.disabled = true;
-  elements.updateStatus.textContent = "バックアップを作成して更新中…";
-  try {
-    const data = await postJson("/api/update/apply", {
-      token: elements.githubToken.value
-    });
-    elements.updateStatus.textContent = data.applied
-      ? `v${data.latestVersion}へ更新しました。start.batを閉じて再起動してください。`
-      : "すでに最新版です。";
-  } catch (error) {
-    elements.updateStatus.textContent = error.message;
-    elements.applyUpdateButton.disabled = false;
-  } finally {
-    elements.checkUpdateButton.disabled = false;
-  }
-}
-
-function restoreSessionSecrets() {
-  elements.githubToken.value = sessionStorage.getItem("localImageChat.githubToken") ?? "";
-}
-
-function rememberSessionSecrets() {
-  sessionStorage.setItem("localImageChat.githubToken", elements.githubToken.value);
-}
 
 function formatFileSize(sizeKB) {
   const size = Number(sizeKB);
@@ -4294,81 +4237,21 @@ function hasStructuredLoraPresets(loraName) {
   return typeof findLoraByName(loraName)?.registry?.characterTriggerWords === "string";
 }
 
-function loadLoraTriggers() {
-  try {
-    const stored = JSON.parse(localStorage.getItem("localImageChat.loraTriggers") ?? "{}");
-    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return new Map();
-    return new Map(
-      Object.entries(stored)
-        .filter(([name, value]) => name && typeof value === "string" && value.trim())
-        .map(([name, value]) => [name, value.slice(0, 500)])
-    );
-  } catch {
-    return new Map();
-  }
-}
-
-function loadLoraWeights() {
-  try {
-    const stored = JSON.parse(localStorage.getItem("localImageChat.loraWeights") ?? "{}");
-    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return new Map();
-    return new Map(
-      Object.entries(stored)
-        .map(([name, value]) => [name, Number(value)])
-        .filter(([name, value]) => name && Number.isFinite(value) && value >= 0.05 && value <= 2)
-    );
-  } catch {
-    return new Map();
-  }
-}
-
-// localStorageのJSONを安全に読む。壊れていればfallbackを返す。
-function readJsonStorage(storageKey, fallback = {}) {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(storageKey) ?? "null");
-    return parsed === null || parsed === undefined ? fallback : parsed;
-  } catch {
-    return fallback;
-  }
-}
-
-function loadStringMap(storageKey) {
-  try {
-    const stored = JSON.parse(localStorage.getItem(storageKey) ?? "{}");
-    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return new Map();
-    return new Map(
-      Object.entries(stored)
-        .filter(([name, value]) => name && typeof value === "string" && value)
-    );
-  } catch {
-    return new Map();
-  }
-}
-
-function loadLoraOutfitSelections() {
-  const stored = readJsonStorage("localImageChat.generationLoraOutfits", {});
-  if (!stored || typeof stored !== "object" || Array.isArray(stored)) return new Map();
-  return new Map(
-    Object.entries(stored)
-      .filter(([name, choiceId]) => name && typeof choiceId === "string")
-  );
-}
-
 function saveLoraWeights() {
-  setRecipeAwareStorage("localImageChat.loraWeights", JSON.stringify(Object.fromEntries(loraWeights)));
+  setRecipeAwareStorage(PREFERENCE_KEYS.loraWeights, JSON.stringify(Object.fromEntries(loraWeights)));
 }
 
 function saveLoraTriggers() {
-  setRecipeAwareStorage("localImageChat.loraTriggers", JSON.stringify(Object.fromEntries(loraTriggers)));
+  setRecipeAwareStorage(PREFERENCE_KEYS.loraTriggers, JSON.stringify(Object.fromEntries(loraTriggers)));
 }
 
 function saveLoraNegativeWords() {
-  setRecipeAwareStorage("localImageChat.loraNegativeWords", JSON.stringify(Object.fromEntries(loraNegativeWords)));
+  setRecipeAwareStorage(PREFERENCE_KEYS.loraNegativeWords, JSON.stringify(Object.fromEntries(loraNegativeWords)));
 }
 
 function setRecipeAwareStorage(key, value) {
   try {
-    localStorage.setItem(key, value);
+    preferences.set(key, value);
   } catch (error) {
     if (recipePersistenceActive) throw new RecipePersistenceError(error);
     throw error;
@@ -4376,14 +4259,14 @@ function setRecipeAwareStorage(key, value) {
 }
 
 function saveProfileSettings() {
-  localStorage.setItem("localImageChat.loraProfileAssignments", JSON.stringify(Object.fromEntries(loraProfileAssignments)));
-  localStorage.setItem("localImageChat.loraPresetSelections", JSON.stringify(Object.fromEntries(loraPresetSelections)));
-  localStorage.setItem("localImageChat.loraAddonSelections", JSON.stringify(Object.fromEntries(loraAddonSelections)));
+  preferences.writeMap(PREFERENCE_KEYS.loraProfileAssignments, loraProfileAssignments);
+  preferences.writeMap(PREFERENCE_KEYS.loraPresetSelections, loraPresetSelections);
+  preferences.writeMap(PREFERENCE_KEYS.loraAddonSelections, loraAddonSelections);
 }
 
 function saveLoraOutfitSelections() {
   setRecipeAwareStorage(
-    "localImageChat.generationLoraOutfits",
+    PREFERENCE_KEYS.generationLoraOutfits,
     JSON.stringify(Object.fromEntries(loraOutfitSelections))
   );
 }
@@ -4427,7 +4310,7 @@ function updateGenerateButton() {
 function handleCandidateCountChange() {
   const value = elements.candidateCount.value;
   if (isValidCandidateCount(value)) {
-    setRecipeAwareStorage("localImageChat.candidateCount", String(Number(value)));
+    setRecipeAwareStorage(PREFERENCE_KEYS.candidateCount, String(Number(value)));
   }
   updateGenerateButton();
 }
@@ -4462,16 +4345,6 @@ function status(label, ok, detail = "") {
 function shorten(value, max) {
   if (!value) return "不明";
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
-}
-
-// ホーム画面へ追加できるようにするためだけのService Worker。
-// キャッシュは持たないので、更新後に古い画面が残ることはない。
-function registerServiceWorker() {
-  if (!("serviceWorker" in navigator)) return;
-  // file:// や http:// のLAN内アクセスでも動くよう、失敗しても無視する。
-  navigator.serviceWorker.register("/sw.js").catch((error) => {
-    console.warn(`[PWA] Service Workerを登録できません: ${error.message}`);
-  });
 }
 
 function escapeHtml(value) {

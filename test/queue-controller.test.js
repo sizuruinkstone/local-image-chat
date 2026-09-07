@@ -64,6 +64,44 @@ test("polling consumes eight failed idle ticks at 1200ms", async () => {
   await waitFor(() => f.indicator.classList.values.has("hidden")); assert.equal(f.calls.gets, 8);
 });
 
+test("page teardown stops the app-lifetime poll loop without changing view lifetime", async () => {
+  const f = fixture();
+  f.controller.init();
+  f.controller.startPolling();
+  await waitFor(() => f.calls.sleep.length === 1);
+  f.controller.dispose();
+  f.calls.sleep[0].resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(f.calls.gets, 1);
+  assert.equal(f.calls.sleep.length, 1);
+
+  f.controller.init();
+  f.controller.startPolling();
+  await waitFor(() => f.calls.sleep.length === 2);
+  assert.equal(f.calls.gets, 2);
+  assert.equal(f.calls.sleep.length, 2);
+  f.controller.dispose();
+  f.calls.sleep[1].resolve();
+});
+
+test("an in-flight queue response cannot render or notify after page teardown", async () => {
+  let resolvePending;
+  const pending = new Promise((resolve) => { resolvePending = resolve; });
+  const f = fixture();
+  f.responses.push(snap([{ type: "generation", id: "g", status: "running", progress: 20 }], 1), pending);
+  f.controller.init();
+  f.controller.startPolling();
+  await waitFor(() => f.calls.sleep.length === 1);
+  f.calls.sleep[0].resolve();
+  await waitFor(() => f.calls.gets === 2);
+  f.controller.dispose();
+  resolvePending(snap([{ type: "generation", id: "g", status: "done", progress: 100 }]));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(f.text.textContent, "生成中 20%");
+  assert.equal(f.calls.history, 0);
+  assert.deepEqual(f.calls.toast, []);
+});
+
 test("an open panel keeps idle polling alive", async () => {
   const f = fixture();
   f.controller.openPanel();

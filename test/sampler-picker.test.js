@@ -205,7 +205,7 @@ test("app delegates sampler ownership and keeps profile/runtime sync ports", asy
     fs.readFile("public/features/sampler-picker.js", "utf8")
   ]);
   assert.match(app, /createSamplerPicker\(\{/);
-  assert.match(app, /samplerPicker\.init\(\)/);
+  assert.match(app, /const controllerInitOrder = \[[\s\S]*?samplerPicker[\s\S]*?\];/);
   assert.match(app, /samplerPicker\.getOptions\(\)/);
   assert.match(app, /samplerPicker\.setOptions\(snapshot\.samplerOptions\)/);
   assert.match(app, /syncSamplerLabels\(\)/);

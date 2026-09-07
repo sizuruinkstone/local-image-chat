@@ -11,6 +11,8 @@ export function createQueueController({ elements, getJson, postJson, deleteJson,
   let panel = null;
   let seenTerminal = null;
   let initialized = false;
+  let lifecycleGeneration = 0;
+  let disposed = false;
 
   const handlers = {
     onCancelGeneration: async (entry) => {
@@ -29,37 +31,48 @@ export function createQueueController({ elements, getJson, postJson, deleteJson,
 
   function init() {
     if (initialized) return;
+    disposed = false;
     initialized = true;
     elements.queueIndicator.addEventListener("click", openPanel);
   }
   function dispose() {
+    lifecycleGeneration += 1;
+    polling = false;
+    disposed = true;
     if (!initialized) return;
     initialized = false;
     elements.queueIndicator.removeEventListener("click", openPanel);
   }
-  async function refresh() {
-    try { snapshot = await getJson("/api/queue"); }
+  async function refresh({ monitorGeneration = null } = {}) {
+    let nextSnapshot;
+    try { nextSnapshot = await getJson("/api/queue"); }
     catch { return null; }
+    if (monitorGeneration !== null && (disposed || monitorGeneration !== lifecycleGeneration)) return null;
+    snapshot = nextSnapshot;
     renderIndicator();
     notifyChanges(snapshot);
     panel?.render(snapshot);
     return snapshot;
   }
   function startPolling() {
-    if (polling) return;
+    if (polling || disposed) return;
+    const generation = lifecycleGeneration;
     polling = true;
     void (async () => {
       let idle = 0;
       try {
-        while (idle < QUEUE_IDLE_TICKS) {
-          const current = await refresh();
+        while (idle < QUEUE_IDLE_TICKS && !disposed && generation === lifecycleGeneration) {
+          const current = await refresh({ monitorGeneration: generation });
+          if (disposed || generation !== lifecycleGeneration) break;
           const active = Number(current?.summary?.activeCount) || 0;
           idle = active || panel ? 0 : idle + 1;
           await sleep(QUEUE_POLL_INTERVAL);
         }
       } finally {
-        polling = false;
-        hideIdleIndicator();
+        if (generation === lifecycleGeneration) {
+          polling = false;
+          hideIdleIndicator();
+        }
       }
     })();
   }

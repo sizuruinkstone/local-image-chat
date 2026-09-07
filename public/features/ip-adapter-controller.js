@@ -58,7 +58,8 @@ export function createIpAdapterController({
   requestFrame = (callback) => requestAnimationFrame(callback),
   prefersReducedMotion = () => window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches,
   windowTarget = globalThis.window,
-  maxReferenceBytes = MAX_REFERENCE_BYTES
+  maxReferenceBytes = MAX_REFERENCE_BYTES,
+  managePageLifecycle = true
 }) {
   let options = copyOptions();
   let state = copyState();
@@ -490,7 +491,7 @@ export function createIpAdapterController({
     listen(elements.ipAdapterWeight, "input", syncNumbers);
     listen(elements.ipAdapterGuidanceStart, "input", syncNumbers);
     listen(elements.ipAdapterGuidanceEnd, "input", syncNumbers);
-    listen(windowTarget, "beforeunload", dispose);
+    if (managePageLifecycle) listen(windowTarget, "beforeunload", dispose);
   }
 
   function dispose() {

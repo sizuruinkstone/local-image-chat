@@ -64,21 +64,22 @@ test("v3.0のバージョン契約は4箇所で一致する", async () => {
 test("設定画面は静的版とサーバー版の不一致を再起動案内へ表示する", async () => {
   const html = await fs.readFile("public/index.html", "utf8");
   const app = await fs.readFile("public/app.js", "utf8");
+  const update = await fs.readFile("public/features/settings-update.js", "utf8");
 
   assert.equal((html.match(/id="versionContractStatus"/g) ?? []).length, 1);
   assert.match(html, /id="versionContractStatus"[^>]*aria-live="polite"/);
-  assert.match(app, /async function loadVersionContract\(serverVersion, runtime\)/);
-  assert.match(app, /loadVersionContract\(version, runtime\)/);
-  assert.match(app, /fetch\("\/version\.json",\s*\{\s*cache:\s*"no-cache"\s*\}\)/);
-  assert.match(app, /diskVersion === runtimeVersion/);
-  assert.match(app, /更新を反映するにはサーバーを再起動してください/);
+  assert.match(update, /async function loadVersionContract\(serverVersion, runtime\)/);
+  assert.match(app, /settingsUpdate\.loadVersionContract\(version, runtime\)/);
+  assert.match(update, /fetchImpl\("\/version\.json",\s*\{\s*cache:\s*"no-cache"\s*\}\)/);
+  assert.match(update, /diskVersion === runtimeVersion/);
+  assert.match(update, /更新を反映するにはサーバーを再起動してください/);
   assert.match(app, /function describeRuntime\(runtime\)/);
   assert.match(app, /PID \$\{pid\}/);
   assert.match(app, /起動 \$\{startedAt\}/);
   assert.match(app, /runtime\.binding\?\.host/);
   assert.match(app, /Number\.isFinite\(date\.getTime\(\)\)/);
   assert.match(app, /if \(!runtime \|\| typeof runtime !== "object"\) return ""/);
-  assert.match(app, /catch \{[\s\S]*?画面バージョンを確認できません。/);
+  assert.match(update, /catch \{[\s\S]*?画面バージョンを確認できません。/);
 });
 
 test("画像比較の導線は既存候補Stateと比較表示を再利用する", async () => {
@@ -139,7 +140,7 @@ test("一般カテゴリの画像保存場所はplan確認後だけ移行を予�
   assert.match(app, /const storageSettings = createStorageSettings\(\{/);
   assert.match(app, /const aiShare = createAiShare\(\{/);
   assert.match(app, /const \{ load: loadStorageSettings \} = storageSettings/);
-  assert.match(app, /storageSettings\.init\(\)/);
+  assert.match(app, /const controllerInitOrder = \[[\s\S]*?storageSettings[\s\S]*?\];/);
   assert.doesNotMatch(app, /async function loadStorageSettings\(\)/);
   assert.doesNotMatch(app, /storageMigrationPlan|planStorageMigration|reserveStorageMigration|cancelStorageMigration/);
   assert.match(storage, /postJson\("\/api\/storage\/plan"/);
@@ -162,7 +163,7 @@ test("AI共有とGrokテンプレートは専用controllerへ接続する", asyn
   assert.match(app, /createAiShare\(\{[\s\S]*?copyGrokShareButton: elements\.copyGrokShareButton[\s\S]*?grokTemplateStatus: elements\.grokTemplateStatus/);
   assert.match(app, /getManualTriggerWords: \(\) => Object\.fromEntries\(loraTriggers\)/);
   assert.match(app, /const \{ loadShareState, loadPromptTemplate, scheduleShareCsvSync \} = aiShare/);
-  assert.match(app, /aiShare\.init\(\)/);
+  assert.match(app, /const controllerInitOrder = \[[\s\S]*?aiShare[\s\S]*?\];/);
   assert.match(app, /scheduleShare: scheduleShareCsvSync/);
   assert.match(app, /function publishLoraCatalog\(\)[\s\S]*?scheduleShareCsvSync\(\)/);
   assert.match(loraLibrary, /controls\.scheduleShare\?\.\(\)/);
@@ -386,13 +387,15 @@ test("生成分類UIとギャラリー分類UIはHistory APIへ明示値を接�
   const html = await fs.readFile("public/index.html", "utf8");
   const app = await fs.readFile("public/app.js", "utf8");
   const historyController = await fs.readFile("public/features/history-controller.js", "utf8");
+  const preferences = await fs.readFile("public/core/preferences.js", "utf8");
   assert.match(html, /id="contentRatingGeneral"[^>]*value="general"[^>]*checked/);
   assert.match(html, /id="contentRatingNsfw"[^>]*value="nsfw"/);
   assert.match(html, /data-gallery-rating="general"/);
   assert.match(html, /data-gallery-rating="nsfw"/);
   assert.match(html, /data-gallery-rating="unrated"/);
   assert.match(app, /contentRating:\s*selectedContentRating\(\)/);
-  assert.match(app, /localImageChat\.contentRating/);
+  assert.match(app, /PREFERENCE_KEYS\.contentRating/);
+  assert.match(preferences, /contentRating:\s*"localImageChat\.contentRating"/);
   assert.match(historyController, /rating=\$\{encodeURIComponent\(filter\.rating\)\}/);
   assert.match(historyController, /\/content-rating`, \{ contentRating \}/);
 });
@@ -448,8 +451,8 @@ test("分割プロンプト7項目とLoRAを左カラムのアコーディオン
   const app = await fs.readFile("public/app.js", "utf8");
   const loraLibrary = await fs.readFile("public/features/lora-library.js", "utf8");
   const settingsNavigation = await fs.readFile("public/features/settings-navigation.js", "utf8");
-  assert.match(app, /elements\.addLoraButton\.addEventListener\("click", \(\) => void loraLibrary\.openPicker\(\)\)/);
-  assert.match(app, /elements\.openLoraManagementButton\.addEventListener\("click"[\s\S]*?settingsNavigation\.activate\("lora",\s*\{\s*targetId:\s*"settingsLoraDetails",\s*focus:\s*true\s*\}\)/);
+  assert.match(app, /listen\(elements\.addLoraButton, "click", \(\) => void loraLibrary\.openPicker\(\)\)/);
+  assert.match(app, /listen\(elements\.openLoraManagementButton, "click"[\s\S]*?settingsNavigation\.activate\("lora",\s*\{\s*targetId:\s*"settingsLoraDetails",\s*focus:\s*true\s*\}\)/);
   assert.match(settingsNavigation, /function activate\(categoryId/);
   assert.match(loraLibrary, /async function openPicker\(\)/);
   assert.match(loraLibrary, /buildLoraCatalog\(items, \{ resolveThumbnail: resolveLoraPreviewUrl \}\)/);
@@ -740,7 +743,7 @@ test("設定画面は既存設定をカテゴリ別の2カラムへ整理する"
   assert.match(loraPanel, /id="civitaiDetails"/);
 
   assert.match(app, /createSettingsNavigation\(\{[\s\S]*?settingsCategoryNav: elements\.settingsCategoryNav[\s\S]*?settingsSearchResults: elements\.settingsSearchResults[\s\S]*?document,[\s\S]*?window,[\s\S]*?requestAnimationFrame/);
-  assert.match(app, /settingsNavigation\.init\(\)/);
+  assert.match(app, /const controllerInitOrder = \[[\s\S]*?settingsNavigation[\s\S]*?\];/);
   assert.match(app, /settingsNavigation\.activate\("lora", \{ targetId: "settingsLoraDetails", focus: true \}\)/);
   assert.match(settingsNavigation, /function activate\(categoryId[\s\S]*?panel\.hidden = !selected/);
   assert.match(settingsNavigation, /settingsCategoryNav\.addEventListener\("click", onNavClick\)/);
@@ -764,13 +767,15 @@ test("設定画面は既存設定をカテゴリ別の2カラムへ整理する"
 
 test("設定画面はTask 04/05の保存方式と既存イベントを維持する", async () => {
   const app = await fs.readFile("public/app.js", "utf8");
+  const preferences = await fs.readFile("public/core/preferences.js", "utf8");
   const settingsNavigation = await fs.readFile("public/features/settings-navigation.js", "utf8");
   const settingsDiscord = await fs.readFile("public/features/settings-discord.js", "utf8");
   const html = await fs.readFile("public/index.html", "utf8");
 
-  assert.match(app, /localStorage\.getItem\(TITLE_STORAGE_KEYS\.mode/);
-  assert.match(app, /localStorage\.setItem\(TITLE_STORAGE_KEYS\.mode/);
-  assert.match(app, /localStorage\.setItem\(TITLE_STORAGE_KEYS\.template/);
+  assert.match(app, /preferences\.readTitleSettings\(\)/);
+  assert.match(app, /preferences\.writeTitleSettings\(mode, template\)/);
+  assert.match(preferences, /titleGenerationMode:\s*"localImageChat\.titleGenerationMode"/);
+  assert.match(preferences, /titleTemplate:\s*"localImageChat\.titleTemplate"/);
   assert.match(settingsDiscord, /getJson\("\/api\/discord\/settings"\)/);
   assert.match(settingsDiscord, /patchJson\("\/api\/discord\/settings"/);
   assert.match(settingsDiscord, /postJson\("\/api\/discord\/test"/);

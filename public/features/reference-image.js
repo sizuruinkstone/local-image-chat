@@ -56,7 +56,8 @@ export function createReferenceImageController({
   revokeObjectUrl = (url) => URL.revokeObjectURL(url),
   maxFileBytes = DEFAULT_MAX_FILE_BYTES,
   makeMaskKey = () => `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-  windowTarget = globalThis.window
+  windowTarget = globalThis.window,
+  managePageLifecycle = true
 }) {
   let reference = null;
   let initialized = false;
@@ -267,7 +268,7 @@ export function createReferenceImageController({
       const [file] = event.dataTransfer?.files ?? [];
       if (file) void loadFile(file);
     });
-    listen(windowTarget, "beforeunload", dispose);
+    if (managePageLifecycle) listen(windowTarget, "beforeunload", dispose);
   }
 
   function setBusy(busy) {

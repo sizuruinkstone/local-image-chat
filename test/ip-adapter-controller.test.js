@@ -121,7 +121,8 @@ function make(overrides = {}) {
     requestFrame: (callback) => callback(),
     prefersReducedMotion: () => true,
     windowTarget,
-    maxReferenceBytes: overrides.maxReferenceBytes ?? 20
+    maxReferenceBytes: overrides.maxReferenceBytes ?? 20,
+    managePageLifecycle: overrides.managePageLifecycle ?? true
   });
   return {
     controller, elements, calls, windowTarget,
@@ -394,6 +395,13 @@ test("init owns chooser/drop/numeric listeners and dispose invalidates requests"
   assert.equal(f.windowTarget.listenerCount("beforeunload"), 0);
 });
 
+test("app-owned page lifecycle can disable the controller beforeunload listener", () => {
+  const f = make({ managePageLifecycle: false });
+  f.controller.init();
+  assert.equal(f.windowTarget.listenerCount("beforeunload"), 0);
+  f.controller.dispose();
+});
+
 test("app composes IP-Adapter through runtime feature, snapshot and payload ports", async () => {
   const source = await fs.readFile("public/app.js", "utf8");
   assert.match(source, /createIpAdapterController\(\{/);
@@ -402,6 +410,7 @@ test("app composes IP-Adapter through runtime feature, snapshot and payload port
   assert.match(source, /ipAdapterController\.restoreState\(snapshot\.ipAdapter/);
   assert.match(source, /ipAdapterController\.restoreRecipe\(recipe\)/);
   assert.match(source, /return ipAdapterController\.readPayload\(\)/);
+  assert.match(source, /managePageLifecycle:\s*false/);
   assert.doesNotMatch(source, /let ipAdapter(?:Options|State|ObjectUrl)\s*=/);
   assert.doesNotMatch(source, /function setIpAdapterReference\(/);
 });
