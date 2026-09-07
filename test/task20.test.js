@@ -1204,6 +1204,7 @@ test("Task20 UIはRuntime切替完了後に履歴を復元し、生成元Runtime
   const runtimeController = await fs.readFile("public/features/runtime-controller.js", "utf8");
   const studio = await fs.readFile("public/features/studio-controller.js", "utf8");
   const historyController = await fs.readFile("public/features/history-controller.js", "utf8");
+  const generationController = await fs.readFile("public/features/generation-controller.js", "utf8");
   const server = await fs.readFile("src/server.js", "utf8");
   assert.match(runtimeController, /let selectionToken = 0/);
   assert.match(runtimeController, /const isRuntimeContextCurrent = \(context\)/);
@@ -1242,11 +1243,11 @@ test("Task20 UIはRuntime切替完了後に履歴を復元し、生成元Runtime
   const candidate = studio.match(/function selectCandidate\([\s\S]*?\n  \}/)?.[0] ?? "";
   assert.match(candidate, /syncWorkflowAvailability\(\)/);
   assert.match(studio, /!isHiresAvailable\(lastGeneration\)/);
-  const finish = app.match(/async function finishSelected\([\s\S]*?\n\}/)?.[0] ?? "";
-  assert.match(finish, /runtimePayloadFor\(sourceRuntime\)/);
-  const galleryHires = app.match(/async function hiresFromGallery\([\s\S]*?\n\}/)?.[0] ?? "";
+  const finish = generationController.match(/function finishSelected\([\s\S]*?\n  \}/)?.[0] ?? "";
+  assert.match(finish, /readRuntimePayloadFor\(runtime\)/);
+  const galleryHires = generationController.match(/function hiresFromGallery\([\s\S]*?\n  \}/)?.[0] ?? "";
   assert.match(galleryHires, /runtimeForGeneration\(generation\)/);
-  assert.match(galleryHires, /runtimePayloadFor\(sourceRuntime\)/);
+  assert.match(galleryHires, /readRuntimePayloadFor\(runtime\)/);
   const detail = historyController.match(/function openDetail\([\s\S]*?(?=\n  function createCopyButton)/)?.[0] ?? "";
   assert.match(detail, /const hiresAction = addAction\("Hiresする"/);
   assert.match(detail, /hiresAction\.disabled = !hiresAvailable/);

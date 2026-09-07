@@ -46,6 +46,7 @@ import { createStudioController } from "./features/studio-controller.js";
 import { createHistoryController } from "./features/history-controller.js";
 import { createComparisonController } from "./features/comparison-controller.js";
 import { createExperimentController } from "./features/experiment-controller.js";
+import { createGenerationController } from "./features/generation-controller.js";
 import {
   LORA_ROOT_FOLDER,
   MAX_CANDIDATE_COUNT,
@@ -265,7 +266,6 @@ let rawPromptOverride = false;
 let rawPromptOverrideSource = "manual";
 let promptMode = "structured";
 let loraConfig = { defaultWeight: 0.7, maxSelected: 4 };
-let activeJobId = null;
 let compositionLock = null;
 let preferenceData = { favoriteCount: 0, topTags: [], topLoras: [], topSettings: [] };
 let preferenceBoosts = [];
@@ -561,7 +561,7 @@ const historyController = createHistoryController({
     const runtime = runtimeForGeneration(generation);
     return Boolean(runtime && runtimeSupports("hires", runtime));
   },
-  onHires: hiresFromGallery,
+  onHires: (...args) => generationController.hiresFromGallery(...args),
   onPreferencesChanged: (preferences) => {
     preferenceData = preferences;
     renderPreferenceSummary();
@@ -641,7 +641,6 @@ let clearedPromptSnapshot = null;
 // Seedクリアボタンの表示同期（setupClearableFieldsで実体を入れる）。
 let syncSeedClearButton = () => {};
 let generationMode = "txt2img";
-let generationBusy = false;
 let recipePersistenceActive = false;
 const loraWeights = loadLoraWeights();
 const loraTriggers = loadLoraTriggers();
@@ -730,7 +729,7 @@ const runtimeController = createRuntimeController({
   },
   getJson,
   postJson,
-  getGenerationBusy: () => generationBusy,
+  getGenerationBusy: () => generationController.isBusy(),
   showError,
   captureExternalSnapshot: captureRuntimeState,
   restoreExternalSnapshot: restoreRuntimeState,
@@ -781,7 +780,7 @@ ipAdapterController = createIpAdapterController({
   isRuntimeContextCurrent,
   runtimeSupports,
   isRuntimeSwitching: () => runtimeController.getState().switching,
-  getGenerationBusy: () => generationBusy,
+  getGenerationBusy: () => generationController.isBusy(),
   showError,
   clearError,
   toast,
@@ -866,7 +865,7 @@ loraLibrary = createLoraLibrary({
     isCurrent: isRuntimeContextCurrent,
     apiUrl: runtimeApiUrl,
     payload: runtimePayload,
-    getGenerationBusy: () => generationBusy
+    getGenerationBusy: () => generationController.isBusy()
   },
   controls: {
     isSelected: (name) => promptLoraCoordinator.isSelected(name),
@@ -1024,6 +1023,92 @@ civitaiController = createCivitaiController({
   library: { load: (...args) => loraLibrary.load(...args) }
 });
 
+const generationController = createGenerationController({
+  form: {
+    readAutoRetry: () => elements.autoRetryOnFailure.checked,
+    getActiveRuntime: () => runtimeController.getState().activeRuntime,
+    readContentRating: selectedContentRating,
+    readDescription: () => promptDescription,
+    readCurrentPositivePrompt: currentPositivePrompt,
+    readMode: () => generationMode,
+    readCandidateCount: () => elements.candidateCount.value,
+    shouldRequestPrompt,
+    readRuntimePayload: runtimePayload,
+    readRuntimePayloadFor: runtimePayloadFor,
+    readTitlePayload,
+    readPromptPayload,
+    readSelectedLoras,
+    readPromptBoosts,
+    readInitImagePayload,
+    readInpaintPayload,
+    readIpAdapterPayload,
+    readDerivationPayload,
+    readSettings,
+    runtimeForGeneration,
+    runtimeSupportsHires: (runtime) => runtimeSupports("hires", runtime),
+    readCurrentHiresSettings: () => ({
+      hiresScale: elements.hiresScale.value,
+      hiresSteps: elements.hiresSteps.value,
+      hiresDenoising: elements.hiresDenoising.value,
+      hiresUpscaler: elements.hiresUpscaler.value
+    }),
+    readHiresUpscaler: () => elements.hiresUpscaler.value
+  },
+  owners: {
+    startQueuePolling: () => queueController.startPolling(),
+    requestPrompt,
+    getLastGeneration: () => studioController.getLastGeneration(),
+    getSelectedCandidate: () => studioController.getSelectedCandidate(),
+    hasReference: () => referenceImageController.hasReference(),
+    hasMask: () => inpaintEditor.hasMask(),
+    syncLorasFromPrompt: () => promptLoraCoordinator.syncFromPrompt(),
+    applyIpMetadata: (metadata) => ipAdapterController.applyMetadata(metadata),
+    applyGeneratedPrompt: applyGeneratedPromptResult,
+    setCandidates: (generation, images) => studioController.setCandidates(generation, images),
+    presentFinal: (generation, image, options) => studioController.presentFinal(generation, image, options),
+    loadHistory
+  },
+  ui: {
+    onStateChange: ({ busy, message }) => { setBusy(busy, message); renderGenerateActions(); },
+    setJobProgress,
+    showJob: () => {
+      elements.jobBar.classList.remove("hidden");
+      elements.cancelJobButton.disabled = false;
+    },
+    setCancelDisabled: (disabled) => { elements.cancelJobButton.disabled = disabled; },
+    hideJob: () => elements.jobBar.classList.add("hidden"),
+    confirmRecovery,
+    onRecoveryAccepted: (recovery) => toast.info(`${recovery.label}のため設定を下げて再試行します`),
+    showError,
+    clearError,
+    showEmpty: () => elements.emptyState.classList.remove("hidden"),
+    restoreMode: setGenerationMode,
+    prepareCandidates: () => {
+      setResultTab("result");
+      elements.emptyState.classList.add("hidden");
+      studioController.resetForGeneration();
+    },
+    setLoadingText: (message) => { elements.loadingText.textContent = message; },
+    setExplanation: (message) => { elements.explanation.textContent = message; },
+    showResults: () => elements.resultContent.classList.remove("hidden"),
+    presentBuiltPrompt: (data) => {
+      elements.explanation.textContent = data.explanation_ja;
+      elements.promptDetails.open = true;
+      setPromptMode("raw");
+    },
+    confirmGalleryHires: (scale, steps, denoising) => confirmDialog(
+      `この画像を高解像度仕上げします（${scale}倍・${steps} steps・Denoising ${denoising}）。よろしいですか？`,
+      { confirmText: "Hiresする", cancelText: "キャンセル" }
+    ),
+    prepareGalleryHires: () => {
+      setResultTab("result");
+      elements.emptyState.classList.add("hidden");
+      elements.finalResult.classList.add("hidden");
+    }
+  },
+  transport: { postJson, getJson, fetch: (...args) => fetch(...args) }
+});
+
 function syncRuntimeState(state) {
   syncRuntimeUi();
 }
@@ -1070,8 +1155,8 @@ queueController.startPolling();
 elements.healthButton.addEventListener("click", checkHealth);
 elements.titleGenerationMode.addEventListener("change", saveTitleSettings);
 elements.titleTemplate.addEventListener("input", saveTitleSettings);
-elements.generateButton.addEventListener("click", generateCandidates);
-elements.finishButton.addEventListener("click", finishSelected);
+elements.generateButton.addEventListener("click", () => generationController.generateCandidates());
+elements.finishButton.addEventListener("click", () => generationController.finishSelected());
 navigation.init();
 samplerPicker.init();
 settingsNavigation.init();
@@ -1105,7 +1190,7 @@ elements.img2imgDenoising.addEventListener("input", handleImg2ImgDenoisingInput)
 elements.img2imgResizeMode.addEventListener("change", saveImg2ImgPreferences);
 elements.lockCompositionButton.addEventListener("click", lockSelectedComposition);
 elements.unlockCompositionButton.addEventListener("click", unlockComposition);
-elements.cancelJobButton.addEventListener("click", cancelActiveJob);
+elements.cancelJobButton.addEventListener("click", () => generationController.cancel());
 elements.clearPromptsButton.addEventListener("click", clearBothPrompts);
 elements.candidateCount.addEventListener("change", normalizeCandidateCount);
 for (const radio of [elements.contentRatingGeneral, elements.contentRatingNsfw]) {
@@ -1149,7 +1234,7 @@ elements.compareShortcutParameter.addEventListener("change", () => {
 elements.compareShortcutValues.addEventListener("input", () => {
   elements.experimentValues.value = elements.compareShortcutValues.value;
 });
-elements.cancelGenerateButton.addEventListener("click", cancelActiveJob);
+elements.cancelGenerateButton.addEventListener("click", () => generationController.cancel());
 elements.addLoraButton.addEventListener("click", () => void loraLibrary.openPicker());
 elements.candidateCountDown.addEventListener("click", () => stepCandidateCount(-1));
 elements.candidateCountUp.addEventListener("click", () => stepCandidateCount(1));
@@ -1398,7 +1483,7 @@ function syncRuntimeUi() {
   elements.runtimeStatus.textContent = activeRuntime
     ? `${runtimeLabel} · ${connection}${connectionDetail} · 対応: ${supported}${runtimeSupports("hires") ? "" : " · img2img / inpaint / Hires / IP-Adapterは利用不可"}`
     : "Runtime情報を取得できません";
-  const busy = generationBusy || runtimeSwitching;
+  const busy = generationController.isBusy() || runtimeSwitching;
   const runtimeUnavailable = Boolean(activeRuntime) && !isRuntimeSelectable(activeRuntime);
   const selectedCandidate = studioController.getSelectedCandidate();
   const lastGeneration = studioController.getLastGeneration();
@@ -2013,269 +2098,6 @@ async function checkHealth() {
     return false;
   } finally {
     if (runtimeController.isHealthRequestCurrent(healthRequest)) syncSettingsConnectionSummary();
-  }
-}
-
-async function buildPrompt() {
-  clearError();
-  const description = promptDescription;
-  if (!description) return showError("生成したい画像を日本語で入力してくれ");
-  setBusy(true, "日本語からプロンプトを作成中…");
-  try {
-    const data = await requestPrompt(description);
-    elements.explanation.textContent = data.explanation_ja;
-    elements.promptDetails.open = true;
-    setPromptMode("raw");
-  } catch (error) {
-    showError(error.message);
-  } finally {
-    setBusy(false);
-  }
-}
-
-async function generateCandidates() {
-  const { activeRuntime } = runtimeController.getState();
-  clearError();
-  const description = promptDescription;
-  // 説明文は任意。Promptが空のときだけ、日本語からの自動作成のために必須になる。
-  if (!description && !currentPositivePrompt().trim()) {
-    return showError("生成したい画像を日本語で入力するか、Promptを入力してくれ");
-  }
-  if (generationMode !== "txt2img" && !referenceImageController.hasReference()) {
-    setGenerationMode(generationMode);
-    return showError(`${generationMode === "inpaint" ? "部分修正" : "img2img"}の参照画像を選択してください`);
-  }
-  if (generationMode === "inpaint" && !inpaintEditor.hasMask()) {
-    return showError("修正したい範囲を白く塗ってください");
-  }
-
-  // プロンプト内のLoRAタグとUI選択を先に揃えてから、送信内容を組み立てる。
-  promptLoraCoordinator.syncFromPrompt();
-  setResultTab("result");
-  elements.emptyState.classList.add("hidden");
-  studioController.resetForGeneration();
-  const count = Number(elements.candidateCount.value);
-  const modeLabel = generationMode === "inpaint"
-    ? "部分修正候補"
-    : generationMode === "img2img"
-      ? "img2img候補"
-      : "候補";
-  setBusy(true, `${count}枚の${modeLabel}を1枚ずつ生成します…`);
-
-  try {
-    if (shouldRequestPrompt(description)) {
-      elements.loadingText.textContent = "日本語からプロンプトを作成中…";
-      await requestPrompt(description);
-    }
-
-    elements.loadingText.textContent = `${count}枚の${modeLabel}を1枚ずつ生成中…`;
-    const data = await submitGeneration({
-      ...runtimePayload(),
-      mode: generationMode,
-      contentRating: selectedContentRating(),
-      description,
-      ...readTitlePayload(),
-      ...readPromptPayload(),
-      loras: readSelectedLoras(),
-      promptBoosts: readPromptBoosts(),
-      ...readInitImagePayload(),
-      ...readInpaintPayload(),
-      ...readIpAdapterPayload(),
-      ...readDerivationPayload(),
-      settings: readSettings({ candidateCount: count, hiresEnabled: false })
-    });
-
-    const generation = {
-      runtime: data.runtime ?? activeRuntime,
-      mode: data.mode,
-      sourceImageId: data.sourceImageId,
-      sourceImageUrl: data.sourceImageUrl,
-      maskImageUrl: data.maskImageUrl,
-      ipAdapter: data.ipAdapter ?? null,
-      contentRating: data.contentRating ?? selectedContentRating(),
-      title: data.title ?? "",
-      description,
-      prompt: data.prompt,
-      negativePrompt: data.negativePrompt,
-      structuredPrompt: data.structuredPrompt ?? null,
-      rawPromptOverride: data.rawPromptOverride === true,
-      rawPrompt: data.rawPrompt ?? "",
-      appliedTriggerWords: data.appliedTriggerWords ?? [],
-      settings: data.settings,
-      loras: data.loras,
-      images: data.images
-    };
-    ipAdapterController.applyMetadata(data.ipAdapter);
-    applyGeneratedPromptResult(data, description);
-    elements.explanation.textContent = data.explanation;
-    studioController.setCandidates(generation, data.images);
-    elements.resultContent.classList.remove("hidden");
-    await loadHistory();
-  } catch (error) {
-    showError(error.message);
-    if (!studioController.getLastGeneration()) elements.emptyState.classList.remove("hidden");
-  } finally {
-    setBusy(false);
-  }
-}
-
-async function finishSelected() {
-  const selectedCandidate = studioController.getSelectedCandidate();
-  const lastGeneration = studioController.getLastGeneration();
-  if (!selectedCandidate || !lastGeneration) return;
-  const sourceRuntime = runtimeForGeneration(lastGeneration);
-  if (!sourceRuntime || !runtimeSupports("hires", sourceRuntime)) {
-    showError(`${sourceRuntime?.label ?? "生成元Runtime"}ではHires仕上げを利用できません`);
-    return;
-  }
-  clearError();
-  const isImg2Img = lastGeneration.mode === "img2img";
-  const isInpaint = lastGeneration.mode === "inpaint";
-  const usesSource = isImg2Img || isInpaint;
-  setBusy(true, isInpaint
-    ? `Seed ${selectedCandidate.seed} を部分修正の高解像度仕上げ中…`
-    : isImg2Img
-      ? `Seed ${selectedCandidate.seed} をimg2img高解像度仕上げ中…`
-      : `Seed ${selectedCandidate.seed} をHires.fix中…`);
-
-  try {
-    const data = await submitGeneration({
-      ...runtimePayloadFor(sourceRuntime),
-      mode: usesSource ? lastGeneration.mode : "txt2img",
-      contentRating: lastGeneration.contentRating ?? selectedContentRating(),
-      description: lastGeneration.description,
-      ...readTitlePayload(),
-      prompt: lastGeneration.prompt,
-      negativePrompt: lastGeneration.negativePrompt,
-      ...carryStructuredPrompt(lastGeneration),
-      loras: lastGeneration.loras,
-      promptBoosts: [],
-      parentImageId: selectedCandidate.id,
-      ...(usesSource ? { initImageId: selectedCandidate.id } : {}),
-      ...readIpAdapterPayload(),
-      settings: {
-        ...lastGeneration.settings,
-        candidateCount: 1,
-        seed: selectedCandidate.seed,
-        hiresEnabled: true,
-        hiresScale: elements.hiresScale.value,
-        hiresSteps: elements.hiresSteps.value,
-        hiresDenoising: elements.hiresDenoising.value,
-        hiresUpscaler: elements.hiresUpscaler.value
-      }
-    });
-
-    presentHiresResult(
-      data,
-      lastGeneration.description,
-      isInpaint ? "INPAINT REFINE COMPLETE" : isImg2Img ? "IMG2IMG REFINE COMPLETE" : "HIRES.FIX COMPLETE",
-      isInpaint ? "部分修正・高解像度版" : isImg2Img ? "img2img高解像度版" : "高解像度版"
-    );
-    await loadHistory();
-  } catch (error) {
-    showError(error.message);
-  } finally {
-    setBusy(false);
-  }
-}
-
-// Hires仕上げ・再生成でも、元の構造化プロンプト情報を履歴へ引き継ぐ。
-// 実際に使うPositive Promptは呼び出し側のpromptのままで、ここでは記録用の情報だけ渡す。
-function carryStructuredPrompt(source) {
-  if (!source?.structuredPrompt) return {};
-  return {
-    structuredPrompt: source.structuredPrompt,
-    rawPromptOverride: source.rawPromptOverride === true,
-    rawPrompt: source.rawPrompt ?? "",
-    appliedTriggerWords: source.appliedTriggerWords ?? []
-  };
-}
-
-// 高解像度仕上げの結果を「生成結果」タブへ表示する共通処理。
-function presentHiresResult(data, description, eyebrow, title) {
-  const { activeRuntime } = runtimeController.getState();
-  const finished = data.images[0];
-  const generation = {
-    runtime: data.runtime ?? activeRuntime,
-    mode: data.mode,
-    sourceImageId: data.sourceImageId,
-    sourceImageUrl: data.sourceImageUrl,
-    maskImageUrl: data.maskImageUrl,
-    ipAdapter: data.ipAdapter ?? null,
-    contentRating: data.contentRating ?? selectedContentRating(),
-    title: data.title ?? "",
-    description,
-    prompt: data.prompt,
-    negativePrompt: data.negativePrompt,
-    structuredPrompt: data.structuredPrompt ?? null,
-    rawPromptOverride: data.rawPromptOverride === true,
-    rawPrompt: data.rawPrompt ?? "",
-    appliedTriggerWords: data.appliedTriggerWords ?? [],
-    settings: data.settings,
-    loras: data.loras,
-    images: data.images
-  };
-  ipAdapterController.applyMetadata(data.ipAdapter);
-  studioController.presentFinal(generation, finished, { eyebrow, title });
-}
-
-// ギャラリー画像を起点に、元画像ベース(img2img)で高解像度仕上げする。
-// GPUタイムアウトを避けるため、Hiresの初期値は安全寄りの固定値を使う。
-const GALLERY_HIRES_DEFAULTS = { scale: 1.5, steps: 12, denoising: 0.28 };
-
-async function hiresFromGallery(generation, image) {
-  const sourceRuntime = runtimeForGeneration(generation);
-  if (!sourceRuntime || !runtimeSupports("hires", sourceRuntime)) {
-    showError(`${sourceRuntime?.label ?? "生成元Runtime"}ではHires仕上げを利用できません`);
-    return;
-  }
-  const settings = generation.settings ?? {};
-  const scale = GALLERY_HIRES_DEFAULTS.scale;
-  const steps = GALLERY_HIRES_DEFAULTS.steps;
-  const denoising = GALLERY_HIRES_DEFAULTS.denoising;
-  const confirmed = await confirmDialog(
-    `この画像を高解像度仕上げします（${scale}倍・${steps} steps・Denoising ${denoising}）。よろしいですか？`,
-    { confirmText: "Hiresする", cancelText: "キャンセル" }
-  );
-  if (!confirmed) return;
-
-  clearError();
-  setResultTab("result");
-  elements.emptyState.classList.add("hidden");
-  elements.finalResult.classList.add("hidden");
-  setBusy(true, `Seed ${image.seed} を高解像度仕上げ中…`);
-  try {
-    const data = await submitGeneration({
-      ...runtimePayloadFor(sourceRuntime),
-      mode: "img2img",
-      contentRating: generation.contentRating === "nsfw" ? "nsfw" : "general",
-      description: generation.description ?? "",
-      ...readTitlePayload(),
-      prompt: generation.prompt ?? "",
-      negativePrompt: generation.negativePrompt ?? "",
-      ...carryStructuredPrompt(generation),
-      loras: generation.loras ?? [],
-      promptBoosts: [],
-      parentImageId: image.id,
-      initImageId: image.id,
-      ipAdapter: generation.ipAdapter ?? null,
-      settings: {
-        ...settings,
-        candidateCount: 1,
-        seed: image.seed,
-        hiresEnabled: true,
-        hiresScale: scale,
-        hiresSteps: steps,
-        hiresDenoising: denoising,
-        hiresUpscaler: settings.hiresUpscaler || elements.hiresUpscaler.value
-      }
-    });
-    presentHiresResult(data, generation.description ?? "", "GALLERY HIRES COMPLETE", "高解像度版");
-    await loadHistory();
-  } catch (error) {
-    showError(error.message);
-  } finally {
-    setBusy(false);
   }
 }
 
@@ -2978,53 +2800,8 @@ function shouldRequestPrompt(description) {
   return !buildCombinedPrompt().trim();
 }
 
-async function submitGeneration(payload, { allowRecovery = true } = {}) {
-  // 二重投入を防ぐ（タブ移動やギャラリー操作から重ねて呼ばれても1本だけ走らせる）。
-  if (activeJobId) throw new Error("生成中です。完了または中止してから実行してください");
-  const request = { ...payload, autoRetry: elements.autoRetryOnFailure.checked };
-  const { job } = await postJson("/api/jobs", request);
-  activeJobId = job.id;
-  setJobProgress(job);
-  renderGenerateActions();
-  elements.jobBar.classList.remove("hidden");
-  elements.cancelJobButton.disabled = false;
-  // 生成はサーバー側のジョブとして進むので、タブを移動しても継続する。
-  // 右上のキュー表示へ即座に反映させる。
-  queueController.startPolling();
-
-  try {
-    while (true) {
-      await sleep(850);
-      const current = (await getJson(`/api/jobs/${job.id}`)).job;
-      setJobProgress(current);
-      if (current.status === "done") return current.result;
-      if (current.status === "failed") {
-        // 設定を下げれば通る見込みがある場合だけ、確認して1回だけ再試行する。
-        if (allowRecovery && current.recovery) {
-          const retryPayload = await confirmRecovery(current.recovery, request);
-          if (retryPayload) {
-            // 再試行は同じ生成の続きなので、二重投入チェックを通す。
-            activeJobId = null;
-            renderGenerateActions();
-            return submitGeneration(retryPayload, { allowRecovery: false });
-          }
-        }
-        throw new Error(current.error ?? current.message);
-      }
-      if (current.status === "cancelled") throw new Error("生成を中止しました");
-    }
-  } finally {
-    activeJobId = null;
-    renderGenerateActions();
-    elements.cancelJobButton.disabled = true;
-    setTimeout(() => {
-      if (!activeJobId) elements.jobBar.classList.add("hidden");
-    }, 1800);
-  }
-}
-
-// 自動リカバリの確認ダイアログ。承諾したら再試行用のpayloadを返す。
-async function confirmRecovery(recovery, request) {
+// 回復提案の確認表示だけを担当する。再送requestはGeneration controllerが構築する。
+async function confirmRecovery(recovery) {
   const accepted = await openModal({
     title: `${recovery.label}のため、設定を下げて再試行できます`,
     subtitle: recovery.reason,
@@ -3056,21 +2833,7 @@ async function confirmRecovery(recovery, request) {
       { label: "再試行する", value: true, primary: true }
     ]
   }).promise;
-  if (!accepted) return null;
-
-  toast.info(`${recovery.label}のため設定を下げて再試行します`);
-  return {
-    ...request,
-    settings: { ...request.settings, ...recovery.settings },
-    retryInfo: {
-      retryReason: recovery.kind,
-      retryReasonLabel: recovery.label,
-      retryCount: 1,
-      retriedAt: new Date().toISOString(),
-      originalSettings: request.settings,
-      retrySettings: recovery.settings
-    }
-  };
+  return accepted;
 }
 
 function renderJobProgressText(job) {
@@ -3085,19 +2848,6 @@ function setJobProgress(job) {
   elements.jobMessage.textContent = job.message ?? "処理中";
   elements.jobProgress.value = Number(job.progress) || 0;
   elements.jobProgressText.textContent = `${Math.round(Number(job.progress) || 0)}%`;
-}
-
-async function cancelActiveJob() {
-  if (!activeJobId) return;
-  elements.cancelJobButton.disabled = true;
-  try {
-    const response = await fetch(`/api/jobs/${activeJobId}`, { method: "DELETE" });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
-    setJobProgress(data.job);
-  } catch (error) {
-    showError(error.message);
-  }
 }
 
 // 比較実験の結果へ移動する導線。ギャラリーの実験詳細を開く。
@@ -4040,10 +3790,13 @@ function syncCompareShortcut() {
 
 // 生成中は同じ位置へ進捗を出し、ボタンを押せなくする。
 function renderGenerateActions() {
-  const busy = Boolean(activeJobId);
+  const busy = generationController.isBusy();
+  const { switching, activeRuntime } = runtimeController.getState();
+  const runtimeUnavailable = Boolean(activeRuntime) && !isRuntimeSelectable(activeRuntime);
   elements.generateProgress.classList.toggle("hidden", !busy);
   // 生成枚数が不正なままでは開始しない。
-  elements.generateButton.disabled = busy || !isValidCandidateCount(elements.candidateCount.value);
+  elements.generateButton.disabled = busy || switching || runtimeUnavailable
+    || !isValidCandidateCount(elements.candidateCount.value);
   elements.compareShortcutButton.disabled = busy;
 }
 
@@ -4490,7 +4243,7 @@ function readInpaintPayload() {
   return inpaintEditor.readPayload(generationMode);
 }
 
-// 派生生成の由来を1回分だけ送る（送信後にクリアする）。
+// 読取時に1回消費する。後続settings読取やJob作成が失敗しても復元しない。
 function readDerivationPayload() {
   if (!pendingDerivation) return {};
   const payload = {
@@ -4636,7 +4389,6 @@ function saveLoraOutfitSelections() {
 }
 
 function setBusy(busy, message = "") {
-  generationBusy = busy;
   elements.generateButton.disabled = busy;
   elements.healthButton.disabled = busy;
   loraLibrary.setBusy(busy);

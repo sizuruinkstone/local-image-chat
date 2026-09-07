@@ -13,5 +13,6 @@
 | repository内に引き継ぎを残す | AGENTSは作業ルール、current-stateは現在snapshot、各Phase文書は検証根拠。過去の会話を再読しなくても次の依頼範囲から再開できるようにする |
 | generation LoRA selectionとactive Prompt tag同期はcoordinatorが単独所有 | Raw override中はRaw、その他はStructuredをform portから読む。UI追加はtagを挿入せず、weight操作は既存tagのみ更新。selection/source/disabledとcatalogを分離し、recipe/Checkpoint Setはsnapshot portへ接続。trigger/profile/outfit保存mapとフォームpriorityはapp adapterに残す。既存の非対称性と更新順はPhase 17記録を参照 |
 | Runtime切替成功とRecipe後続restoreは別transaction境界 | Runtime controllerは成功時に切替snapshotを破棄し、instruction dialog cancel後も成功した切替を維持する。Recipeのcritical rollbackはRuntime readiness成功後の非Runtime owner snapshotを基準にする。旧Runtime用のform/LoRAを新Runtimeへ戻さない。checkpoint/source/maskの現行Recipe非適用と保存例外のprefix保持はPhase 21 gate記録を参照 |
+| Generationの実行予約とone-shot consumeは別境界 | controllerがawait前から結果接続までの予約/active Jobを所有する。derivationは従来どおりIP読取後・settings前にread-and-clearし、後続失敗では復元しない。承認付きrecoveryは確定requestを1回だけ再送する。composition lockはフォーム側、全Job queueとExperiment lifecycleは各既存owner。詳細はPhase 22記録 |
 
 これらと異なる変更が明示依頼された場合は、その対象・contract影響を確認し、実際に採用した判断だけ更新する。既存機能・データを古いという理由だけで削除しない。
