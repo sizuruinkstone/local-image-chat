@@ -1,0 +1,21 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--studio-pearl); color: var(--studio-ink); font: var(--studio-body)/1.5 var(--studio-font); }
+button, textarea, select { font: inherit; }
+button, a, select { -webkit-tap-highlight-color: transparent; }
+button { cursor: pointer; }
+button:disabled { cursor: default; opacity: .48; }
+button:focus-visible, a:focus-visible, select:focus-visible, textarea:focus-visible { outline: 0; box-shadow: var(--studio-focus); }
+[hidden] { display: none !important; }
+.glyph { display: inline-flex; width: 20px; height: 20px; flex: 0 0 20px; }
+.glyph svg { width: 100%; height: 100%; }
+.control, .icon-control, .context-control { min-height: var(--studio-control); border: 1px solid transparent; background: transparent; border-radius: var(--studio-r1); color: inherit; display: inline-flex; align-items: center; justify-content: center; gap: var(--studio-s2); padding: 4px 10px; transition: background var(--studio-fast); }
+.icon-control { width: var(--studio-control); padding: 6px; }
+.icon-control > span:last-child { position: absolute; width: 1px; height: 1px; padding: 0; clip-path: inset(50%); overflow: hidden; white-space: nowrap; }
+.control:hover, .icon-control:hover, .context-control:hover { background: var(--studio-inset); }
+.control:active, .icon-control:active, .context-control:active { background: #dce2da; }
+.control[aria-expanded="true"] { color: var(--studio-accent); background: var(--studio-inset); }
+.eyebrow { font-size: var(--studio-tiny); font-weight: 650; letter-spacing: .16em; color: var(--studio-muted); margin: 0 0 16px; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+@supports not (backdrop-filter: blur(1px)) { :root { --studio-glass: var(--studio-pearl); } }
+@media (prefers-reduced-transparency: reduce) { :root { --studio-glass: var(--studio-pearl); --studio-blur: 0px; } }

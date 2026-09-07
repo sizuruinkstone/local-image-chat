@@ -1,0 +1,37 @@
+:root {
+  color-scheme: light;
+  --studio-pearl: #f6f6f2;
+  --studio-paper: #ffffff;
+  --studio-inset: #eaece7;
+  --studio-graphite: #232729;
+  --studio-ink: #232a2c;
+  --studio-muted: #626a6a;
+  --studio-canvas-text: #e9eeeb;
+  --studio-canvas-muted: #a8b2af;
+  --studio-line: #daddd5;
+  --studio-accent: #315d55;
+  --studio-error: #a2383c;
+  --studio-glass: rgb(246 246 242 / 94%);
+  --studio-shadow: 0 16px 48px rgb(12 24 20 / 16%);
+  --studio-blur: 12px;
+  --studio-r1: 5px;
+  --studio-r2: 9px;
+  --studio-r3: 16px;
+  --studio-s1: 4px;
+  --studio-s2: 8px;
+  --studio-s3: 12px;
+  --studio-s4: 16px;
+  --studio-s5: 24px;
+  --studio-s6: 32px;
+  --studio-s7: 48px;
+  --studio-font: "Segoe UI Variable", "Segoe UI", "Yu Gothic UI", sans-serif;
+  --studio-tiny: 10px;
+  --studio-small: 12px;
+  --studio-body: 14px;
+  --studio-heading: 22px;
+  --studio-control: 34px;
+  --studio-touch: 44px;
+  --studio-fast: 120ms;
+  --studio-motion: 180ms;
+  --studio-focus: 0 0 0 2px var(--studio-pearl), 0 0 0 4px var(--studio-accent);
+}

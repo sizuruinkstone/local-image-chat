@@ -573,7 +573,8 @@ app.get("/api/history", async (request, response) => {
       favoritesOnly: request.query.favorites === "1",
       contentRating: request.query.rating,
       limit: request.query.limit,
-      cursor: request.query.cursor
+      cursor: request.query.cursor,
+      search: request.query.search, sort: request.query.sort
     });
     response.json({
       ...page,

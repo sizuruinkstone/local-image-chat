@@ -157,7 +157,7 @@ export function deriveExperimentStatus(experiment) {
 export function isActiveExperiment(experiment) {
   if (!experiment) return false;
   const runs = (experiment.runs ?? []).map(normalizeRun);
-  if (runs.some((run) => !isTerminalRunStatus(run.status))) return true;
+  if (runs.length) return runs.some((run) => !isTerminalRunStatus(run.status));
   return experiment.status === "running";
 }
 
