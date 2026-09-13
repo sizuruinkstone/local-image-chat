@@ -28,9 +28,9 @@ try{
  await page.getByRole("spinbutton",{name:"Height",exact:true}).fill("768");await page.getByRole("spinbutton",{name:"Height",exact:true}).press("Tab");
  await page.getByRole("spinbutton",{name:"Seed",exact:true}).fill("314159");await page.getByRole("spinbutton",{name:"Seed",exact:true}).press("Tab");
  await page.getByRole("dialog",{name:"制作設定",exact:true}).getByRole("button",{name:"閉じる",exact:true}).click();
- await page.getByRole("button",{name:"Inspector",exact:true}).click();
+ if(page.viewportSize().width<=900) await page.getByRole("button",{name:"制作設定",exact:true}).click();
  await page.getByRole("spinbutton",{name:"Steps",exact:true}).fill("16");await page.getByRole("spinbutton",{name:"Steps",exact:true}).press("Tab");
- await page.getByRole("button",{name:"Close inspector",exact:true}).click();
+ await page.keyboard.press("Escape");
  await page.screenshot({animations:"disabled",path:path.join(output,"real-before-1440.png")});
  await page.getByRole("button",{name:"Generate",exact:true}).click();
  await page.waitForFunction(()=>["generating","queued"].includes(document.querySelector(".canvas-stage").dataset.state));

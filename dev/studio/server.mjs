@@ -12,13 +12,14 @@ export function createStudioDevServer({ backendUrl } = {}) {
   if (backend && (backend.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(backend.hostname))) throw new Error("Studio backend must be a local HTTP origin");
   return http.createServer(async (request, response) => {
     const pathname = new URL(request.url, "http://localhost").pathname;
-    const readable = /^\/api\/(config|runtimes|checkpoints|loras|samplers|history)(\/[^/]+\/recipe)?$/.test(pathname)
-      || ["/api/reforge/ip-adapter/options", "/api/checkpoint-lora-sets", "/api/experiments", "/api/civitai/install-folders", "/api/comparisons"].includes(pathname)
+    const readable = /^\/api\/v1\/scenes(?:\/[^/]+(?:\/[^/]+)?)?$/.test(pathname) || /^\/api\/v1\/section-profiles$/.test(pathname) || /^\/api\/(config|runtimes|checkpoints|loras|samplers|history)(\/[^/]+\/recipe)?$/.test(pathname)
+      || ["/api/reforge/ip-adapter/options", "/api/checkpoint-lora-sets", "/api/experiments", "/api/civitai/install-folders", "/api/civitai/auth-status", "/api/comparisons"].includes(pathname)
       || /^\/api\/experiments\/[^/]+\/history$/.test(pathname)
       || /^\/api\/jobs(\/[^/]+)?$/.test(pathname) || pathname.startsWith("/outputs/") || /^\/api\/images\/[^/]+\/(original|thumbnail)$/.test(pathname);
-    const writable = request.method === "POST" && ["/api/jobs", "/api/checkpoints/select", "/api/loras/registry/ensure", "/api/checkpoint-lora-sets", "/api/experiments", "/api/comparisons", "/api/civitai/inspect", "/api/civitai/install"].includes(pathname)
+    const writable = ["POST","PATCH","DELETE"].includes(request.method) && /^\/api\/v1\/(?:scenes(?:\/[^/]+(?:\/copy)?)?|section-profiles(?:\/[^/]+)?)$/.test(pathname) || request.method === "POST" && ["/api/jobs", "/api/checkpoints/select", "/api/loras/registry/ensure", "/api/checkpoint-lora-sets", "/api/experiments", "/api/comparisons", "/api/civitai/inspect", "/api/civitai/install"].includes(pathname)
       || request.method === "POST" && /^\/api\/experiments\/[^/]+\/cancel$/.test(pathname)
       || request.method === "PATCH" && /^\/api\/loras\/[^/]+$/.test(pathname)
+      || request.method === "PATCH" && /^\/api\/history\/[^/]+\/content-rating$/.test(pathname)
       || request.method === "DELETE" && /^\/api\/jobs\/[^/]+$/.test(pathname);
     if (backend && ((["GET", "HEAD"].includes(request.method) && readable) || writable)) {
       if (writable && request.headers.origin && request.headers.origin !== `http://${request.headers.host}`) { response.writeHead(403).end(); return; }

@@ -1,3 +1,4 @@
+import {z} from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   capabilitiesInputSchema,
@@ -13,6 +14,7 @@ import { LocalImageChatError } from "./local-image-chat-client.js";
 import { createAttachmentReader } from "./attachment-reader.js";
 
 export const MCP_TOOL_NAMES = Object.freeze([
+  "list_section_profiles", "create_section_profile", "update_section_profile", "delete_section_profile",
   "get_capabilities",
   "generate_image",
   "get_generation",
@@ -47,6 +49,14 @@ export function createMcpServer({ client, attachmentReader } = {}) {
 }
 
 export function registerMcpTools(server, client, { attachmentReader = createAttachmentReader() } = {}) {
+  const fields={field:z.enum(['character','appearance','composition','situation']),name:z.string().min(1).max(100),text:z.string().min(1).max(12000),contentRating:z.enum(['general','nsfw']).optional()};
+  for(const [name,method,schema,description,readOnly,destructive] of [
+    ['list_section_profiles','listSectionProfiles',z.object({}).strict(),'Studioと共有する部分プロファイルを一覧取得する。一般/NSFW分類、登録・更新前のIDと内容確認に使用する。',true,false],
+    ['create_section_profile','createSectionProfile',z.object(fields).strict(),'部分プロファイルを登録する。fieldはcharacter/appearance/composition/situation、contentRatingはgeneral/nsfw。編集中Promptには自動適用しない。再送前に一覧を確認して重複登録を避ける。',false,false],
+    ['update_section_profile','updateSectionProfile',z.object({id:z.string().min(1).max(100),...fields}).strict(),'一覧で確認したIDの部分プロファイル本文・一般/NSFW分類を更新する。現在適用中のsnapshotと過去履歴は変更しない。',false,true],
+    ['delete_section_profile','deleteSectionProfile',z.object({id:z.string().min(1).max(100)}).strict(),'指定IDの部分プロファイルを削除する。現在適用中snapshotと過去履歴は保持する。',false,true]
+  ])server.registerTool(name,{description,inputSchema:schema,annotations:{readOnlyHint:readOnly,destructiveHint:destructive,idempotentHint:method!=='createSectionProfile',openWorldHint:false}},async input=>runTool(()=>client[method](input)));
+
   server.registerTool("get_capabilities", {
     description: "Local Image Chatで利用可能なCheckpoint、Sampler、Scheduler、LoRA、既定生成設定を取得する。runtimeIdを省略するとBackendの既定Runtimeを使う。generate_imageでCheckpointやLoRAを指定する前の確認に使用する。",
     inputSchema: capabilitiesInputSchema,

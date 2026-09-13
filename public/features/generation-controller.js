@@ -91,10 +91,13 @@ export function createGenerationController({ form, owners, ui, transport, timing
       description,
       prompt: data.prompt,
       negativePrompt: data.negativePrompt,
+      userNegativePrompt: data.userNegativePrompt,
+      effectiveNegativePrompt: data.effectiveNegativePrompt,
       structuredPrompt: data.structuredPrompt ?? null,
       rawPromptOverride: data.rawPromptOverride === true,
       rawPrompt: data.rawPrompt ?? "",
       appliedTriggerWords: data.appliedTriggerWords ?? [],
+      sectionProfiles: data.sectionProfiles ?? {},
       settings: data.settings,
       loras: data.loras,
       images: data.images
@@ -107,6 +110,7 @@ export function createGenerationController({ form, owners, ui, transport, timing
       structuredPrompt: source.structuredPrompt,
       rawPromptOverride: source.rawPromptOverride === true,
       rawPrompt: source.rawPrompt ?? "",
+      sectionProfiles: source.sectionProfiles ?? {},
       appliedTriggerWords: source.appliedTriggerWords ?? []
     };
   }
@@ -205,6 +209,7 @@ export function createGenerationController({ form, owners, ui, transport, timing
         ...form.readTitlePayload(),
         prompt: source.prompt,
         negativePrompt: source.negativePrompt,
+        userNegativePrompt: source.userNegativePrompt ?? source.negativePrompt ?? "",
         ...carryStructuredPrompt(source),
         loras: source.loras,
         promptBoosts: [],
@@ -254,6 +259,7 @@ export function createGenerationController({ form, owners, ui, transport, timing
         ...form.readTitlePayload(),
         prompt: generation.prompt ?? "",
         negativePrompt: generation.negativePrompt ?? "",
+        userNegativePrompt: generation.userNegativePrompt ?? generation.negativePrompt ?? "",
         ...carryStructuredPrompt(generation),
         loras: generation.loras ?? [],
         promptBoosts: [],

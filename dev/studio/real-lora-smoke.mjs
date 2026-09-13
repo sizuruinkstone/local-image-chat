@@ -27,7 +27,7 @@ try{
  const final=await page.getByRole("textbox",{name:"Final Positive Prompt",exact:true}).inputValue();await page.keyboard.press("Escape");
  await page.locator(".resolution-summary").click();await page.getByText("Custom dimensions",{exact:true}).click();await edit("Width",768);await edit("Height",768);await edit("Seed",414159);
  await page.getByRole("dialog",{name:"制作設定",exact:true}).getByRole("button",{name:"閉じる",exact:true}).click();
- await page.getByRole("button",{name:"Inspector",exact:true}).click();await edit("Steps",16);await page.getByRole("button",{name:"Close inspector",exact:true}).click();
+ if(page.viewportSize().width<=900) await page.getByRole("button",{name:"制作設定",exact:true}).click();await edit("Steps",16);await page.keyboard.press("Escape");
  const start=performance.now();await page.getByRole("button",{name:"Active LoRA",exact:true}).click();
  await page.waitForFunction(()=>document.querySelectorAll(".lora-asset").length>0&&!document.querySelector(".lora-browser-notice").textContent);
  metrics.push({operation:"real catalog open",ms:Math.round(performance.now()-start),catalog:await page.locator(".lora-result-count").textContent(),rendered:await page.locator(".lora-asset").count()});

@@ -162,13 +162,16 @@ function groupTagsByLora(tags) {
 }
 
 // プロンプト内のタグを正としてLoRA一覧のWeightを揃える（履歴に実効値を残すため）。
-export function applyPromptWeights(loras, prompt) {
+export function applyPromptWeights(loras, prompt, { preserveExplicitZero = false } = {}) {
   const tags = parseLoraTags(prompt);
   if (!tags.length) return Array.isArray(loras) ? [...loras] : [];
   return (Array.isArray(loras) ? loras : []).map((lora) => {
     // 同じLoRAが複数書かれている場合は、最後に出てきたWeightが有効。
     const tag = [...tags].reverse().find((item) => sameLoraName(item.name, lora?.name));
     if (!tag) return lora;
+    // The server may append a canonical selection with explicit zero weight.
+    // Keep that value in history without changing legacy inline-tag parsing.
+    if (preserveExplicitZero && lora.weight === 0 && !tag.invalidWeight && tag.hasWeight && Number(tag.weightText) === 0) return { ...lora, weight: 0 };
     return { ...lora, weight: tag.weight };
   });
 }

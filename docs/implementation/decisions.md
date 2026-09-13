@@ -27,3 +27,7 @@
 R7で通常entryをNew Studioへ切替。native ESM/static配布を維持し、`/?legacy=1`のみ旧bootstrapを選ぶ。新旧DOMを同時に起動しない。R1 workspaceを高度生成へ拡張し、Promptのcanonical buildRequestと既存generation controllerのrequest/recovery契約を保持する。
 
 Libraryのsearch/sortはbackendの全保持履歴に適用してからページ分割する。既存storage/cursor/retentionを変更しない。制作sessionは追加のversion付きkeyに保存し、旧preset IDをStructured本文へ推測変換しない。Job reattachは保存済みIDへのGETのみで、再POSTしない。Runtime非対応機能を仮実装・fake progressで隠さない。詳しくは[最終記録](frontend-full-rebuild-final.md)。
+
+## Scenes boundary (2026-09-11)
+
+Scenesは独立した共有catalogと専用画像を持ち、History・部分profile・Checkpoint Setを保存ownerにしない。適用はworkspace/draftの同期transactionへ集約し、選択sceneの非空5欄・任意Negative・非キャラクターLoRAと分類だけを反映する。LoRA対象外/0件の保持は次のPrompt再同期後まで保証する。明示LoRA weight 0を保存・選択・生成request・履歴まで保持し、従来のinline parserは維持する。強いidentityがない履歴は同名だけで自動照合せず、手動確認を用いる。詳細は[Scenes初回実装](scenes-initial.md)。

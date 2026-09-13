@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createGenerateWorkspace } from "../public/features/generate-workspace.js";
 import { createRuntimeService } from "../public/core/runtime-service.js";
 import { createGenerationDraft } from "../public/features/generation-draft.js";
+import {sceneIdentity} from '../public/scenes.js';
 import { recipeParameterPatch } from "../public/core/generation-settings.js";
 import { readFile } from "node:fs/promises";
 
@@ -195,6 +196,20 @@ test("resolution, seed, sampler and scheduler reach the exact shared request", a
   request.settings.seed = 999;
   assert.equal(w.getSnapshot().parameters.seed, 123);
   assert.throws(() => w.setParameters({ checkpoint: "B" }), /Unknown/);
+});
+
+test("content rating is selected before generation without changing the prompt", async (t) => {
+  const { workspace: w, calls } = await setup(t);
+  w.setPrompt({ positive: "portrait", negative: "blur" });
+  const promptBefore = w.getSnapshot().prompt;
+  assert.equal(w.getSnapshot().contentRating, "general");
+  w.setContentRating("nsfw");
+  assert.equal(w.getSnapshot().contentRating, "nsfw");
+  assert.deepEqual(w.getSnapshot().prompt, promptBefore);
+  assert.equal(w.buildRequest().contentRating, "nsfw");
+  await w.generate();
+  assert.equal(calls.find(([method, url]) => method === "POST" && url === "/api/jobs")[2].contentRating, "nsfw");
+  assert.throws(() => w.setContentRating("unrated"), /Unknown content rating/);
 });
 
 test("model selection uses legacy endpoint and canonical selected model", async (t) => {
@@ -507,4 +522,195 @@ test("R3 candidate selection and result metadata leave Current Draft untouched; 
   await w.reuseMetadata(w.getSnapshot().completed,w.getSnapshot().currentImage);
   assert.equal(w.getSnapshot().parameters.seed,22);
   assert.equal(w.getSnapshot().prompt.prompt,"generated");
+});
+
+
+test("Studio LoRA triggers remain separate from manual Structured and Raw text through lifecycle and reuse", async t => {
+  const catalog=[{name:"portrait",registry:{subcategory:"character",triggerWords:"hero, shared"}},{name:"light",registry:{subcategory:"style",triggerWords:"ink, shared"}}];
+  const {workspace:w}=await setup(t,{get:url=>url.startsWith("/api/loras?")?{loras:catalog}:undefined});
+  w.setPrompt({sections:{character:"teapot",style:"watercolor"},negative:"blur"});
+  const manual=w.getSnapshot().prompt.structuredPrompt;
+  w.addLora("portrait",0.6,{insertTriggers:true});w.addLora("light",0.7,{insertTriggers:true});
+  assert.deepEqual(w.getSnapshot().prompt.structuredPrompt,manual);
+  assert.equal(w.getSnapshot().prompt.appliedTriggerWords.find(t=>t.text==="ink").targetField,"style");
+  assert.match(w.buildRequest().prompt,/hero/);assert.match(w.buildRequest().prompt,/ink/);
+  assert.equal(w.buildRequest().prompt,w.getSnapshot().prompt.prompt);
+  assert.ok(w.buildRequest().loras.every(l=>l.triggerWords===""));
+  w.toggleLora("portrait");assert.doesNotMatch(w.buildRequest().prompt,/hero/);assert.match(w.buildRequest().prompt,/shared/);
+  w.toggleLora("portrait");w.setPrompt({mode:"raw"});
+  assert.equal(w.getSnapshot().prompt.rawPrompt,"teapot, watercolor");assert.match(w.buildRequest().prompt,/hero/);
+  w.setPrompt({positive:"raw scene"});
+  w.removeLora("portrait");assert.doesNotMatch(w.buildRequest().prompt,/hero/);assert.match(w.buildRequest().prompt,/shared/);
+  assert.equal(w.getSnapshot().prompt.rawPrompt,"raw scene");
+  w.removeLora("light");assert.equal(w.buildRequest().prompt,"raw scene");
+  w.addLora("portrait",0.6,{insertTriggers:true});w.addLora("portrait",0.6,{insertTriggers:true});
+  assert.equal(w.getSnapshot().prompt.appliedTriggerWords.length,2);
+  assert.deepEqual(w.getSnapshot().prompt.structuredPrompt,manual);
+  const draft=createGenerationDraft({getCatalog:()=>catalog});
+  draft.setPrompt({positive:"manual raw"});draft.addLora("portrait",0.6);draft.addManagedTriggers("portrait",catalog[0].registry);
+  const saved=draft.capture();draft.applyGenerated({prompt:draft.positive(),negativePrompt:"blur"});
+  assert.equal(draft.readPrompt().rawPrompt,"manual raw");draft.restore(saved);assert.match(draft.positive(),/hero/);
+  draft.dispose();
+});
+
+
+test("Composition outfit selection replaces only managed appearance triggers, survives reuse and follows LoRA enabled state",async t=>{
+ const catalog=[{name:"hero-outfit",registry:{category:"character",characterTriggerWords:"hero",triggerWords:"hero, red dress",outfitPresets:[{id:"red",name:"Red dress",triggerWords:"hero, red dress"},{id:"blue",name:"Blue dress",triggerWords:"hero, blue dress"}]}}];
+ const {workspace:w}=await setup(t,{get:url=>url.startsWith("/api/loras?")?{loras:catalog}:undefined});
+ w.setPrompt({sections:{character:"manual character",appearance:"manual clothes"},negative:"blur"});
+ w.addLora("hero-outfit",0.7,{insertTriggers:true});
+ assert.doesNotMatch(w.buildRequest().prompt,/red dress/);
+ const choices=w.loraPromptChoices("hero-outfit");assert.equal(choices.length,2);
+ w.setLoraOutfit("hero-outfit",choices[0].id);
+ assert.equal(w.loraOutfitChoice("hero-outfit"),choices[0].id);
+ assert.equal(w.getSnapshot().prompt.structuredPrompt.appearance,"manual clothes");
+ assert.equal(w.getSnapshot().prompt.appliedTriggerWords.find(t=>t.text==="red dress").targetField,"appearance");
+ assert.match(w.buildRequest().prompt,/red dress/);
+ w.setLoraOutfit("hero-outfit",choices[1].id);
+ assert.doesNotMatch(w.buildRequest().prompt,/red dress/);assert.match(w.buildRequest().prompt,/blue dress/);
+ const recipe={...w.buildRequest(),runtime:runtimes[0]};await w.reuseMetadata(recipe,{seed:42});
+ assert.equal(w.loraOutfitChoice("hero-outfit"),choices[1].id);
+ w.toggleLora("hero-outfit");assert.doesNotMatch(w.buildRequest().prompt,/blue dress/);w.toggleLora("hero-outfit");
+ w.setPrompt({positive:"raw base"});assert.match(w.buildRequest().prompt,/blue dress/);assert.equal(w.getSnapshot().prompt.rawPrompt,"raw base");
+ w.setLoraOutfit("hero-outfit","");assert.doesNotMatch(w.buildRequest().prompt,/blue dress/);assert.match(w.buildRequest().prompt,/hero/);
+ w.setLoraOutfit("hero-outfit",choices[0].id);w.removeLora("hero-outfit");assert.equal(w.buildRequest().prompt,"raw base");
+ assert.throws(()=>w.setLoraOutfit("hero-outfit",choices[0].id));
+});
+
+test('checkpoint style preview equals actual submitted Structured and Raw requests, failed selection preserves profile', async t => {
+ const a={title:'oneObsessionAnima_v30.safetensors',hash:'ed32d6584f'};
+ const b={title:'anima29B_v10.safetensors',hash:'0b3020d1b9'};
+ let fail=false;
+ const {workspace:w,calls}=await setup(t,{
+  get:url=>url.startsWith('/api/checkpoints?')?{checkpoints:[a,b],activeCheckpoint:a.title}:undefined,
+  post:(url)=>{if(url==='/api/checkpoints/select'&&fail)throw new Error('selection failed');}
+ });
+ w.setPrompt({sections:{character:'teapot',style:'ink'},negative:'blur'});
+ const initial=w.getSnapshot().prompt;
+ const preview=initial.prompt;
+ assert.match(preview,/masterpiece/);
+ assert.equal(initial.negativePrompt,'blur');
+ assert.match(initial.finalNegativePrompt,/worst quality/);
+ assert.equal(w.buildRequest().prompt,preview);
+ assert.equal(w.buildRequest().negativePrompt,initial.finalNegativePrompt);
+ assert.equal(w.buildRequest().userNegativePrompt,'blur');
+ await w.generate();
+ let posted=calls.filter(c=>c[0]==='POST'&&c[1]==='/api/jobs').at(-1)[2];
+ assert.equal(posted.prompt,preview);assert.equal(posted.negativePrompt,initial.finalNegativePrompt);
+ assert.equal(w.getSnapshot().prompt.negativePrompt,'blur');
+ fail=true;assert.equal(await w.selectModel(b.title),false);
+ assert.match(w.getSnapshot().prompt.prompt,/masterpiece/);
+ assert.match(w.getSnapshot().prompt.finalNegativePrompt,/worst quality/);
+ fail=false;assert.equal(await w.selectModel(b.title),true);
+ assert.equal(w.getSnapshot().prompt.finalNegativePrompt,'blur');
+ w.setPrompt({positive:'ceramic teapot'});
+ const raw=w.getSnapshot().prompt;
+ assert.equal(raw.rawPrompt,'ceramic teapot');assert.doesNotMatch(raw.prompt,/masterpiece/);
+ assert.match(raw.prompt,/highres/);assert.equal(w.buildRequest().prompt,raw.prompt);
+ assert.equal(w.buildRequest().negativePrompt,'blur');
+ await w.generate();
+ posted=calls.filter(c=>c[0]==='POST'&&c[1]==='/api/jobs').at(-1)[2];
+ assert.equal(posted.prompt,raw.prompt);assert.equal(posted.negativePrompt,raw.finalNegativePrompt);
+ assert.equal(w.getSnapshot().prompt.rawPrompt,'ceramic teapot');
+});
+
+test('history reuse does not carry an old checkpoint Final Negative into the selected checkpoint',async t=>{
+ const a={title:'oneObsessionAnima_v30.safetensors',hash:'ed32d6584f'};
+ const b={title:'anima29B_v10.safetensors',hash:'0b3020d1b9'};
+ const {workspace:w}=await setup(t,{get:url=>url.startsWith('/api/checkpoints?')?{checkpoints:[a,b],activeCheckpoint:a.title}:undefined});
+ assert.equal(await w.selectModel(b.title),true);
+ await w.reuseMetadata({runtime:runtimes[0],structuredPrompt:{character:'old'},negativePrompt:'manual, worst quality',userNegativePrompt:'manual',settings:{}},{seed:9});
+ assert.equal(w.getSnapshot().prompt.negativePrompt,'manual');
+ assert.equal(w.getSnapshot().prompt.finalNegativePrompt,'manual');
+ assert.equal(w.buildRequest().negativePrompt,'manual');
+ assert.equal(await w.selectModel(a.title),true);
+ assert.match(w.getSnapshot().prompt.finalNegativePrompt,/worst quality/);
+ assert.equal(w.getSnapshot().prompt.negativePrompt,'manual');
+});
+
+test('Prompt Workspace exposes separate checkpoint Positive and Negative management and Final Negative preview',async()=>{
+ const source=await readFile(new URL('../public/frontend/components/prompt/prompt-workspace.js',import.meta.url),'utf8');
+ assert.match(source,/Checkpoint Positive Trigger/);
+ assert.match(source,/Checkpoint Negative Trigger/);
+ assert.match(source,/prompt\.finalNegativePrompt/);
+ assert.match(source,/prompt\.negativePrompt/);
+});
+
+test('section profiles enter the exact preview/request and metadata reuse independently of saved catalog',async t=>{
+ const {workspace:w,calls}=await setup(t);
+ const p=w.saveSectionProfile('appearance',{name:'Summer',text:'white dress',contentRating:'nsfw'});
+ w.setPrompt({sections:{character:'person'},negative:'blur'});w.setSectionProfile('appearance',p);
+ const preview=w.getSnapshot().prompt.prompt;assert.equal(preview,'person, white dress');
+ await w.generate();const request=calls.find(c=>c[0]==='POST'&&c[1]==='/api/jobs')[2];
+ assert.equal(request.prompt,preview);assert.equal(request.sectionProfiles.appearance.text,'white dress');assert.equal(request.sectionProfiles.appearance.contentRating,'nsfw');assert.equal(request.contentRating,'general');
+ w.removeSectionProfile(p.id);await w.reuseMetadata(request,{seed:1});
+ assert.equal(w.getSnapshot().prompt.sectionProfiles.appearance.text,'white dress');assert.equal(w.getSnapshot().prompt.sectionProfiles.appearance.contentRating,'nsfw');assert.equal(w.getSnapshot().contentRating,'general');
+ w.setPrompt({positive:'portrait'});assert.equal(w.buildRequest().prompt,'portrait, white dress');
+ w.setSectionProfile('appearance',null);assert.equal(w.buildRequest().prompt,'portrait');
+});
+
+test('Scenes commits once, preserves Studio settings and rejects stale plans without generating',async t=>{
+ const catalog=[{name:'portrait',registry:{uid:'person',subcategory:'character'}},{name:'light',registry:{uid:'light',subcategory:'style'}}];
+ const {workspace:w,calls}=await setup(t,{get:url=>url.startsWith('/api/loras?')?{loras:catalog}:undefined});
+ w.setPrompt({sections:{character:'person',appearance:'clothing'},negative:'old negative'});w.addLora('portrait',.4);w.toggleLora('portrait');
+ w.setParameters({width:768,height:1024,seed:23});
+ const scene={id:'scene',revision:1,name:'Night',contentRating:'nsfw',fields:{situation:'night city',appearance:''},userNegativePrompt:'new negative',loras:[{name:'light',weight:0,role:'scene',identity:sceneIdentity(catalog[1])}],loraTriggers:[]};
+ const before=w.getSnapshot();let emits=0;w.subscribe(()=>emits++);
+ const plan=w.prepareSceneApplication(scene);assert.equal(emits,0);
+ assert.equal(w.applyScene(plan,scene).applied,true);assert.equal(emits,1);
+ const after=w.getSnapshot();assert.equal(after.contentRating,'nsfw');assert.equal(after.prompt.structuredPrompt.character,'person');assert.equal(after.prompt.structuredPrompt.appearance,'clothing');assert.equal(after.loras[0].enabled,false);assert.equal(after.loras[1].weight,0);
+ assert.deepEqual(after.parameters,before.parameters);assert.deepEqual(after.runtime,before.runtime);assert.deepEqual(after.creation,before.creation);assert.equal(calls.filter(c=>c[0]==='POST'&&c[1]==='/api/jobs').length,0);
+ let stale=w.prepareSceneApplication(scene);w.setPrompt({negative:'newer'});assert.throws(()=>w.applyScene(stale,scene),/更新/);assert.throws(()=>w.prepareSceneApplication(scene,{},stale),/更新/);
+ stale=w.prepareSceneApplication(scene);await w.refreshCatalogs();assert.throws(()=>w.applyScene(stale,scene),/更新/);
+ stale=w.prepareSceneApplication(scene);assert.throws(()=>w.applyScene(stale,{...scene,revision:2}),/更新/);
+});
+
+test('every managed Trigger Word can be toggled without editing manual Prompt text',async t=>{
+ const checkpoint={title:'oneObsessionAnima_v30.safetensors',hash:'ed32d6584f'};
+ const catalog=[{name:'art-lora',registry:{subcategory:'style',triggerWords:'lora only, shared'}}];
+ const {workspace:w}=await setup(t,{get:url=>url.startsWith('/api/checkpoints?')
+  ? {checkpoints:[checkpoint],activeCheckpoint:checkpoint.title}
+  : url.startsWith('/api/loras?') ? {loras:catalog} : undefined});
+ w.setPrompt({sections:{character:'manual subject',style:'manual style'},negative:'manual negative'});
+ w.addLora('art-lora',.7,{insertTriggers:true});
+ w.setSectionProfile('appearance',{id:'profile',name:'Wardrobe',text:'profile only, shared',enabled:true});
+ const manual=w.getSnapshot().prompt;
+ const appliedOnly=manual.appliedTriggerWords.find(trigger=>trigger.text==='lora only');
+ const appliedShared=manual.appliedTriggerWords.find(trigger=>trigger.text==='shared');
+ const checkpointPositive=manual.checkpointPositiveTriggers.find(trigger=>trigger.text==='masterpiece');
+ const checkpointNegative=manual.checkpointNegativeTriggers.find(trigger=>trigger.text==='worst quality');
+ w.setManagedTriggerEnabled({kind:'applied',id:appliedOnly.id},false);
+ w.setManagedTriggerEnabled({kind:'applied',id:appliedShared.id},false);
+ w.setManagedTriggerEnabled({kind:'section-profile',field:'appearance',key:'profile only'},false);
+ w.setManagedTriggerEnabled({kind:'checkpoint-positive',id:checkpointPositive.managementId},false);
+ w.setManagedTriggerEnabled({kind:'checkpoint-negative',id:checkpointNegative.managementId},false);
+ let snapshot=w.getSnapshot().prompt,request=w.buildRequest();
+ assert.equal(snapshot.structuredPrompt.character,'manual subject');assert.equal(snapshot.structuredPrompt.style,'manual style');
+ assert.equal(snapshot.negativePrompt,'manual negative');
+ assert.doesNotMatch(request.prompt,/lora only|profile only|masterpiece/);
+ assert.equal(request.prompt.match(/shared/g)?.length,1,'the enabled section-profile source keeps a shared tag once');
+ assert.doesNotMatch(request.negativePrompt,/worst quality/);assert.match(request.negativePrompt,/manual negative/);
+ assert.equal(request.prompt,snapshot.prompt);assert.equal(request.negativePrompt,snapshot.finalNegativePrompt);
+ w.setManagedTriggerEnabled({kind:'section-profile',field:'appearance',key:'shared'},false);
+ assert.doesNotMatch(w.buildRequest().prompt,/shared/);
+ w.setPrompt({mode:'raw'});snapshot=w.getSnapshot().prompt;request=w.buildRequest();
+ assert.doesNotMatch(snapshot.rawPrompt,/lora only|profile only|masterpiece|shared/);
+ assert.equal(request.prompt,snapshot.prompt);assert.equal(request.negativePrompt,snapshot.finalNegativePrompt);
+ const recipe={...request,runtime:runtimes[0]};
+ await w.reuseMetadata(recipe,{seed:12});
+ snapshot=w.getSnapshot().prompt;
+ assert.equal(snapshot.appliedTriggerWords.find(trigger=>trigger.text==='lora only').enabled,false);
+ assert.ok(snapshot.sectionProfiles.appearance.disabledTriggerKeys.includes('profile only'));
+ assert.equal(snapshot.checkpointPositiveTriggers.find(trigger=>trigger.text==='masterpiece').enabled,true,'current checkpoint triggers are re-derived on history reuse');
+ assert.equal(snapshot.checkpointNegativeTriggers.find(trigger=>trigger.text==='worst quality').enabled,true);
+});
+
+test('Scenes incomplete exception cannot mutate and altered public plan cannot bypass checks',async t=>{
+ const {workspace:w}=await setup(t);w.setPrompt({positive:'raw character',negative:'keep'});w.addLora('portrait',.5);
+ const scene={id:'raw',revision:1,name:'Background',contentRating:'nsfw',fields:{situation:'room'},loras:[],loraTriggers:[]};
+ const before=w.getSnapshot();const plan=w.prepareSceneApplication(scene);plan.issues=[];
+ assert.throws(()=>w.applyScene(plan,scene),/確認/);assert.deepEqual(w.getSnapshot(),before);
+ const split=w.prepareSceneApplication(scene,{sections:{character:'manually split character'}},plan);
+ w.applyScene(split,scene);assert.equal(w.getSnapshot().prompt.structuredPrompt.character,'manually split character');
+ w.setPrompt({mode:'raw'});assert.equal(w.getSnapshot().prompt.rawPrompt,'raw character');
 });

@@ -1,3 +1,4 @@
+import { normalizeSectionProfiles } from "../../public/section-profiles.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -170,7 +171,7 @@ export function createGenerationRuntime(dependencies) {
     const deduped = dedupeLoraTags(appendLoras(promptWithBoosts, loras));
     const effectivePrompt = deduped.text;
     const effectiveNegativePrompt = appendLoraNegatives(generatedPrompt.negative_prompt, loras);
-    const effectiveLoras = applyPromptWeights(loras, effectivePrompt);
+    const effectiveLoras = applyPromptWeights(loras, effectivePrompt, {preserveExplicitZero:true});
     const clientLoraNotices = validateLoraNotices(body.loraNotices);
     const loraNotices = [
       ...clientLoraNotices,
@@ -281,12 +282,14 @@ export function createGenerationRuntime(dependencies) {
       description,
       prompt: promptWithBoosts,
       negativePrompt: generatedPrompt.negative_prompt,
+      userNegativePrompt: typeof body.userNegativePrompt === "string" ? body.userNegativePrompt : generatedPrompt.negative_prompt,
       effectivePrompt,
       effectiveNegativePrompt,
       structuredPrompt,
       rawPromptOverride,
       rawPrompt,
       appliedTriggerWords,
+      sectionProfiles: normalizeSectionProfiles(body.sectionProfiles),
       settings,
       loras: effectiveLoras,
       loraNotices,
@@ -325,12 +328,14 @@ export function createGenerationRuntime(dependencies) {
       images: stored.images.map(serializeImage),
       prompt: promptWithBoosts,
       negativePrompt: generatedPrompt.negative_prompt,
+      userNegativePrompt: stored.userNegativePrompt,
       effectivePrompt,
       effectiveNegativePrompt,
       structuredPrompt,
       rawPromptOverride,
       rawPrompt,
       appliedTriggerWords,
+      sectionProfiles: normalizeSectionProfiles(body.sectionProfiles),
       loras: effectiveLoras,
       loraNotices,
       explanation: effectiveLoras.length
@@ -1174,7 +1179,7 @@ async function normalizeV1Loras(input, listLorasFn, config) {
       throw apiError("INVALID_REQUEST", "指定したLoRAが見つかりません", 400);
     }
     const weight = item.weight === undefined ? Number(config.lora?.defaultWeight ?? 0.7) : Number(item.weight);
-    if (!Number.isFinite(weight) || weight < 0.05 || weight > 2) {
+    if (!Number.isFinite(weight) || (weight !== 0 && weight < 0.05) || weight > 2) {
       throw apiError("INVALID_REQUEST", "LoRA weightが範囲外です", 400);
     }
     if (item.enabled !== undefined && typeof item.enabled !== "boolean") {
@@ -1320,7 +1325,7 @@ function validateLoras(input, config = null) {
     if (unique.has(key)) continue;
     const normalized = {
       name,
-      weight: Number(boundedNumber(item.weight, fallbackWeight, 0.05, 2).toFixed(2)),
+      weight: item.weight === 0 ? 0 : Number(boundedNumber(item.weight, fallbackWeight, 0.05, 2).toFixed(2)),
       triggerWords: sanitizeTriggerWords(item.triggerWords),
       negativeWords: sanitizeTriggerWords(item.negativeWords),
       source: ["ui", "prompt", "both"].includes(item.source) ? item.source : "ui"

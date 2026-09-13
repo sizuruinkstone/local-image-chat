@@ -428,7 +428,7 @@ export function createStudioController({
   }
 
   function openFinalImage() { if (finalImage) openImageModal(originalImageUrl(finalImage), generationTitle(finalGeneration)); }
-  function inspectFinal() { if (finalGeneration && finalImage) inspect(finalGeneration, finalImage); }
+  function inspectFinal() { if (finalGeneration && finalImage) { inspect(finalGeneration, finalImage); const panel = elements.studioMetadataContent.closest?.("details"); if (panel) panel.open = true; } }
   function compareFinal() { if (finalGeneration && finalImage) onToggleCompare(finalImage, finalGeneration); }
   function openInspectionDetail() { if (inspection) onOpenDetail(inspection.generation, inspection.image); }
   function loadInspectionRecipe() { if (inspection) onLoadRecipe(inspection.generation, inspection.image); }
@@ -444,7 +444,7 @@ export function createStudioController({
   }
   function useInspectionAsReference(event) { event.preventDefault(); event.stopPropagation(); onUseAsReference(inspection?.image, { focus: true }); }
   function compareInspection() { if (inspection) onToggleCompare(inspection.image, inspection.generation, elements.studioMainCompareButton); }
-  function refreshInspection() { if (inspection) inspect(inspection.generation, inspection.image); }
+  function refreshInspection() { if (inspection) { inspect(inspection.generation, inspection.image); const panel = elements.studioMetadataContent.closest?.("details"); if (panel) panel.open = !panel.open; } }
   function regenerateInspection() { if (inspection) onRegenerate(inspection.generation, inspection.image); }
   function copyPrompt() { void copyInspectionValue(elements.studioCopyPromptButton, (generation) => buildPromptText(generation)); }
   function copyNegative() { void copyInspectionValue(elements.studioCopyNegativeButton, (generation) => generation.effectiveNegativePrompt || generation.negativePrompt || ""); }

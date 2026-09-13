@@ -114,7 +114,7 @@ test("画像比較の導線は既存候補Stateと比較表示を再利用する
   assert.match(comparisonController, /selection\.clear\(\)/);
 
   const card = historyController.match(/function createCard\([\s\S]*?(?=\n  async function updateContentRating)/)?.[0] ?? "";
-  assert.match(card, /card\.addEventListener\("click",[\s\S]*?openImageModal/);
+  assert.match(card, /card\.addEventListener\("click",[\s\S]*?openDetail/);
   assert.match(card, /compare\.addEventListener\("click",[\s\S]*?onToggleCompare/);
   assert.match(css, /\.navBadge\s*\{/);
   assert.match(css, /\.compareTrayItems\s*\{[\s\S]*?grid-template-columns:\s*repeat\(4/);
@@ -361,7 +361,7 @@ test("ギャラリーは画像を主役にし、詳細・操作・比較を既�
   assert.match(historyController, /collectPromptTags\(allEntries\)/);
   assert.match(historyController, /elements\.galleryFilterDialog\.showModal\(\)/);
   assert.match(historyController, /configureThumbnailImage\(preview, image/);
-  assert.match(card, /card\.addEventListener\("click"[\s\S]*?openImageModal/);
+  assert.match(card, /card\.addEventListener\("click"[\s\S]*?openDetail/);
   assert.match(card, /historyCardMenu/);
   assert.match(card, /onLoadRecipe\(generation, image\)/);
   assert.match(card, /openDetail\(generation, image\)/);
@@ -471,7 +471,7 @@ test("生成バーはモバイル固定・safe-area対応で、軽量アニメ�
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
 });
 
-test("v3生成画面はviewport全幅・中央優先の3カラムを使う", async () => {
+test("Glass生成画面は画像優先の2領域と開閉metadataを使う", async () => {
   const html = await fs.readFile("public/index.html", "utf8");
   const css = await fs.readFile("public/style.css", "utf8");
   const app = await fs.readFile("public/app.js", "utf8");
@@ -482,7 +482,7 @@ test("v3生成画面はviewport全幅・中央優先の3カラムを使う", asy
   assert.match(css, /body\s*\{[\s\S]*?font-size:\s*14px/);
   assert.match(css, /\.promptFieldBlock textarea\s*\{[\s\S]*?min-height:\s*84px/);
   assert.match(css, /\.studioRecentCard img\s*\{[\s\S]*?width:\s*76px;[\s\S]*?height:\s*88px/);
-  assert.match(html, /<details class="studioInspectorSection studioMetadataSection" open>/);
+  assert.match(html, /<details class="studioInspectorSection studioMetadataSection">/);
   assert.match(html, /id="studioMetaDetailsTab"[\s\S]*?id="studioMetaParametersTab"[\s\S]*?id="studioMetaPromptTab"/);
   assert.match(studio, /inspect\(generation, image, \{ showOnCanvas: true \}\)/);
   assert.match(studio, /if \(showOnCanvas\)[\s\S]*?studioMainImage\.src = originalImageUrl\(image\)/);

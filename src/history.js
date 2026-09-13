@@ -1,3 +1,4 @@
+import { normalizeSectionProfiles } from "../public/section-profiles.js";
 import crypto from "node:crypto";
 import path from "node:path";
 import { JsonStore } from "./json-store.js";
@@ -546,6 +547,7 @@ function normalizeGeneration(input) {
     description: String(input.description ?? "").trim().slice(0, 4000) || UNTITLED_DESCRIPTION,
     prompt: String(input.prompt ?? "").slice(0, 12000),
     negativePrompt: String(input.negativePrompt ?? "").slice(0, 12000),
+    userNegativePrompt: String(input.userNegativePrompt ?? input.negativePrompt ?? "").slice(0, 12000),
     effectivePrompt: String(input.effectivePrompt ?? "").slice(0, 16000),
     effectiveNegativePrompt: String(input.effectiveNegativePrompt ?? "").slice(0, 16000),
     // 用途別プロンプトとトリガーワード（v2.14以降）。
@@ -554,6 +556,7 @@ function normalizeGeneration(input) {
     rawPromptOverride: input.rawPromptOverride === true,
     rawPrompt: String(input.rawPrompt ?? "").slice(0, 16000),
     appliedTriggerWords: normalizeAppliedTriggerWords(input.appliedTriggerWords),
+    sectionProfiles: normalizeSectionProfiles(input.sectionProfiles),
     ...(runtime ? { runtime } : {}),
     settings: structuredClone(input.settings ?? {}),
     // 実効LoRA一覧（Weightは実際に生成へ送った値、sourceは選択元）。

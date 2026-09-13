@@ -635,6 +635,7 @@ async function downloadLoraFile(metadata, token, destinationDir, destinationPath
       headers: civitaiHeaders(token, "application/octet-stream"),
       signal: AbortSignal.timeout(60 * 60 * 1000)
     });
+    if (response.status === 401 || response.status === 403) throw new Error("Civitaiがダウンロード認証を拒否しました。サーバーのAPIキーの有効性と、このモデルへのアクセス権を確認してください。");
     if (!response.ok || !response.body) {
       const detail = await response.text().catch(() => "");
       throw new Error(`Civitaiダウンロード HTTP ${response.status}: ${detail.slice(0, 300)}`);
@@ -663,7 +664,7 @@ async function fetchCivitaiJson(url, token) {
   });
   if (!response.ok) {
     if (response.status === 401 || response.status === 403) {
-      throw new Error("Civitaiで閲覧制限されています。APIキーを入力して再試行してください");
+      throw new Error("Civitaiが閲覧認証を拒否しました。サーバーの.envのAPIキー（LOCAL_IMAGE_CHAT_CIVITAI_TOKEN）、または指定したAPIキーの有効性とモデルへのアクセス権を確認してください");
     }
     throw new Error(`Civitai API HTTP ${response.status}`);
   }

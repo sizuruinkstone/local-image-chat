@@ -34,7 +34,7 @@ test("index.htmlがPWAとスマホ表示のメタ情報を持つ", async () => {
   const html = await fs.readFile("public/index.html", "utf8");
   assert.match(html, /<link rel="manifest" href="\/manifest\.webmanifest"/);
   assert.match(html, /<link rel="apple-touch-icon" href="\/icons\/apple-touch-icon\.png"/);
-  assert.match(html, /<meta name="theme-color" content="#080808"/);
+  assert.match(html, /<meta name="theme-color" content="#e5edf5"/);
   assert.match(html, /<meta name="apple-mobile-web-app-capable" content="yes"/);
   // セーフエリア対応にはviewport-fit=coverが必要
   assert.match(html, /viewport-fit=cover/);

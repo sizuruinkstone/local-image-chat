@@ -244,6 +244,10 @@ export function createLocalImageChatClient(options = {}) {
     baseUrl,
     timeoutMs,
 
+    listSectionProfiles:()=>requestJson('/api/v1/section-profiles'),
+    createSectionProfile:body=>requestJson('/api/v1/section-profiles',{method:'POST',body}),
+    updateSectionProfile:({id,...body})=>requestJson(`/api/v1/section-profiles/${encodeURIComponent(id)}`,{method:'PATCH',body}),
+    deleteSectionProfile:({id})=>requestJson(`/api/v1/section-profiles/${encodeURIComponent(id)}`,{method:'DELETE'}),
     async getCapabilities(runtimeId) {
       const query = new URLSearchParams();
       if (runtimeId !== undefined && runtimeId !== null && runtimeId !== "") {

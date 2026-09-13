@@ -1,3 +1,6 @@
+import {planSceneApplication} from "../scenes.js";
+import {createSharedSectionProfileLibrary} from "../core/section-profile-library.js";
+import {createSectionProfileLibrary, PROFILE_SECTIONS} from "../section-profiles.js";
 import * as http from "../core/http-client.js";
 import { createRuntimeService } from "../core/runtime-service.js";
 import { createGenerationDraft } from "./generation-draft.js";
@@ -9,7 +12,7 @@ import { normalizeManualTitle, DEFAULT_TITLE_MODE } from "../history-title.js";
 import { PROMPT_FIELDS } from "../structured-prompt.js";
 import { createStudioSession } from "../core/studio-session.js";
 import {findProfileForLora, createRegistryProfile} from "../lora-profiles.js";
-import {listLoraOutfitChoices} from "../lora-outfit-selection.js";
+import {listLoraOutfitChoices,parseOutfitStateSourceId,resolveLoraBaseTriggerWords} from "../lora-outfit-selection.js";
 
 const clone = (value) => structuredClone(value);
 const parameterKeys = new Set([...RECIPE_PARAMETER_KEYS, "inpaintFullRes", "seed", "candidateCount"]);
@@ -26,6 +29,9 @@ export function createGenerateWorkspace({
   storage = globalThis.localStorage ?? memoryStorage(), timing,
   confirmRecovery = async () => false, persistSession = false
 } = {}) {
+  let sectionLibrary=createSectionProfileLibrary(storage);
+  let sharedProfiles=false;
+  let sectionProfileError="";
   let disposed = false;
   let ready = false;
   let initPromise;
@@ -51,11 +57,11 @@ export function createGenerateWorkspace({
   const session = createStudioSession(storage);
   let restoring = true, persistenceError = "";
   const listeners = new Set();
-  const draft = createGenerationDraft({ getCatalog: () => catalogs.loras });
+  const draft = createGenerationDraft({ getCatalog: () => catalogs.loras, getCheckpoint: () => runtime.getState().selectedCheckpoint });
   function getSnapshot() {
     return clone({ ready, runtime: runtime.getState(), catalogs,
       catalogState: { version: catalogRevision, loading: catalogLoading, error: catalogError, pendingFavorites: [...favoriteWrites.keys()] },
-      prompt: draft.readPrompt(), parameters: draft.readParameters(), loras: draft.readLoras(),
+      prompt: draft.readPrompt(), sectionProfileCatalog: sectionLibrary.list(), sectionProfileError, parameters: draft.readParameters(), loras: draft.readLoras(),
       description: draft.readDescription(), title, contentRating, autoRetry,
       generation: { ...lifecycle, ...generation.getState(), cancelRequested },
       completed, currentImage, creation, persistenceError, recent: history.getState(), reusing, selectingModel });
@@ -164,7 +170,10 @@ export function createGenerateWorkspace({
     shouldRequestPrompt: (description) => Boolean(description) && !draft.positive().trim(),
     readRuntimePayload: runtime.runtimePayload,
     readTitlePayload: () => ({ title, titleMode: DEFAULT_TITLE_MODE, titleTemplate: "" }),
-    readPromptPayload: draft.readPrompt,
+    readPromptPayload: () => {
+      const value = draft.readPrompt();
+      return {...value, userNegativePrompt: value.negativePrompt, negativePrompt: value.finalNegativePrompt};
+    },
     readSelectedLoras: () => { draft.syncLoras(); return draft.readLoras(); },
     readPromptBoosts: () => [],
     readInitImagePayload: () => creation.mode === "txt2img" || !creation.source ? {} : creation.source.imageId ? {initImageId: creation.source.imageId} : {initImage: creation.source.dataUrl},
@@ -229,6 +238,10 @@ export function createGenerateWorkspace({
     initPromise = (async () => {
       runtime.init();
       const config = await transport.getJson("/api/config");
+      if(config.sectionProfileApi && !sharedProfiles){
+        sharedProfiles=true;sectionLibrary=createSharedSectionProfileLibrary({transport,storage});
+        try{await sectionLibrary.initialize();}catch(cause){sectionProfileError=cause.message;}
+      }
       let live;
       try { live = await transport.getJson("/api/runtimes"); } catch { /* same config fallback as legacy */ }
       if (disposed) return false;
@@ -282,11 +295,50 @@ export function createGenerateWorkspace({
     }
   }
   function mutate(callback) { editable(); recipeRevision += 1; callback(); emit(); }
+  const scenePlans = new WeakMap();
+  function prepareSceneApplication(scene, decisions = {}, previousPlan) {
+    editable();
+    if (previousPlan) {
+      const token=scenePlans.get(previousPlan);
+      if(!token||token.recipeRevision!==recipeRevision||token.catalogRevision!==catalogRevision||!runtime.isRuntimeContextCurrent(token.context))throw new Error('確認中に構成が更新されました。場面を選び直してください');
+    }
+    if (catalogLoading) throw new Error('LoRA一覧を更新中です');
+    const plan = planSceneApplication(scene,{prompt:draft.readPrompt(),loras:draft.readLoras(),catalog:catalogs.loras,maxSelected},decisions);
+    scenePlans.set(plan,{recipeRevision,catalogRevision,context:runtime.runtimeRequestContext(),scene:clone(scene),decisions:clone(decisions)});
+    return plan;
+  }
   return {
     initialize, getSnapshot,
+    prepareSceneApplication,
+    applyScene(plan, latestScene) {
+      editable();
+      const token = scenePlans.get(plan);
+      if (!token || token.recipeRevision !== recipeRevision || token.catalogRevision !== catalogRevision || catalogLoading || !runtime.isRuntimeContextCurrent(token.context) || JSON.stringify(latestScene) !== JSON.stringify(token.scene)) throw new Error('構成または場面が更新されました。場面を選び直してください');
+      const checked = planSceneApplication(token.scene,{prompt:draft.readPrompt(),loras:draft.readLoras(),catalog:catalogs.loras,maxSelected},token.decisions);
+      if (checked.issues.length) throw new Error('適用前の確認を完了してください');
+      const saved = draft.capture(), previousRating = contentRating;
+      try { draft.applyScene(checked.update); contentRating = checked.contentRating; }
+      catch(error) {draft.restore(saved);contentRating=previousRating;throw error;}
+      scenePlans.delete(plan);recipeRevision += 1;emit();return {applied:true};
+    },
+    setContentRating(value) {
+      if (!["general", "nsfw"].includes(value)) throw new Error("Unknown content rating");
+      mutate(() => { contentRating = value; });
+    },
     loraPromptChoices(name) {
       const item = catalogs.loras.find(lora => lora.name === name);
       return listLoraOutfitChoices(findProfileForLora(item) ?? createRegistryProfile(item));
+    },
+    loraOutfitChoice(name) {
+      return draft.readPrompt().appliedTriggerWords.flatMap(trigger=>trigger.sourceLoraIds)
+        .map(parseOutfitStateSourceId).find(source=>source?.loraName===name)?.choiceId ?? "";
+    },
+    setLoraOutfit(name, choiceId) {
+      const item=catalogs.loras.find(lora=>lora.name===name);
+      if(!item || !draft.readLoras().some(lora=>lora.name===name)) throw new Error("LoRAを先に追加してください。");
+      const choice=listLoraOutfitChoices(findProfileForLora(item) ?? createRegistryProfile(item)).find(choice=>choice.id===choiceId);
+      if(choiceId && !choice) throw new Error("衣装が見つかりません。");
+      mutate(()=>draft.setLoraOutfit(name,choiceId,choice?.prompt ?? ""));
     },
     async applyCheckpointSet(set) {
       editable(); selectingModel = true; const version = ++recipeRevision; emit();
@@ -333,6 +385,11 @@ export function createGenerateWorkspace({
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
+    async refreshSectionProfiles(){if(sharedProfiles){try{await sectionLibrary.initialize();sectionProfileError="";}catch(cause){sectionProfileError=cause.message;throw cause;}finally{if(!disposed)emit();}}},
+    saveSectionProfile(field,value) { if(sharedProfiles){editable();return sectionLibrary.save(field,value).then(saved=>{if(!disposed)emit();return saved;});} let saved; mutate(()=>{saved=sectionLibrary.save(field,value);});return saved; },
+    removeSectionProfile(id) { if(sharedProfiles){editable();return sectionLibrary.remove(id).then(()=>{if(!disposed)emit();});} mutate(()=>sectionLibrary.remove(id)); },
+    setSectionProfile(field,value) { if(!PROFILE_SECTIONS.includes(field))throw new Error("Unknown profile section");mutate(()=>draft.setSectionProfile(field,value)); },
+    setManagedTriggerEnabled(target,enabled) { mutate(()=>draft.setManagedTriggerEnabled(target,enabled)); },
     setPrompt: (value) => mutate(() => draft.setPrompt(value)),
     setDescription: (value) => mutate(() => draft.setDescription(value)),
     setParameters(patch) {
@@ -340,12 +397,20 @@ export function createGenerateWorkspace({
       mutate(() => draft.setParameters(patch));
     },
     setAutoRetry: (value) => mutate(() => { autoRetry = value === true; }),
-    addLora(name, weight = defaultWeight, { includeTriggers = true } = {}) {
+    addLora(name, weight = defaultWeight, { includeTriggers = true, insertTriggers = false } = {}) {
       const item = catalogs.loras.find((lora) => lora.name === name);
       if (!item) throw new Error("Unknown LoRA");
       const selected = draft.readLoras();
       if (!selected.some((lora) => lora.name === name) && selected.length >= maxSelected) throw new Error("Too many LoRAs");
-      mutate(() => draft.addLora(name, weightValue(weight), { triggerWords: includeTriggers ? item.registry?.triggerWords ?? "" : "", negativeWords: "" }));
+      mutate(() => {
+        // Managed triggers are combined only in the canonical final prompt.
+        draft.addLora(name, weightValue(weight), { triggerWords: includeTriggers && !insertTriggers ? item.registry?.triggerWords ?? "" : "", negativeWords: "" });
+        if (insertTriggers) {
+          const profile=findProfileForLora(item) ?? createRegistryProfile(item);
+          const triggerWords=resolveLoraBaseTriggerWords(profile,profile?.defaultPreset,item.registry?.triggerWords ?? "");
+          draft.addManagedTriggers(name, {...item.registry,triggerWords});
+        }
+      });
     },
     setLoraWeight(name, weight) {
       if (!draft.readLoras().some((lora) => lora.name === name)) throw new Error("LoRA is not selected");

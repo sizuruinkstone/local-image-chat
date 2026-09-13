@@ -446,23 +446,25 @@ test("finish and gallery Hires bind payloads to the source runtime and source im
   const runtime = { id: "reforge", label: "ReForge" };
   const selected = { id: "candidate-9", seed: 909 };
   await t.test("selected inpaint refine retains its mode and selected image as parent/init", async () => {
-    const source = { runtime, mode: "inpaint", contentRating: "nsfw", description: "edit", prompt: "p", negativePrompt: "n", structuredPrompt: { subject: "x" }, rawPromptOverride: true, rawPrompt: "p", appliedTriggerWords: ["x"], settings: { steps: 20 }, loras: [] };
+    const source = { runtime, mode: "inpaint", contentRating: "nsfw", description: "edit", prompt: "p", negativePrompt: "n, checkpoint negative", userNegativePrompt: "n", structuredPrompt: { subject: "x" }, rawPromptOverride: true, rawPrompt: "p", appliedTriggerWords: ["x"], settings: { steps: 20 }, loras: [] };
     const f = fixture({ lastGeneration: source, selectedCandidate: selected });
     await f.controller.finishSelected();
     const body = f.calls.find(([name]) => name === "postJson")[1].body;
     assert.equal(body.runtime, "reforge"); assert.equal(body.mode, "inpaint");
     assert.equal(body.parentImageId, selected.id); assert.equal(body.initImageId, selected.id);
+    assert.equal(body.negativePrompt, "n, checkpoint negative"); assert.equal(body.userNegativePrompt, "n");
     assert.equal(body.settings.seed, selected.seed); assert.equal(body.settings.hiresEnabled, true);
     assert.equal(f.calls.find(([name]) => name === "presentFinal")[1].labels.eyebrow, "INPAINT REFINE COMPLETE");
   });
   await t.test("gallery uses fixed safe Hires values, stored upscaler/IP, and gallery image as parent/init", async () => {
-    const source = { runtime, mode: "txt2img", contentRating: "nsfw", description: "gallery", prompt: "p", negativePrompt: "n", settings: { steps: 30, hiresUpscaler: "Stored" }, loras: [], ipAdapter: { referenceImageId: "historic-ip" } };
+    const source = { runtime, mode: "txt2img", contentRating: "nsfw", description: "gallery", prompt: "p", negativePrompt: "n, checkpoint negative", userNegativePrompt: "n", settings: { steps: 30, hiresUpscaler: "Stored" }, loras: [], ipAdapter: { referenceImageId: "historic-ip" } };
     const f = fixture({ ui: { confirmGalleryHires: async () => true } });
     await f.controller.hiresFromGallery(source, selected);
     const body = f.calls.find(([name]) => name === "postJson")[1].body;
     assert.deepEqual([body.settings.hiresScale, body.settings.hiresSteps, body.settings.hiresDenoising], [1.5, 12, 0.28]);
     assert.equal(body.settings.hiresUpscaler, "Stored");
     assert.equal(body.mode, "img2img"); assert.equal(body.parentImageId, selected.id); assert.equal(body.initImageId, selected.id);
+    assert.equal(body.negativePrompt, "n, checkpoint negative"); assert.equal(body.userNegativePrompt, "n");
     assert.deepEqual(body.ipAdapter, source.ipAdapter);
   });
   await t.test("unsupported source runtime is rejected before modal or POST", async () => {

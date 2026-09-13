@@ -17,7 +17,7 @@ test("ギャラリーは20件ページング・サムネイル・遅延読込を
   assert.match(delivery, /imageElement\.loading = eager \? "eager" : "lazy"/);
   assert.match(delivery, /imageElement\.decoding = "async"/);
   assert.match(delivery, /const thumbnailUrl = thumbnailImageUrl\(image\)/);
-  assert.match(historyController, /openImageModal\(originalImageUrl\(image\)/);
+  assert.match(historyController, /detailImage\.src = originalImageUrl\(image\)/);
   assert.doesNotMatch(`${app}\n${historyController}`, /imageUrl\}\?t=\$\{Date\.now\(\)\}/);
   assert.match(html, /id="historyLoadMoreButton"/);
 

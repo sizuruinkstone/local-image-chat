@@ -1,4 +1,54 @@
-# 現在の実装対象：Task 25「LoRA選択・管理UIの可読性改善」
+# 現在の実装対象：Task 28「gfx1031 Anima GEMM / Transformer Bottleneck Lab」
+
+更新日: 2026-09-06
+状態: **Phase 1–2 実施中**
+担当: Luna
+設計・レビュー: Codex
+優先度: 高（隔離Lab計測のみ）
+
+正本の実装指示:
+
+- `docs/luna-tasks/28_GFX1031_ANIMA_GEMM_TRANSFORMER_LAB.md`
+
+Task 27でDao FlashAttentionの速度改善が小さく不採用となったため、既存の隔離LabでAnima 2.9Bの実Transformer内部を測る。今回の範囲はPhase 1「実shape・dtype・call回数捕捉」とPhase 2「1 denoising step GPU時間内訳」に限定する。
+
+通常Anima（CFG 4、LoRAなし、4 steps）とTurbo（CFG 1、Turbo LoRA 0.8、8 steps）を576×832、Euler + sgm_uniform、seed 195504693で分離計測する。baselineはPyTorch Math SDPAを維持し、FlashAttention、TunableOp、FP16化、`torch.compile`等の最適化を混入しない。
+
+本番Forge Neo、port 7860、本番venv、LICコード・設定・生成処理には触れない。作業対象は`C:\AI\Labs\Forge-Neo-gfx1031-Attention-Lab`のみ。Phase 1–2完了後は高速化を実装せず、Linear/MLP、Attention、cast/layout/offload、mixed/inconclusiveのどれが支配的かを証拠付きで報告する。
+
+---
+
+# Task 27「RX 6700 XT / gfx1031 Attention Lab」（完了記録）
+
+更新日: 2026-09-06
+状態: **検証完了／性能不足で不採用**
+担当: Luna
+設計・レビュー: Codex
+優先度: 高（ただし本番非変更の実験）
+
+正本の実装指示:
+
+- `docs/luna-tasks/27_GFX1031_ATTENTION_LAB.md`
+
+目的は、既存Forge Neoを完全に保護したまま、`C:\AI\Labs\Forge-Neo-gfx1031-Attention-Lab`、port `7862`、独立venvで`gfx1031`向け高速Attentionの成立性を検証すること。
+
+検証候補は`triton-windows 3.7.x + Dao-AILab FlashAttention Triton AMD backend`に限定する。公式TheRock wheelの単純更新、AOTriton/PyTorch本体のソースビルド、SageAttention、CUDA wheel、本番Forge変更は対象外。
+
+単体Triton probe、Anima実形状`H=16 / D=128 / S=1024,1872,3952`のFlashAttention直接probeに合格した場合だけ、Lab cloneへ明示opt-in付き最小統合を行う。失敗時は中止ログを成果とし、危険な回避策へ拡大しない。
+
+2026-09-06実測: Phase 1は合格。Lab venvで本番同日版`torch 2.12.0+rocm7.15.0a20260727`、HIP `7.15.26296`、`gfx1031`を確認した。Phase 2の`triton-windows 3.7.1.post27` vector-add probeは、MSVC C++ Build ToolsおよびWindows SDKがシステムに未導入のため、HIP utility compile前に同一エラーで2回停止した。GPU/ROCmは正常。次へ進むにはシステム全体へVisual Studio Build ToolsのC++ workloadとWindows SDKを追加する必要があるため、ユーザー承認待ちとする。
+
+ユーザーは最小Build Tools導入を承認済み。非昇格bootstrapperはexit `1602`、Codexセッションからの`Start-Process -Verb RunAs`はUAC本体へ到達せず、インストール実体を作成しなかった。再起動要求は出ていない。次はユーザーが管理者PowerShellからLabの`install-vs-buildtools.ps1`を1回実行し、終了コードを確認する。exit `3010`または`1641`なら再起動せず停止する。
+
+ユーザーの管理者実行はexit `0`で完了し、Build Tools `17.14.37614.0`、MSVC `14.44.35207`、Windows SDK/UCRT `10.0.26100.0`、指定3 componentの導入を確認した。`vswhere`は`isComplete=true`、`isLaunchable=true`、`isRebootRequired=false`。ただしWindowsの`PendingFileRenameOperations`にVisual Studio bootstrapper関連ファイルが残っているため、ユーザー指示に従いTriton再probe前に停止した。Windows再起動後、pending状態を再監査してPhase 2を再開する。
+
+再起動後、Triton vector-addはgfx1031で正常実行し、CPU参照との最大誤差`0.0`、warm中央値`0.000329秒`でPhase 2合格。Dao FlashAttention `2.8.4`もBF16、H=16、D=128、Self/CrossのS/Q=1024/1872/3952でfiniteかつS=256 Math比較`rtol=0.05, atol=0.05`合格。ただしS=3952性能比較はSelfがMath比`1.110729x`、Crossが`0.433969x`で、採用基準`1.5x`に未達。CrossはMathの方が約2.3倍速いため、Lab Forge統合・起動・画像benchmarkは行わず不採用とする。
+
+既存Forge Neo、既存venv、port 7860、Local Image Chat、共通モデル、LIC runtime設定を変更・停止・再起動してはならない。速度測定時は本番Forgeがidleであることを確認し、既存Jobをcancelしない。
+
+---
+
+# Task 25「LoRA選択・管理UIの可読性改善」（既存・監督レビュー待ち）
 
 更新日: 2026-08-29
 状態: **実装完了／監督レビュー待ち**

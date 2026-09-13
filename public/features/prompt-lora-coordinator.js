@@ -26,7 +26,8 @@ export function createPromptLoraCoordinator({
   debounceMs = 400,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
-  preserveSelectionOrder = false
+  preserveSelectionOrder = false,
+  preserveZeroWeights = false
 }) {
   const selected = new Map();
   const sources = new Map();
@@ -121,6 +122,9 @@ export function createPromptLoraCoordinator({
     try {
       const text = readPromptSources().map((source) => source.value).join("\n");
       const result = reconcilePromptLoras(parseLoraTags(text), selectionSnapshot(), getCatalog());
+      if (preserveZeroWeights) for (const item of result.selected) {
+        if (item.source === 'ui' && selected.get(item.name) === 0) item.weight = 0;
+      }
       notices = buildLoraNotices(result);
       renderNotices(describeLoraNotices(result));
       if (!result.changed) return false;

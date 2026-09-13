@@ -58,7 +58,7 @@
 .lora-composition h2 { font-size: 13px; font-weight: 600; }
 .lora-composition header > span { font-size: 10px; color: var(--studio-muted); }
 .composition-list { display: flex; flex-direction: column; gap: 5px; }
-.composition-row { display: grid; grid-template-columns: 24px minmax(0, 1fr) 132px auto; gap: 12px; align-items: center; min-height: 40px; }
+.composition-row { display: grid; grid-template-columns: 24px minmax(0, 1fr) minmax(120px,220px) 132px auto; gap: 12px; align-items: center; min-height: 40px; }
 .composition-order { font-size: 10px; color: var(--studio-muted); }
 .composition-row strong { font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composition-row[data-enabled="false"] strong { color: var(--studio-muted); text-decoration: line-through; }
@@ -104,4 +104,12 @@
   .composition-weight input { height: 36px; font-size: 16px; }
   .lora-mobile-tabs { display: flex; flex-shrink: 0; border-top: 1px solid var(--studio-line); padding: 8px 16px max(8px, env(safe-area-inset-bottom)); gap: 8px; background: var(--studio-paper); }
   .lora-mobile-tabs .control { flex: 1; min-height: 42px; }
+}
+
+.composition-outfit { width:100%; min-width:0; padding:7px; border:1px solid var(--studio-line); border-radius:5px; background:var(--studio-paper); color:inherit; font:inherit; font-size:12px; }
+@media(max-width:700px) {
+ .composition-row { grid-template-columns:22px minmax(0,1fr) 132px; }
+ .composition-row > strong { grid-column:2/4; }
+ .composition-outfit { grid-column:2; font-size:16px; }
+ .composition-weight { grid-column:3; }
 }

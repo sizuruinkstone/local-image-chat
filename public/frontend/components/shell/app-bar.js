@@ -13,7 +13,6 @@ export function createAppBar({ onPreviewState, previewMode = false, onRuntime, p
   const root = element("header", { class: "app-bar" }, [
     element("a", { class: "brand", href: production ? "/" : "/studio-next/", "aria-label": "LIC Studio home" }, [icon("layers"), element("span", { text: "LIC" }), element("span", { class: "brand-sub", text: "STUDIO" })]),
     element("span", { class: "app-divider", "aria-hidden": "true" }),
-    element("div", { class: "workspace-title" }, [element("span", { text: "Personal workspace" }), element("span", { class: "workspace-subtitle", text: "Untitled study" })]),
     element("div", { class: "app-bar-actions" }, [element("span", { class: "preview-badge", text: production ? "LOCAL" : previewMode ? "R2 · FIXTURE" : "DEVELOPMENT" }), select, liveStatus, status])
   ]);
   return { root, render(snapshot, state, view) {

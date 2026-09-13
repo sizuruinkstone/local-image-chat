@@ -1,3 +1,5 @@
+import {createSectionProfileService} from "./section-profiles.js";
+import {createSceneService} from "./scenes.js";
 import express from "express";
 import { installFrontendEntry } from "./frontend-entry.js";
 import fs from "node:fs/promises";
@@ -236,11 +238,14 @@ app.use(
     }
   })
 );
-app.use("/api/v1", createV1Router({ generationService, referenceAssets }));
+const scenes = createSceneService({dataDir,outputDir,history,getCatalog:recipe=>getInstalledLoras(recipe.runtime?.id ?? recipe.runtimeId ?? 'reforge')});
+await scenes.recover();
+app.use("/api/v1", createV1Router({ generationService, referenceAssets, scenes, sectionProfiles:createSectionProfileService(dataDir) }));
 app.use(createV1ErrorMiddleware());
 
 app.get("/api/config", (_request, response) => {
   response.json({
+    sectionProfileApi: true,
     version: packageJson.version,
     runtime: {
       pid: process.pid,
@@ -502,6 +507,9 @@ app.post("/api/lora/open-root", async (_request, response) => {
     response.status(400).json({ error: readableError(error) });
   }
 });
+
+// Never return the credential itself to the browser.
+app.get("/api/civitai/auth-status", (_request,response)=>response.json({configured:Boolean(resolveCivitaiToken(""))}));
 
 app.post("/api/civitai/inspect", async (request, response) => {
   try {
@@ -1285,7 +1293,9 @@ async function listLorasForRuntime(runtimeId = runtimeRegistry.defaultRuntimeId)
   const provider = runtimeRegistry.resolve(runtimeId);
   const loras = provider.descriptor.id === "reforge"
     ? await refreshLoras(config.reforge)
-    : await provider.listLoras();
+    : typeof provider.refreshLoras === "function"
+      ? await provider.refreshLoras()
+      : await provider.listLoras();
   return civitai.mergeWithInstalled(loras);
 }
 

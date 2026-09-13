@@ -9,7 +9,7 @@ export function createWeightEditor(name,onWeight) {
   const root=element("div",{class:"composition-weight"},[down,input,up]);
   return {root,render(value,disabled){weight=value;if(input.value!==String(value))input.value=value;input.disabled=disabled;down.disabled=disabled||value<=MIN_LORA_WEIGHT;up.disabled=disabled||value>=MAX_LORA_WEIGHT;}};
 }
-export function createActiveComposition({onWeight,onToggle,onRemove,onMove}) {
+export function createActiveComposition({onWeight,onToggle,onRemove,onOutfit,getChoices=()=>[],getChoice=()=>""}) {
   const root=element("section",{class:"lora-composition","aria-label":"Active Composition"});
   const heading=element("h2",{text:"Active Composition"});
   const count=element("span");const list=element("div",{class:"composition-list"});
@@ -27,19 +27,27 @@ export function createActiveComposition({onWeight,onToggle,onRemove,onMove}) {
         const order=element("span",{class:"composition-order"});const name=element("strong",{text:lora.name,title:lora.name});
         const weight=createWeightEditor(lora.name,value=>onWeight(lora.name,value));
         const toggle=button("",{onClick:()=>onToggle(lora.name)});
-        const up=button("↑",{"aria-label":`${lora.name} move up`,onClick:()=>onMove(lora.name,-1)});
-        const down=button("↓",{"aria-label":`${lora.name} move down`,onClick:()=>onMove(lora.name,1)});
+        const outfit=element("select",{class:"composition-outfit","aria-label":`${lora.name} outfit`});
+        outfit.addEventListener("change",()=>onOutfit(lora.name,outfit.value));
         const remove=button("Remove",{"aria-label":`${lora.name} Remove`,onClick:()=>onRemove(lora.name)});
-        const node=element("div",{class:"composition-row"},[order,name,weight.root,element("div",{class:"composition-actions"},[toggle,up,down,remove])]);
-        row={root:node,order,weight,toggle,up,down,remove};rows.set(lora.name,row);
+        const node=element("div",{class:"composition-row"},[order,name,outfit,weight.root,element("div",{class:"composition-actions"},[toggle,remove])]);
+        row={root:node,order,weight,toggle,outfit,remove};rows.set(lora.name,row);
       }
       const expected=list.children[index];if(expected!==row.root)list.insertBefore(row.root,expected??null);
       row.order.textContent=String(index+1).padStart(2,"0");
       row.root.dataset.enabled=String(lora.enabled!==false);
+      const choices=getChoices(lora.name),choice=getChoice(lora.name);
+      const key=JSON.stringify([choices,choice]);
+      if(row.choiceKey!==key){row.choiceKey=key;
+        row.outfit.replaceChildren(element("option",{value:"",text:choices.length?"衣装なし":"衣装登録なし"}),...choices.map(item=>element("option",{value:item.id,text:item.name||item.id})));
+        if(choice && !choices.some(item=>item.id===choice))row.outfit.append(element("option",{value:choice,text:"保存された衣装"}));
+        row.outfit.value=choice;
+      }
+      row.outfit.disabled=locked||(!choices.length&&!choice);
       row.weight.render(lora.weight,locked);
       row.toggle.querySelector("span").textContent=lora.enabled===false?"Enable":"Disable";
       row.toggle.setAttribute("aria-label",`${lora.name} ${lora.enabled===false?"Enable":"Disable"}`);
-      row.toggle.disabled=row.remove.disabled=locked;row.up.disabled=locked||index===0;row.down.disabled=locked||index===loras.length-1;
+      row.toggle.disabled=row.remove.disabled=locked;
     });
   }};
 }

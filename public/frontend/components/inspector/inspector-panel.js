@@ -1,4 +1,5 @@
 import { element, iconButton, button } from "../primitives.js";
+import {createResultMetadata} from "../library/result-metadata.js";
 import { field, syncValue, syncOptions } from "../settings/dialog.js";
 export function createInspectorPanel({ onClose, onParameters = () => {}, onReuse = () => {}, onResultSeed = () => {} }) {
   let tab = "draft";
@@ -13,13 +14,20 @@ export function createInspectorPanel({ onClose, onParameters = () => {}, onReuse
     input.addEventListener("change",()=>{if(input.reportValidity())onParameters({[key]:type === "select" ? input.value : Number(input.value)});});
     inputs.set(key,input); draft.append(field(label,input));
   }
+  const dimensions = element("div", {class:"rail-dimensions"});
+  for (const [key,label,min,max,step] of [["width","Width",64,2048,8],["height","Height",64,2048,8],["seed","Seed",-1,undefined,1]]) {
+    const input=element("input",{type:"number",min,step,...(max?{max}:{})});
+    input.addEventListener("change",()=>{if(input.reportValidity())onParameters({[key]:Number(input.value)});});
+    inputs.set(key,input); dimensions.append(field(label,input));
+  }
+  draft.append(dimensions,button("Random seed (−1)",{onClick:()=>onParameters({seed:-1})}));
   const draftNote=element("p",{class:"panel-intro"}); draft.prepend(draftNote);
-  const metadata = element("pre",{class:"result-metadata"});
+  const metadata = createResultMetadata(); metadata.root.classList.add("result-metadata");
   const reuse = button("この結果の設定をReuse",{onClick:onReuse});
   const seed = button("ResultのSeedを使う",{onClick:onResultSeed});
-  const result = element("div",{class:"inspector-result"},[element("p",{text:"閲覧・candidate選択だけではCurrent Draftは変わりません。ReuseはPrompt・parameters・LoRAを適用します（Modelは対象外）。",class:"panel-intro"}),metadata,seed,reuse]);
+  const result = element("div",{class:"inspector-result"},[element("p",{text:"閲覧・candidate選択だけではCurrent Draftは変わりません。ReuseはPrompt・parameters・LoRAを適用します（Modelは対象外）。",class:"panel-intro"}),metadata.root,seed,reuse]);
   const root=element("aside",{class:"inspector-panel",id:"studio-inspector","aria-label":"Generation inspector",hidden:""},[
-    element("div",{class:"panel-heading"},[element("h2",{text:"Inspector"}),close]),
+    element("div",{class:"panel-heading"},[element("h2",{text:"制作設定"}),close]),
     element("div",{class:"inspector-tabs"},[draftTab,resultTab]),draft,result]);
   function renderContent(){
     if(!snapshot)return;
@@ -30,16 +38,8 @@ export function createInspectorPanel({ onClose, onParameters = () => {}, onReuse
     syncOptions(inputs.get("scheduler"),snapshot.catalogs.schedulers,snapshot.parameters.scheduler);
     for(const [key,input] of inputs){syncValue(input,snapshot.parameters[key]);input.disabled=view.locked;}
     if (snapshot.currentImage) {
-      const record = snapshot.completed, p = record.settings ?? {};
-      metadata.textContent = [
-        `Seed ${snapshot.currentImage.seed}`, record.runtime?.label,
-        `Model · ${p.checkpointModelName || p.checkpoint || "—"}`,
-        `${p.width ?? "—"} × ${p.height ?? "—"} · ${p.steps ?? "—"} steps`,
-        `Sampler · ${p.samplerName ?? "—"}`, `Scheduler · ${p.scheduler ?? "—"}`, `CFG · ${p.cfgScale ?? "—"}`,
-        "", "Positive Prompt", record.prompt || "—", "", "Negative Prompt", record.negativePrompt || "—", "", "LoRA",
-        ...(record.loras?.length ? record.loras.map((lora) => `${lora.name} · ${lora.weight}${lora.enabled === false ? " · disabled" : ""}`) : ["なし"])
-      ].filter((line) => line !== undefined).join("\n");
-    } else metadata.textContent = "完成画像はまだありません。";
+      metadata.root.hidden=false;metadata.render(snapshot.completed,snapshot.currentImage);
+    } else metadata.root.hidden=true;
     seed.disabled=reuse.disabled=view.locked || !snapshot.currentImage;
   }
   return {root,focus(){close.focus();},render(value,open,projection={locked:!value.ready}){snapshot=value;view=projection;root.hidden=!open;renderContent();}};

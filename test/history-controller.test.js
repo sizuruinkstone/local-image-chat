@@ -154,7 +154,9 @@ test("initial and append loads preserve image cursor paging, cache, ports, and t
   assert.equal(firstPreview.src, "/thumb-1.webp");
   assert.deepEqual(f.calls.modal, [], "list rendering does not request originals");
   await f.elements.historyGrid.children[0].emit("click");
-  assert.deepEqual(f.calls.modal, [["/original-1.png", "History"]]);
+  assert.deepEqual(f.calls.modal, [], "Gallery opens image together with metadata");
+  assert.equal(f.document.body.children[0].className, "detailModal");
+  assert.ok(walk(f.document.body).some(node => node.className === "detailImage" && node.src === "/original-1.png"));
 
   f.responses.push({
     generations: [{ ...generation, images: [generation.images[1], { id: "image-3", thumbnailUrl: "/thumb-3.webp" }] }],
@@ -203,7 +205,7 @@ test("initial and append failures keep cache; empty success renders the unfilter
   assert.equal(f.elements.historyGrid.textContent, "履歴を取得できません: initial failed");
 
   f.responses.push(new Error("append failed"));
-  await f.controller.loadMore();
+  await f.controller.load({ append: true });
   assert.equal(f.controller.getGenerations()[0].images.length, 2);
   assert.equal(f.calls.errors.at(-1), "追加の履歴を取得できません: append failed");
   assert.equal(f.controller.getState().cursor, "image-2");
@@ -225,4 +227,76 @@ test("dispose closes an open detail and removes its document listener", () => {
   f.controller.dispose();
   assert.equal(overlay.removed, true);
   assert.equal(f.documentListeners.get("keydown")?.size, 0);
+});
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+test('latest Gallery filter wins over an older in-flight response and cursor', async () => {
+  const f = fixture();
+  const old = deferred();
+  f.responses.push(old.promise);
+  const initial = f.controller.load();
+  f.responses.push({ generations: [], nextCursor: 'new-cursor', hasMore: true, total: 0 });
+  f.controller.setFilter({ rating: 'nsfw' });
+  await new Promise(resolve => setImmediate(resolve));
+  old.resolve({ generations: [generation], nextCursor: 'old-cursor', hasMore: false, total: 2 });
+  await initial;
+  assert.equal(f.controller.getState().cursor, 'new-cursor');
+  assert.deepEqual(f.controller.getGenerations(), []);
+});
+
+test('reset during append ignores the stale append failure and keeps latest results', async () => {
+  const f = fixture();
+  f.responses.push({ generations: [generation], nextCursor: 'page-2', hasMore: true, total: 4 });
+  await f.controller.load();
+  const old = deferred(); f.responses.push(old.promise);
+  const append = f.controller.loadMore();
+  f.responses.push({ generations: [], nextCursor: null, hasMore: false, total: 0 });
+  f.controller.setFilter({ rating: 'general' });
+  await new Promise(resolve => setImmediate(resolve));
+  old.reject(new Error('stale failure')); await append;
+  assert.deepEqual(f.calls.errors, []);
+  assert.deepEqual(f.controller.getGenerations(), []);
+  assert.equal(f.controller.getState().hasMore, false);
+});
+
+test('Studio recent ignores an older response after a newer filter finishes', async () => {
+  const f = fixture(); const old = deferred();
+  f.responses.push(old.promise);
+  const first = f.controller.loadStudioRecent('all');
+  f.responses.push({ generations: [] });
+  await f.controller.loadStudioRecent('favorite');
+  old.resolve({ generations: [generation] }); await first;
+  assert.deepEqual(f.calls.studio, [[]]);
+});
+
+
+test('Gallery detail next image retains a single dialog and uses its own seed', async () => {
+  const f = fixture();
+  f.controller.render([generation]);
+  f.controller.openDetail(generation, generation.images[0]);
+  const first = f.document.body.children[0];
+  await walk(first).find(node => node.className === 'detailNext').emit('click');
+  assert.equal(first.removed, true);
+  const current = f.document.body.children.at(-1);
+  assert.ok(walk(current).some(node => node.className === 'detailImage' && node.src === '/original-2.png'));
+  assert.ok(walk(current).some(node => node.tagName === 'DD' && node.textContent === '2'));
+  assert.equal(f.documentListeners.get('keydown').size, 1);
+});
+
+test('failed initial Gallery request remains retryable without appending stale pages', async () => {
+  const f = fixture();
+  f.responses.push({ generations: [generation], hasMore: false, nextCursor: null });
+  await f.controller.load();
+  f.responses.push(new Error('refresh failed'));
+  await f.controller.load();
+  assert.equal(f.elements.historyLoadMoreButton.hidden, false);
+  assert.equal(f.elements.historyLoadMoreButton.textContent, '再試行');
+  f.responses.push({ generations: [], hasMore: false, nextCursor: null });
+  await f.controller.loadMore();
+  assert.deepEqual(f.controller.getGenerations(), []);
 });

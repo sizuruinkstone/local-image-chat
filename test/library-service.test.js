@@ -25,3 +25,19 @@ test("Library ignores stale search and incremental responses, deduplicates and r
  const failure=service.more();pending[4].reject(Error("offline"));await failure;assert.equal(service.getSnapshot().error,"offline");
  const retry=service.more();pending[5].resolve(page("other"));await retry;assert.equal(service.getSnapshot().items.length,1);service.dispose();
 });
+test("Library persists and sends the selected content rating", async()=>{
+ const urls=[],values=new Map();
+ const storage={getItem:key=>values.get(key)??null,setItem:(key,value)=>values.set(key,String(value))};
+ const service=createLibraryService({storage,getJson:async url=>{urls.push(url);return {generations:[],total:0,hasMore:false};}});
+ assert.equal(service.getSnapshot().rating,"general");
+ await service.setQuery({rating:"nsfw"});
+ assert.equal(service.getSnapshot().rating,"nsfw");
+ assert.equal(new URL(urls.at(-1),"http://local").searchParams.get("rating"),"nsfw");
+ assert.equal(JSON.parse(values.get("localImageChat.studioLibrary.v1")).rating,"nsfw");
+ service.dispose();
+ const restored=createLibraryService({storage,getJson:async()=>({generations:[],total:0,hasMore:false})});
+ assert.equal(restored.getSnapshot().rating,"nsfw");restored.dispose();
+ values.set("localImageChat.studioLibrary.v1",JSON.stringify({rating:"unrated"}));
+ const legacy=createLibraryService({storage,getJson:async()=>({generations:[],total:0,hasMore:false})});
+ assert.equal(legacy.getSnapshot().rating,"general");legacy.dispose();
+});

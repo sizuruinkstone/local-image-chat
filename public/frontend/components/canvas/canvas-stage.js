@@ -1,7 +1,13 @@
 import { element, icon, button } from "../primitives.js";
 export const CANVAS_STATES = Object.freeze(["empty", "ready", "image", "generating", "error"]);
-export function createCanvasStage({ artwork, onReady, onRetry, onCandidate = () => {} }) {
+export function createCanvasStage({ artwork, onReady, onRetry, onCandidate = () => {}, onOpenImage }) {
   const image = element("img", { class: "artwork", ...(artwork ? { src: artwork } : {}), alt: "", decoding: "async" });
+  if(onOpenImage){
+    image.setAttribute("role","button");image.tabIndex=0;
+    image.setAttribute("aria-label","画像を拡大");image.title="クリックして拡大";
+    image.addEventListener("click",()=>onOpenImage());
+    image.addEventListener("keydown",event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();onOpenImage();}});
+  }
   const media = element("div", { class: "canvas-artwork" }, [image]);
   const headline = element("h1");
   const description = element("p");

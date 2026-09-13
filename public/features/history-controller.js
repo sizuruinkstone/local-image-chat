@@ -94,12 +94,16 @@ export function createHistoryController({
   let cursor = null;
   let hasMore = true;
   let loading = false;
+  let loadRevision = 0;
   const recentHistory = createRecentHistoryService({ getJson, onData: onStudioRecentData, onError: onStudioRecentError });
   let total = 0;
   let filter = { ...DEFAULT_FILTER, tags: [] };
   let sort = "newest";
   let tagQuery = "";
   let initialized = false;
+  let loadMoreObserver = null;
+  let autoLoadFailed = false;
+  let failedAppend = false;
   const listeners = [];
   const activeDetailClosers = new Set();
 
@@ -129,10 +133,21 @@ export function createHistoryController({
       bind(container, "click", changeRating);
     }
     bind(elements.resetGalleryFilterButton, "click", resetFilter);
+    const Observer = document.defaultView?.IntersectionObserver;
+    if (Observer) {
+      loadMoreObserver = new Observer(items => {
+        if (items.some(item => item.isIntersecting) && !autoLoadFailed && !loading && hasMore) void loadMore();
+      }, { rootMargin: "160px" });
+      loadMoreObserver.observe(elements.historyLoadMoreButton);
+    }
   }
 
   function dispose() {
+    loadMoreObserver?.disconnect();
+    loadMoreObserver = null;
+    loadRevision += 1;
     recentHistory.dispose();
+    loading = false;
     for (const closeDetail of [...activeDetailClosers]) closeDetail();
     if (!initialized) return;
     for (const [element, type, listener] of listeners.splice(0)) element.removeEventListener(type, listener);
@@ -140,7 +155,9 @@ export function createHistoryController({
   }
 
   async function load({ append = false } = {}) {
-    if (loading || (append && !hasMore)) return;
+    if (append && (loading || !hasMore)) return;
+    const revision = ++loadRevision;
+    autoLoadFailed = false;
     loading = true;
     elements.historyLoadMoreButton.disabled = true;
     elements.historyLoadMoreButton.textContent = append ? "読み込み中…" : "履歴を読み込み中…";
@@ -152,6 +169,7 @@ export function createHistoryController({
       const [historyData, preferences] = append
         ? [await historyRequest, null]
         : await Promise.all([historyRequest, getJson("/api/history/preferences")]);
+      if (revision !== loadRevision) return;
       if (preferences) onPreferencesChanged(preferences);
       cursor = historyData.nextCursor ?? null;
       hasMore = historyData.hasMore === true;
@@ -161,18 +179,23 @@ export function createHistoryController({
         : (historyData.generations ?? []);
       render(generations);
     } catch (error) {
+      if (revision !== loadRevision) return;
+      autoLoadFailed = true;
+      failedAppend = append;
       if (!append) elements.historyGrid.textContent = `履歴を取得できません: ${error.message}`;
       else toast.error(`追加の履歴を取得できません: ${error.message}`);
     } finally {
-      loading = false;
-      elements.historyLoadMoreButton.disabled = false;
-      elements.historyLoadMoreButton.textContent = `さらに${HISTORY_PAGE_SIZE}件読み込む`;
-      elements.historyLoadMoreButton.hidden = !hasMore;
+      if (revision === loadRevision) {
+        loading = false;
+        elements.historyLoadMoreButton.disabled = false;
+        elements.historyLoadMoreButton.textContent = autoLoadFailed ? "再試行" : `さらに${HISTORY_PAGE_SIZE}件読み込む`;
+        elements.historyLoadMoreButton.hidden = !hasMore && !autoLoadFailed;
+      }
     }
   }
 
   async function loadMore() {
-    await load({ append: true });
+    await load({ append: autoLoadFailed ? failedAppend : true });
   }
 
   async function loadStudioRecent(studioFilter = getStudioHistoryFilter()) {
@@ -207,7 +230,9 @@ export function createHistoryController({
     elements.historyLoadMoreButton.hidden = !hasMore;
     const galleryUsesFavoriteDataset = filter.kind === "favorite";
     const studioUsesFavoriteDataset = getStudioHistoryFilter() === "favorite";
-    if (galleryUsesFavoriteDataset === studioUsesFavoriteDataset) recentHistory.replace(generations);
+    if (galleryUsesFavoriteDataset === studioUsesFavoriteDataset && filter.rating === "all") {
+      recentHistory.replace(generations);
+    }
     else void loadStudioRecent();
     onRendered(generations, entries);
   }
@@ -355,10 +380,15 @@ export function createHistoryController({
     preview.className = "historyCardImage";
     configureThumbnailImage(preview, image, { eager: index < 4 });
     preview.alt = generationTitle(generation);
-    preview.title = "クリックで拡大";
+    preview.title = "画像と生成情報を開く";
+    preview.tabIndex = 0;
+    preview.setAttribute("role", "button");
+    preview.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openDetail(generation, image); }
+    });
     card.addEventListener("click", (event) => {
       if (event.target.closest("button, summary, details, input, a")) return;
-      openImageModal(originalImageUrl(image), generationTitle(generation));
+      openDetail(generation, image);
     });
 
     const body = document.createElement("div");
@@ -492,7 +522,7 @@ export function createHistoryController({
     }
   }
 
-  function openDetail(generation, image) {
+  function openDetail(generation, image, { sequence = [...entries], returnFocus = document.activeElement } = {}) {
     const overlay = document.createElement("div");
     overlay.className = "detailModal";
     overlay.setAttribute("role", "dialog");
@@ -501,14 +531,33 @@ export function createHistoryController({
     const box = document.createElement("div");
     box.className = "detailBox";
     let closed = false;
-    const closeDetail = () => {
+    const closeDetail = (restoreFocus = true) => {
       if (closed) return;
       closed = true;
       document.removeEventListener("keydown", onKey);
       overlay.remove();
       activeDetailClosers.delete(closeDetail);
+      if (restoreFocus && returnFocus?.isConnected) returnFocus.focus?.();
     };
-    const onKey = (event) => { if (event.key === "Escape") closeDetail(); };
+    const move = direction => {
+      const index = sequence.findIndex(entry => entry.image.id === image.id);
+      const next = sequence[index + direction];
+      if (!next || index < 0) return;
+      closeDetail(false);
+      openDetail(next.generation, next.image, { sequence, returnFocus });
+    };
+    const onKey = (event) => {
+      if (event.key === "Escape") { event.preventDefault(); closeDetail(); }
+      if (event.target?.closest?.("input,textarea,select")) return;
+      if (event.key === "ArrowLeft") { event.preventDefault(); move(-1); }
+      if (event.key === "ArrowRight") { event.preventDefault(); move(1); }
+      if (event.key === "Tab") {
+        const controls = [...(overlay.querySelectorAll?.("button:not(:disabled),a[href],summary,[tabindex='0']") ?? [])];
+        const first = controls[0], last = controls.at(-1);
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus?.(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus?.(); }
+      }
+    };
     const header = document.createElement("div");
     header.className = "detailHeader";
     const heading = document.createElement("strong");
@@ -540,6 +589,7 @@ export function createHistoryController({
       dl.append(dt, dd);
     };
     addField("Checkpoint", settings.checkpoint || "Checkpoint記録なし");
+    addField("Runtime", generation.runtime?.label || generation.runtime?.id);
     addField("LoRA", buildLoraDetailNode(document, generation.loras));
     addField("LoRA警告", buildLoraNoticeNode(document, generation.loraNotices));
     addField("Seed", image.seed);
@@ -599,9 +649,25 @@ export function createHistoryController({
     overlay.addEventListener("click", (event) => { if (event.target === overlay) closeDetail(); });
     document.addEventListener("keydown", onKey);
     activeDetailClosers.add(closeDetail);
-    box.append(header, detailImage, dl, copyRow, prompts, footer);
+    const visual = document.createElement("div");
+    visual.className = "detailVisual";
+    visual.append(detailImage);
+    const index = sequence.findIndex(entry => entry.image.id === image.id);
+    for (const [direction, label, className, glyph] of [[-1, "前の画像", "detailPrevious", "‹"], [1, "次の画像", "detailNext", "›"]]) {
+      const button = document.createElement("button");
+      button.type = "button"; button.className = className; button.textContent = glyph;
+      button.setAttribute("aria-label", label);
+      button.disabled = index < 0 || !sequence[index + direction];
+      button.addEventListener("click", () => move(direction));
+      visual.append(button);
+    }
+    const metadata = document.createElement("aside");
+    metadata.className = "detailMetadata";
+    metadata.append(header, dl, copyRow, prompts, footer);
+    box.append(visual, metadata);
     overlay.append(box);
     document.body.append(overlay);
+    close.focus?.();
   }
 
   function createCopyButton(label, className, buildText, titleText = "") {

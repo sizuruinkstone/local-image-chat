@@ -1836,6 +1836,8 @@ function applyCheckpointSetSettings(settings = {}) {
     if (elements[key] && value !== undefined && value !== "") elements[key].value = value;
   }
   syncSamplerLabels();
+  syncGenerationSettingsSummary();
+  studioController.syncOutputStats();
 }
 
 function restoreCheckpointSetLoras(loras = []) {
@@ -2977,7 +2979,13 @@ async function activateCompositionLock(recipe, image) {
   compositionLock = { recipe, image };
   elements.compositionLockStatus.querySelector("span").textContent = `構図・Seed固定中: ${image.seed}`;
   elements.compositionLockStatus.classList.remove("hidden");
-  elements.promptDetails.scrollIntoView({ behavior: "smooth", block: "center" });
+  showView("generate");
+  elements.promptDetails.open = true;
+  setPromptMode(rawPromptOverride ? "raw" : "structured");
+  const promptTarget = rawPromptOverride ? elements.prompt : elements.promptCharacter;
+  promptTarget?.closest("details")?.setAttribute("open", "");
+  elements.promptDetails.scrollIntoView({ behavior: "smooth", block: "start" });
+  promptTarget?.focus({ preventScroll: true });
   return true;
 }
 
@@ -3099,13 +3107,15 @@ function syncGenerationSeedControls() {
 }
 
 function syncGenerationSettingsSummary() {
+  const modelSummary = document.getElementById("glassCheckpointSummary");
+  if (modelSummary) { modelSummary.textContent = elements.checkpointSelect.selectedOptions?.[0]?.textContent || "Checkpointを選択"; modelSummary.title = modelSummary.textContent; }
   const resolution = elements.width.value && elements.height.value
     ? `${elements.width.value}×${elements.height.value}`
     : "--";
   const sampler = elements.samplerPickerValue.textContent || elements.samplerName.value || "--";
   const steps = elements.steps.value || "--";
   const cfg = elements.cfgScale.value || "--";
-  elements.generationSettingsSummary.textContent = `${resolution} · ${sampler} · ${steps} steps · CFG ${cfg}`;
+  elements.generationSettingsSummary.textContent = `${resolution} · ${sampler} · ${elements.scheduler.value || "Automatic"} · ${steps} steps · CFG ${cfg}`;
   elements.generationSettingsSummary.title = elements.generationSettingsSummary.textContent;
   syncResolutionPreset();
   syncGenerationSeedControls();
@@ -3208,7 +3218,21 @@ function renderUsedLoras() {
       renderSelectedLoraSummary();
       renderLoras();
     });
-    weightField.append(weightInput);
+    const weightControls = document.createElement("span");
+    weightControls.className = "usedLoraWeightControls";
+    const stepWeight = (delta, label) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = delta < 0 ? "−" : "+";
+      button.setAttribute("aria-label", name + label);
+      button.addEventListener("click", () => {
+        weightInput.value = clampLoraWeightValue(Number(weightInput.value) + delta).toFixed(2);
+        weightInput.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      return button;
+    };
+    weightControls.append(stepWeight(-0.05, "のWeightを減らす"), weightInput, stepWeight(0.05, "のWeightを増やす"));
+    weightField.append(weightControls);
 
     const toggle = document.createElement("button");
     toggle.type = "button";
@@ -3319,6 +3343,8 @@ function clampLoraWeightValue(value) {
 }
 
 // LoRA・キャラクター・衣装で共通のサムネイル付き選択画面。
+const loraPickerPosition = { folder: "", expanded: [] };
+
 // items は preset-catalog.js が既存のLoRAデータから組み立てたもの。
 async function openPresetPicker({
   title,
@@ -3337,8 +3363,9 @@ async function openPresetPicker({
   let group = "";
   let favoriteOnly = false;
   let mode = modes?.[0]?.value ?? null;
-  let selectedFolder = "";
-  const expandedFolders = new Set();
+  let selectedFolder = folderBrowser ? loraPickerPosition.folder : "";
+  const expandedFolders = new Set(folderBrowser ? loraPickerPosition.expanded : []);
+  if (selectedFolder && !filterItemsByFolder(items, selectedFolder).length) selectedFolder = "";
 
   await openModal({
     title,
@@ -3425,6 +3452,8 @@ async function openPresetPicker({
 
       const renderFolderBrowser = () => {
         if (!folderBrowser) return;
+        loraPickerPosition.folder = selectedFolder;
+        loraPickerPosition.expanded = [...expandedFolders];
         renderLoraFolderTree(folderPane, items, {
           selectedFolder,
           expandedFolders,

@@ -46,10 +46,10 @@ try {
     await page.setViewportSize({ width, height });
     await statePicker.selectOption("image");
     await overflow(`${width}-image`);
-    assert.ok((await page.locator(".canvas-stage").boundingBox()).height > (await page.locator(".prompt-dock").boundingBox()).height);
+    assert.ok((await page.locator(".canvas-stage").boundingBox()).height > 300);
     await page.screenshot({ animations: "disabled", path: path.join(output, `studio-${width}.png`) });
-    await page.getByRole("button", { name: "Inspector", exact: true }).click();
-    await page.getByRole("button", { name: "Close inspector" }).waitFor();
+    if(page.viewportSize().width<=900) await page.getByRole("button", { name: "制作設定", exact: true }).click();
+    await page.locator(".inspector-panel").waitFor();
     await overflow(`${width}-inspector`);
     if ([1440, 390].includes(width)) await page.screenshot({ animations: "disabled", path: path.join(output, `inspector-${width}.png`) });
     if (width < 600) {
@@ -57,7 +57,7 @@ try {
       assert.equal(await page.locator(".inspector-panel").evaluate((node) => node.contains(document.activeElement)), true);
     }
     await page.keyboard.press("Escape");
-    assert.equal(await page.getByRole("button", { name: "Inspector", exact: true }).getAttribute("aria-expanded"), "false");
+    if(width<=900) assert.equal(await page.getByRole("button", { name: "制作設定", exact: true }).getAttribute("aria-expanded"), "false");
     await page.getByRole("button", { name: "Library", exact: true }).click();
     await overflow(`${width}-library`);
     if ([1440, 430].includes(width)) await page.screenshot({ animations: "disabled", path: path.join(output, `library-${width}.png`) });
@@ -86,8 +86,9 @@ try {
   await page.getByRole("button", { name: "Preview generation", exact: true }).click();
   assert.equal(await page.locator(".canvas-stage").getAttribute("data-state"), "generating");
   await page.waitForFunction(() => document.querySelector(".canvas-stage").dataset.state === "image");
-  await page.getByRole("button", { name: "Inspector", exact: true }).click();
+  if(page.viewportSize().width<=900) await page.getByRole("button", { name: "制作設定", exact: true }).click();
   await page.setViewportSize({ width: 390, height: 844 });
+  if(await page.locator(".inspector-trigger").getAttribute("aria-expanded")!=="true") await page.getByRole("button", { name: "制作設定", exact: true }).click();
   await page.waitForFunction(() => document.querySelector(".inspector-panel").getAttribute("aria-modal") === "true");
   await page.setViewportSize({ width: 1920, height: 1080 });
   await page.waitForFunction(() => !document.querySelector(".inspector-panel").hasAttribute("aria-modal"));
@@ -132,7 +133,8 @@ try {
     assert.equal(await page.locator(".prompt-workspace").evaluate((node) => node.open), false);
     await overflow(`${width}-structured-dock`);
     await page.screenshot({ animations: "disabled", path: path.join(output, `prompt-dock-${width}.png`) });
-    await page.getByRole("button", { name: "Negative · 設定済み", exact: true }).click();
+    await page.getByRole("button", { name: /^(Structured|Raw) · 編集$/, exact: true }).click();
+    await page.getByRole("textbox", { name: "Negative Prompt", exact: true }).focus();
     assert.equal(await page.getByRole("textbox", { name: "Negative Prompt", exact: true }).evaluate((node) => node === document.activeElement), true);
   }
   await page.keyboard.press("Escape");

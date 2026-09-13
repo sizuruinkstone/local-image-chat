@@ -6,7 +6,7 @@ import { createActiveComposition } from "./active-composition.js";
 
 export function createLoraBrowser({ workspace }) {
   const state = createLoraBrowserState();
-  let snapshot, view, previousFocus, epoch = 0, catalogKey = "", error = "", panel = "grid";
+  let snapshot, view, previousFocus, epoch = 0, catalogKey = "", error = "", feedback = "", panel = "grid";
   const cards = new Map();
   const search = element("input", { type: "search", placeholder: "名前・path・triggerで探す", "aria-label": "Search LoRA", autocomplete: "off" });
   const close = button("閉じる", { glyph: "close", onClick: () => root.close(), "aria-label": "Close LoRA Browser" });
@@ -28,26 +28,27 @@ export function createLoraBrowser({ workspace }) {
   const compositionTab = button("Composition · 0", { onClick: () => showPanel("composition") });
   function showPanel(value) { panel = value; render(); if (value === "grid") search.focus(); }
   async function act(action) {
-    const started = epoch; error = "";
+    const started = epoch; error = ""; feedback = "";
     try { await action(); } catch (failure) { if (started === epoch) error = failure.message; }
     finally { if (started === epoch) render(); }
   }
   const weight = (name, value) => act(() => workspace.setLoraWeight(name, value));
   const details = createLoraDetails({
-    onAdd: name => act(() => workspace.addLora(name, undefined, { includeTriggers: false })),
+    onAdd: name => act(() => {
+      const before = workspace.getSnapshot().prompt.prompt;
+      workspace.addLora(name, undefined, { insertTriggers: true });
+      const item = snapshot.catalogs.loras.find(item => item.name === name);
+      feedback = workspace.getSnapshot().prompt.prompt !== before ? "Trigger Wordを別枠に登録しました。Final Promptへ自動合成します。" : item?.registry?.triggerWords?.trim() ? "Trigger WordはすでにPromptに含まれています。" : "このLoRAにはTrigger Wordが登録されていません。";
+    }),
     onFavorite: (name, value) => act(() => workspace.setLoraFavorite(name, value)),
-    onWeight: weight, onInsert: (name, field, choice) => act(() => workspace.insertLoraTrigger(name, field, choice)),
-    getPromptChoices: name => workspace.loraPromptChoices(name),
+    onWeight: weight,
     onClose: () => showPanel("grid")
   });
   const composition = createActiveComposition({ onWeight: weight,
     onToggle: name => act(() => workspace.toggleLora(name)), onRemove: name => act(() => workspace.removeLora(name)),
-    onMove: (name, delta) => act(() => {
-      const names = snapshot.loras.map(item => item.name), index = names.indexOf(name), next = index + delta;
-      if (next < 0 || next >= names.length) return;
-      [names[index], names[next]] = [names[next], names[index]];
-      workspace.reorderLoras(names);
-    })
+    getChoices: name => workspace.loraPromptChoices(name),
+    getChoice: name => workspace.loraOutfitChoice(name),
+    onOutfit: (name,choice) => act(() => workspace.setLoraOutfit(name,choice))
   });
   const root = element("dialog", { class: "lora-browser", "aria-label": "LoRA Library" }, [
     element("header", { class: "lora-browser-header" }, [element("div", {}, [element("small", { text: "CREATIVE ASSETS" }), element("h1", { text: "LoRA Library" })]), search, close]),
@@ -84,7 +85,7 @@ export function createLoraBrowser({ workspace }) {
     if (search.value !== browsing.query) search.value = browsing.query;
     favoriteFilter.setAttribute("aria-pressed", String(browsing.favorites));
     count.textContent = `${browsing.total} assets${browsing.query.trim() || browsing.favorites ? " · 全folder" : ""}`;
-    notice.textContent = error || snapshot.catalogState?.error || (snapshot.catalogState?.loading ? "Catalogを読み込み中…" : "");
+    notice.textContent = error || snapshot.catalogState?.error || (snapshot.catalogState?.loading ? "Catalogを読み込み中…" : feedback);
     notice.hidden = !notice.textContent;
     const nextNavigationKey = `${key}:${browsing.folder}`;
     if (nextNavigationKey !== navigationKey) {

@@ -5,8 +5,8 @@
     <!-- viewport-fit=cover: iPhoneのセーフエリアをCSSのenv()で扱う -->
     <!-- interactive-widget: キーボード表示時に表示領域を詰めて操作ボタンを隠しにくくする -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
-    <meta name="theme-color" content="#080808" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#e5edf5" />
+    <meta name="color-scheme" content="light" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -86,6 +86,29 @@
                   <span class="studioColumnIndex">01</span>
                 </div>
 
+                <details class="glassModelSection"><summary><span>MODEL / CHECKPOINT</span><strong id="glassCheckpointSummary">Checkpointを選択</strong></summary>
+                  <div class="settingsRow generationRuntimeRow">
+                    <label for="runtimeSelect">Runtime</label>
+                    <select id="runtimeSelect" disabled>
+                      <option value="reforge">ReForge</option>
+                    </select>
+                    <p id="runtimeStatus" class="hint" aria-live="polite">Runtimeを取得中…</p>
+                  </div>
+                  <div class="settingsRow generationCheckpointRow">
+                    <label for="checkpointSelect">Checkpoint</label>
+                    <div class="checkpointToolbar">
+                      <select id="checkpointSelect" disabled>
+                        <option value="">取得中…</option>
+                      </select>
+                      <button id="refreshCheckpointsButton" class="secondary" type="button" title="Checkpoint一覧を再読み込み">再読込</button>
+                    </div>
+                  </div>
+                  <div class="generationCheckpointStatus">
+                    <p id="checkpointStatus" class="hint" aria-live="polite">Checkpointを取得中…</p>
+                    <span id="checkpointFamilyBadge" class="summaryCount">確認中</span>
+                  </div>
+
+                </details>
                 <div class="studioModeSwitch" role="group" aria-label="生成モード">
                   <button id="txt2imgModeButton" class="modeButton active" type="button" aria-pressed="true">
                     TXT
@@ -306,7 +329,7 @@
                   </div>
                 </details>
 
-                <details id="loraUseDetails" class="genSection studioLoraSection">
+                <details id="loraUseDetails" class="genSection studioLoraSection" open>
                   <summary>
                     <span>LoRA</span>
                     <span id="loraUseCount" class="summaryCount">0件</span>
@@ -321,32 +344,11 @@
                   <p class="hint">トリガーワードのWeightは、対応する構造化プロンプト項目の直下で調整します。所有LoRAの分類・初期値は「設定」画面で管理します。</p>
                 </details>
 
-                <details id="generationSettingsDetails" class="genSection studioGenerationSettings">
+                <details id="generationSettingsDetails" class="genSection studioGenerationSettings" open>
                   <summary>
                     <span>生成設定</span>
                     <span id="generationSettingsSummary" class="generationSettingsSummary">--</span>
                   </summary>
-                  <div class="settingsRow generationRuntimeRow">
-                    <label for="runtimeSelect">Runtime</label>
-                    <select id="runtimeSelect" disabled>
-                      <option value="reforge">ReForge</option>
-                    </select>
-                    <p id="runtimeStatus" class="hint" aria-live="polite">Runtimeを取得中…</p>
-                  </div>
-                  <div class="settingsRow generationCheckpointRow">
-                    <label for="checkpointSelect">Checkpoint</label>
-                    <div class="checkpointToolbar">
-                      <select id="checkpointSelect" disabled>
-                        <option value="">取得中…</option>
-                      </select>
-                      <button id="refreshCheckpointsButton" class="secondary" type="button" title="Checkpoint一覧を再読み込み">再読込</button>
-                    </div>
-                  </div>
-                  <div class="generationCheckpointStatus">
-                    <p id="checkpointStatus" class="hint" aria-live="polite">Checkpointを取得中…</p>
-                    <span id="checkpointFamilyBadge" class="summaryCount">確認中</span>
-                  </div>
-
                   <label class="fullWidthField">タイトル（任意）
                     <input id="generationTitle" type="text" maxlength="160" autocomplete="off" placeholder="空欄なら設定した方式で自動生成" />
                   </label>
@@ -670,8 +672,8 @@
                   </div>
                   <div id="studioRecentList" class="studioRecentList" aria-live="polite"></div>
                 </section>
-                <details class="studioInspectorSection studioMetadataSection" open>
-                  <summary>メタデータ</summary>
+                <details class="studioInspectorSection studioMetadataSection">
+                  <summary>画像情報</summary>
                   <div id="studioMetadataEmpty" class="studioMetadataEmpty">画像を選択すると生成情報を表示します</div>
                   <div id="studioMetadataContent" class="hidden">
                     <input id="studioMetaDetailsTab" class="studioMetaTabInput" type="radio" name="studioMetaTab" checked />

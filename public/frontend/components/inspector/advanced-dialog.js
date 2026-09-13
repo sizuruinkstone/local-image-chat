@@ -1,3 +1,4 @@
+import {createCivitaiMetadata} from "./civitai-metadata.js";
 import {element,button} from "../primitives.js";
 import {createStudioDialog,field,syncValue} from "../settings/dialog.js";
 import {getJson,postJson} from "../../../core/http-client.js";
@@ -42,15 +43,23 @@ export function createAdvancedDialog({workspace,onEdit,onHistory}) {
     await postJson("/api/experiments",{name:experimentName.value,parameter:parameter.value,target:target.value,values:parsed,fixedSeed:snapshot.parameters.seed<0?1:snapshot.parameters.seed,baseRequest:workspace.buildRequest()});await load();
   })});
   panels.get("experiments").append(field("Experiment name",experimentName),parameter,values,target,start,experimentList);
-  const url=element("input",{type:"url",placeholder:"https://civitai.com/models/…","aria-label":"Civitai URL"}),metadata=element("pre",{class:"viewer-metadata"});
+  const url=element("input",{type:"url",placeholder:"https://civitai.com/models/…","aria-label":"Civitai URL"}),metadata=createCivitaiMetadata();
+  let inspectRevision=0,installing=false;
+  url.addEventListener("input",()=>{inspectRevision++;metadata.clear();});
   const folder=element("select",{"aria-label":"Install folder"},[element("option",{value:"",text:"Configured default folder"})]);
   const category=element("select",{"aria-label":"LoRA category"},["character","style","other"].map(value=>element("option",{value,text:value})));
-  const install=button("このLoRAをインストール",{onClick:()=>act(async()=>{await postJson("/api/civitai/install",{url:url.value,category:category.value,folder:folder.value,runtimeId:snapshot.runtime.activeRuntimeId,overwrite:false});await workspace.refreshLoras();notice.textContent="インストール完了。LoRA Browserへ反映しました。";})});
-  panels.get("civitai").append(url,button("Metadataを確認",{onClick:()=>act(async()=>{const result=await postJson("/api/civitai/inspect",{url:url.value});metadata.textContent=JSON.stringify(result.metadata,null,2);})}),metadata,category,folder,install,element("p",{text:"認証は既存backend設定を使用します。上書きインストールは行いません。"}));
+  const authStatus=element("p",{role:"status",class:"civitai-auth-status",text:"サーバーのAPIキー設定を確認中…"});
+  const install=button("このLoRAをインストール",{onClick:()=>act(async()=>{if(installing)return;installing=true;install.disabled=true;try{await postJson("/api/civitai/install",{url:url.value,category:category.value,folder:folder.value,runtimeId:snapshot.runtime.activeRuntimeId,overwrite:false});const refreshed=await workspace.refreshLoras();notice.textContent=refreshed===false?"インストールは完了しましたが一覧を更新できませんでした。LoRA Browserで更新してください。":"インストール完了。LoRA Browserから選択して使えます。ページの再読み込みは不要です。";}finally{installing=false;install.disabled=false;}})});
+  panels.get("civitai").append(authStatus,url,button("Metadataを確認",{onClick:()=>act(async()=>{const revision=++inspectRevision,version=epoch;metadata.clear();const result=await postJson("/api/civitai/inspect",{url:url.value});if(!disposed&&revision===inspectRevision&&version===epoch)metadata.render(result.metadata);})}),metadata.root,field("インストール先の分類",category),field("インストール先フォルダ",folder),install,element("p",{text:"APIキーはサーバーの.env（LOCAL_IMAGE_CHAT_CIVITAI_TOKEN）から自動使用します。ブラウザへの入力・保存は不要です。設定変更後はサーバーを再起動してください。"}));
   async function load(){const version=++epoch,tab=activeTab;clearTimeout(timer);
     try {
       if(tab==="reference"){const runtimeId=snapshot.runtime.activeRuntimeId;const result=await getJson(`/api/reforge/ip-adapter/options?runtimeId=${encodeURIComponent(runtimeId)}`);if(version!==epoch||runtimeId!==workspace.getSnapshot().runtime.activeRuntimeId)return;capability=result;}
-      if(tab==="civitai"){const result=await getJson("/api/civitai/install-folders");if(version!==epoch)return;folder.replaceChildren(element("option",{value:"",text:"Configured default folder"}),...(result.folders??[]).map(value=>element("option",{value,text:value})));}
+      if(tab==="civitai"){
+        authStatus.textContent="サーバーのAPIキー設定を確認中…";
+        try{const auth=await getJson("/api/civitai/auth-status");if(version!==epoch||disposed)return;
+          authStatus.textContent=auth.configured===true?"APIキー設定済み · サーバーの.envから自動使用します":auth.configured===false?"APIキー未設定 · サーバーの.envに設定して再起動してください":"設定状況を確認できません。サーバーを更新・再起動してください。";
+        }catch{if(version!==epoch||disposed)return;authStatus.textContent="設定状況を確認できません。サーバーを更新・再起動してください。";}
+        const result=await getJson("/api/civitai/install-folders");if(version!==epoch)return;folder.replaceChildren(element("option",{value:"",text:"Configured default folder"}),...(result.folders??[]).map(value=>element("option",{value,text:value})));}
       if(tab==="presets"){const result=await getJson("/api/checkpoint-lora-sets");if(version!==epoch)return;sets=result.sets??[];setList.replaceChildren(...sets.map(set=>button(set.name,{onClick:()=>act(()=>workspace.applyCheckpointSet(set))})));}
       if(tab==="experiments"){const result=await getJson("/api/experiments");if(version!==epoch)return;definitions=result.parameters??{};const selected=parameter.value;parameter.replaceChildren(...Object.entries(definitions).map(([value,d])=>element("option",{value,text:d.label})));if(definitions[selected])parameter.value=selected;else if(definitions.steps)parameter.value="steps";experiments=result.experiments??[];
         experimentList.replaceChildren(...experiments.map(item=>element("div",{class:"experiment-row"},[element("strong",{text:item.name||item.id}),element("span",{text:item.status}),button("画像を見る",{onClick:()=>{dialog.close();onHistory(item.id);}}),...(!["done","completed","failed","cancelled"].includes(item.status)?[button("Cancel experiment",{onClick:()=>act(async()=>{await postJson(`/api/experiments/${encodeURIComponent(item.id)}/cancel`,{});await load();})})]:[])])));
