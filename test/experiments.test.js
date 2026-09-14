@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   applyExperimentValue,
+  isActiveExperiment,
   createExperimentService,
   validateExperimentValues
 } from "../src/experiments.js";
@@ -431,4 +432,10 @@ test("A/B比較の投票を保存する", async (t) => {
   const stored = await service.listComparisons({});
   assert.equal(stored.length, 1);
   assert.equal(stored[0].parameter, "loraWeight");
+});
+
+test("terminal runs supersede a stale running aggregate without releasing a live experiment", () => {
+  assert.equal(isActiveExperiment({status:"running",runs:[{status:"done"},{status:"failed"}]}),false);
+  assert.equal(isActiveExperiment({status:"done",runs:[{status:"running"}]}),true);
+  assert.equal(isActiveExperiment({status:"running",runs:[]}),true);
 });

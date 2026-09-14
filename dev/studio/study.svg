@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1024" viewBox="0 0 1440 1024">
+ <defs>
+  <linearGradient id="wall" x2="1" y2=".7"><stop stop-color="#f0eee5"/><stop offset="1" stop-color="#d3d2c7"/></linearGradient>
+  <linearGradient id="floor" x2="0" y2="1"><stop stop-color="#dad7cb"/><stop offset="1" stop-color="#efebe0"/></linearGradient>
+  <linearGradient id="stone" x1="0" x2="1" y1="0" y2=".45"><stop stop-color="#f9f6ec"/><stop offset=".42" stop-color="#e8e3d5"/><stop offset=".8" stop-color="#c6c0ac"/><stop offset="1" stop-color="#b6af9b"/></linearGradient>
+  <linearGradient id="rim" x1="0" x2="1"><stop stop-color="#dbd4c3"/><stop offset=".43" stop-color="#fffbef"/><stop offset="1" stop-color="#d6d0bc"/></linearGradient>
+  <radialGradient id="sphere" cx=".28" cy=".24" r=".8"><stop stop-color="#d99a72"/><stop offset=".48" stop-color="#b96543"/><stop offset=".8" stop-color="#9a4c35"/><stop offset="1" stop-color="#753d2c"/></radialGradient>
+  <linearGradient id="plinth" x2="1" y2="0"><stop stop-color="#e1ddcf"/><stop offset="1" stop-color="#b8b4a5"/></linearGradient>
+  <filter id="soft"><feGaussianBlur stdDeviation="16"/></filter>
+  <filter id="shadow"><feGaussianBlur stdDeviation="5"/></filter>
+  <filter id="grain"><feTurbulence type="fractalNoise" baseFrequency=".65" numOctaves="3" stitchTiles="stitch"/><feColorMatrix type="saturate" values="0"/><feComponentTransfer><feFuncA type="linear" slope=".045"/></feComponentTransfer><feBlend in="SourceGraphic" mode="multiply"/></filter>
+ </defs>
+ <g filter="url(#grain)">
+  <path fill="url(#wall)" d="M0 0h1440v1024H0z"/>
+  <path fill="#f9f6e9" opacity=".7" d="M0 0h380l586 708H316L0 360z"/>
+  <path fill="#bcbdae" opacity=".35" d="M1200 0h240v820l-240-50z"/>
+  <path stroke="#b9bcad" stroke-width="2" d="M1200 0v774"/>
+  <path fill="url(#floor)" d="M0 757h1200l240 63v204H0z"/>
+  <path fill="#9e9d8d" opacity=".19" d="m573 809 596-18 271 135v98H892z" filter="url(#soft)"/>
+  <ellipse fill="#797866" opacity=".23" cx="762" cy="818" rx="315" ry="28" filter="url(#soft)"/>
+  <path fill="#f2efe3" d="m368 781 621-9 98 52-639 13z"/>
+  <path fill="url(#plinth)" d="m448 837 639-13v53l-639 13z"/>
+  <path fill="#d3cebe" d="m368 781 80 56v53l-80-60z"/>
+  <path fill="#7b7868" opacity=".2" d="m512 777 293-27 132 45-359 24z" filter="url(#shadow)"/>
+  <path fill="#b6af9c" d="M510 780V399c0-163 100-246 220-246 118 0 215 76 215 239v380l-144 5V401c0-65-28-105-72-105-45 0-74 40-74 105v376Z"/>
+  <path fill="url(#stone)" d="M461 778V394c0-165 106-258 237-258 133 0 224 99 224 262v380l-132 3V397c0-77-42-124-95-124-58 0-102 50-102 126v379Z"/>
+  <path fill="url(#rim)" d="M463 778V398c0-160 103-259 236-259 54 0 97 14 134 44-35-20-79-29-119-27-125 4-218 105-218 253v369z"/>
+  <path fill="#a8a18e" opacity=".35" d="M596 778V402c0-78 42-129 99-129 24 0 43 7 59 18-14-5-27-5-39-3-51 8-79 52-79 125v365z"/>
+  <ellipse fill="#686150" opacity=".26" cx="1021" cy="837" rx="139" ry="17" filter="url(#shadow)"/>
+  <circle cx="1003" cy="727" r="112" fill="url(#sphere)"/>
+  <path stroke="#fff7e6" stroke-width="1.5" fill="none" opacity=".6" d="M468 772V401c0-158 101-255 230-255"/>
+ </g>
+</svg>

@@ -1,3 +1,4 @@
+import { normalizeSectionProfiles } from "../public/section-profiles.js";
 import crypto from "node:crypto";
 import path from "node:path";
 import { JsonStore } from "./json-store.js";
@@ -72,21 +73,32 @@ export function createHistoryService(dataDir, { limit = 500 } = {}) {
       favoritesOnly = false,
       contentRating = "all",
       limit: requestedLimit = 20,
-      cursor = 0
+      cursor = 0,
+      search = "",
+      sort = "newest"
     } = {}) {
       const data = await store.read();
       const maximum = Math.max(1, Math.min(Number(requestedLimit) || 20, 100));
       const rating = requireHistoryContentRatingFilter(contentRating);
+      if (!["newest", "oldest"].includes(sort)) throw new Error("履歴の並び順が不正です");
+      const terms = String(search).slice(0, 2000).trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
       const entries = [];
       for (const generation of data.generations) {
         const normalized = normalizeStoredGeneration(generation);
         if (rating !== "all" && normalized.contentRating !== rating) continue;
         for (const image of normalized.images) {
           if (favoritesOnly && !image.favorite) continue;
+          if (terms.length) {
+            const text = [normalized.title, normalized.description, normalized.prompt, normalized.negativePrompt,
+              normalized.runtime?.label, normalized.settings?.checkpoint, image.id, image.seed,
+              ...(normalized.loras ?? []).map(lora => lora.name)].join(" ").toLocaleLowerCase();
+            if (!terms.every(term => text.includes(term))) continue;
+          }
           entries.push({ generation: normalized, image });
         }
       }
 
+      if (sort === "oldest") entries.reverse();
       const cursorId = parseCursor(cursor);
       const cursorIndex = cursorId
         ? entries.findIndex(({ image }) => image.id === cursorId)
@@ -535,6 +547,7 @@ function normalizeGeneration(input) {
     description: String(input.description ?? "").trim().slice(0, 4000) || UNTITLED_DESCRIPTION,
     prompt: String(input.prompt ?? "").slice(0, 12000),
     negativePrompt: String(input.negativePrompt ?? "").slice(0, 12000),
+    userNegativePrompt: String(input.userNegativePrompt ?? input.negativePrompt ?? "").slice(0, 12000),
     effectivePrompt: String(input.effectivePrompt ?? "").slice(0, 16000),
     effectiveNegativePrompt: String(input.effectiveNegativePrompt ?? "").slice(0, 16000),
     // 用途別プロンプトとトリガーワード（v2.14以降）。
@@ -543,6 +556,7 @@ function normalizeGeneration(input) {
     rawPromptOverride: input.rawPromptOverride === true,
     rawPrompt: String(input.rawPrompt ?? "").slice(0, 16000),
     appliedTriggerWords: normalizeAppliedTriggerWords(input.appliedTriggerWords),
+    sectionProfiles: normalizeSectionProfiles(input.sectionProfiles),
     ...(runtime ? { runtime } : {}),
     settings: structuredClone(input.settings ?? {}),
     // 実効LoRA一覧（Weightは実際に生成へ送った値、sourceは選択元）。

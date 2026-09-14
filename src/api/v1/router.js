@@ -1,15 +1,19 @@
+import {registerSectionProfileRoutes} from "../../section-profiles.js";
+import {registerSceneRoutes} from "../../scenes.js";
 import express from "express";
 import { registerAssetRoutes } from "./assets.js";
 import { registerCapabilityRoutes } from "./capabilities.js";
 import { registerGenerationRoutes } from "./generations.js";
 import { registerHistoryRoutes } from "./history.js";
 
-export function createV1Router({ generationService, referenceAssets }) {
+export function createV1Router({ generationService, referenceAssets, sectionProfiles, scenes }) {
   const router = express.Router();
   const wrap = (handler) => (request, response, next) => {
     Promise.resolve(handler(request, response)).catch(next);
   };
 
+  if(sectionProfiles)registerSectionProfileRoutes(router,{service:sectionProfiles,wrap});
+  if(scenes)registerSceneRoutes(router,{service:scenes,wrap});
   if (referenceAssets) registerAssetRoutes(router, { referenceAssets, wrap });
   registerCapabilityRoutes(router, { service: generationService, wrap });
   registerGenerationRoutes(router, { service: generationService, wrap });

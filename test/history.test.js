@@ -19,6 +19,7 @@ test("生成レシピを保存し、画像単位の👍から傾向を集計で�
     description: "夜の秋葉原に立つ女の子",
     prompt: "masterpiece, 1girl, black hair, neon lighting, dynamic angle",
     negativePrompt: "low quality",
+    userNegativePrompt: "manual negative",
     settings: { width: 896, height: 1152, samplerName: "Euler a", steps: 25 },
     loras: [{ name: "Characters/test", weight: 0.7 }],
     images: [
@@ -41,6 +42,8 @@ test("生成レシピを保存し、画像単位の👍から傾向を集計で�
   assert.equal(recipe.mode, "inpaint");
   assert.equal(recipe.sourceImageId, "source-image-id");
   assert.equal(recipe.maskImageUrl, "/outputs/mask.png");
+  assert.equal(recipe.negativePrompt, "low quality");
+  assert.equal(recipe.userNegativePrompt, "manual negative");
   assert.equal((await history.list({ favoritesOnly: true }))[0].images.length, 1);
 });
 
@@ -368,4 +371,15 @@ test("古い履歴のcontentRating欠落・不明値はunratedとして読み、
   const unrated = await history.listPage({ contentRating: "unrated" });
   assert.equal(unrated.total, 2);
   assert.deepEqual(unrated.generations.map((item) => item.contentRating), ["unrated", "unrated"]);
+});
+
+test('section profile snapshots survive stored history and image recipe reads',async t=>{
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'lic-section-profile-'));t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+ const history=createHistoryService(dir);
+ const profiles={appearance:{id:'old-id',name:'Summer',text:'white dress, summer hat',enabled:true,disabledTriggerKeys:['summer hat']}};
+ const normalized={appearance:{...profiles.appearance,contentRating:'general'}};
+ const record=await history.addGeneration({prompt:'white dress',sectionProfiles:profiles,images:[{filename:'one.png',imageUrl:'/outputs/one.png',seed:1}]});
+ assert.deepEqual(record.sectionProfiles,normalized);
+ const fresh=createHistoryService(dir);const result=await fresh.getRecipe(record.images[0].id);
+ assert.deepEqual(result.sectionProfiles,normalized);
 });

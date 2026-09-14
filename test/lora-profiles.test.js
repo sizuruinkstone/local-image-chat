@@ -6,6 +6,7 @@ import {
   findProfileForLora,
   splitCharacterTriggerWords
 } from "../public/lora-profiles.js";
+import { listLoraOutfitChoices } from "../public/lora-outfit-selection.js";
 
 test("Civitai経由のLoRAをファイル名に依存せずmodelIdから衣装プロフィールへ接続する", () => {
   const profile = findProfileForLora({
@@ -66,6 +67,59 @@ test("手動配置したシャニマス複合LoRAを28キャラ＋2衣装プロ�
   assert.equal(profile?.presets.find((preset) => preset.id === "fuyuko")?.triggerWords,
     "shanimas, fuyuko, 1girl, solo");
   assert.equal(profile?.addons.find((addon) => addon.id === "cosaaa")?.triggerWords, "cosaaa");
+});
+
+test("エンドフィールドOperators Collection v3を31キャラのキャラクター選択へ接続する", () => {
+  const profile = findProfileForLora({
+    name: "Anima/Character/Game/anima-base-1-arknights-endfield-v31.safetensors",
+    displayName: "anima-base-1-arknights-endfield-v31",
+    registry: {
+      modelId: 2425904,
+      versionId: 3049218
+    }
+  });
+
+  assert.equal(profile?.id, "arknights-endfield-operators-anima-v3");
+  assert.equal(profile?.category, "character");
+  assert.equal(profile?.presets.length, 32, "キャラ31件＋キャラ指定なし");
+  assert.deepEqual(profile?.presets.slice(1).map((preset) => preset.triggerWords), [
+    "female endministrator \\(arknights\\)",
+    "male endministrator \\(arknights\\)",
+    "perlica \\(arknights\\)",
+    "chen qianyu \\(arknights\\)",
+    "akekuri \\(arknights\\)",
+    "alesh \\(arknights\\)",
+    "antal \\(arknights\\)",
+    "arclight \\(arknights\\)",
+    "ardelia \\(arknights\\)",
+    "avywenna \\(arknights\\)",
+    "catcher \\(arknights\\)",
+    "da pan \\(arknights\\)",
+    "estella \\(arknights\\)",
+    "fluorite \\(arknights\\)",
+    "gilberta \\(arknights\\)",
+    "laevatain \\(arknights\\)",
+    "last rite \\(arknights\\)",
+    "lifeng \\(arknights\\)",
+    "snowshine \\(arknights\\)",
+    "wulfgard \\(arknights\\)",
+    "xaihi \\(arknights\\)",
+    "yvonne \\(arknights\\)",
+    "mi fu \\(arknights\\)",
+    "rossi \\(arknights\\)",
+    "tangtang \\(arknights\\)",
+    "zhuang fangyi \\(arknights\\)",
+    "arcane \\(arknights\\)",
+    "camille \\(arknights\\)",
+    "feranmut proxy \\(arknights\\)",
+    "ardashir \\(arknights\\)",
+    "nefarith \\(arknights\\)"
+  ]);
+  assert.equal(profile?.presets.some((preset) => /pogranichnik|ember/i.test(preset.triggerWords)), false);
+  const compositionChoices = listLoraOutfitChoices(profile);
+  assert.equal(compositionChoices.length, 31, "新UIのComposition欄にはキャラ31件を出す");
+  assert.equal(compositionChoices.find((choice) => choice.name.includes("イヴォンヌ"))?.prompt,
+    "yvonne \\(arknights\\)");
 });
 
 test("手動配置した周防パトラLoRAを2衣装プロフィールへ接続する", () => {

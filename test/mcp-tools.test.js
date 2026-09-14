@@ -17,7 +17,7 @@ const ONE_PIXEL_PNG = Buffer.from(
   "base64"
 );
 
-test("MCP Serverは9つのToolだけを登録し、descriptionとschemaを公開する", () => {
+test("MCP Serverは13個のToolを登録し、descriptionとschemaを公開する", () => {
   const { server } = makeServer();
   const registered = server._registeredTools;
   assert.deepEqual(Object.keys(registered), MCP_TOOL_NAMES);

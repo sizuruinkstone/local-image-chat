@@ -64,26 +64,29 @@ test("v3.0のバージョン契約は4箇所で一致する", async () => {
 test("設定画面は静的版とサーバー版の不一致を再起動案内へ表示する", async () => {
   const html = await fs.readFile("public/index.html", "utf8");
   const app = await fs.readFile("public/app.js", "utf8");
+  const update = await fs.readFile("public/features/settings-update.js", "utf8");
 
   assert.equal((html.match(/id="versionContractStatus"/g) ?? []).length, 1);
   assert.match(html, /id="versionContractStatus"[^>]*aria-live="polite"/);
-  assert.match(app, /async function loadVersionContract\(serverVersion, runtime\)/);
-  assert.match(app, /loadVersionContract\(version, runtime\)/);
-  assert.match(app, /fetch\("\/version\.json",\s*\{\s*cache:\s*"no-cache"\s*\}\)/);
-  assert.match(app, /diskVersion === runtimeVersion/);
-  assert.match(app, /更新を反映するにはサーバーを再起動してください/);
+  assert.match(update, /async function loadVersionContract\(serverVersion, runtime\)/);
+  assert.match(app, /settingsUpdate\.loadVersionContract\(version, runtime\)/);
+  assert.match(update, /fetchImpl\("\/version\.json",\s*\{\s*cache:\s*"no-cache"\s*\}\)/);
+  assert.match(update, /diskVersion === runtimeVersion/);
+  assert.match(update, /更新を反映するにはサーバーを再起動してください/);
   assert.match(app, /function describeRuntime\(runtime\)/);
   assert.match(app, /PID \$\{pid\}/);
   assert.match(app, /起動 \$\{startedAt\}/);
   assert.match(app, /runtime\.binding\?\.host/);
   assert.match(app, /Number\.isFinite\(date\.getTime\(\)\)/);
   assert.match(app, /if \(!runtime \|\| typeof runtime !== "object"\) return ""/);
-  assert.match(app, /catch \{[\s\S]*?画面バージョンを確認できません。/);
+  assert.match(update, /catch \{[\s\S]*?画面バージョンを確認できません。/);
 });
 
 test("画像比較の導線は既存候補Stateと比較表示を再利用する", async () => {
   const html = await fs.readFile("public/index.html", "utf8");
   const app = await fs.readFile("public/app.js", "utf8");
+  const historyController = await fs.readFile("public/features/history-controller.js", "utf8");
+  const comparisonController = await fs.readFile("public/features/comparison-controller.js", "utf8");
   const css = await fs.readFile("public/style.css", "utf8");
 
   for (const id of [
@@ -97,22 +100,22 @@ test("画像比較の導線は既存候補Stateと比較表示を再利用する
   assert.match(html, /id="studioCompareButton"[^>]*>比較に追加<\/button>/);
   assert.match(html, /id="imageCompareMessage"[^>]*>比較する画像がありません<\/p>/);
 
-  assert.match(app, /const compareSelection = new Map\(\)/);
-  assert.match(app, /function toggleCompareSelection\([\s\S]*?compareSelection\.size >= 4/);
-  assert.match(app, /function compareCurrentSelection\([\s\S]*?void openComparison\(entries\)/);
-  assert.match(app, /async function openComparison\([\s\S]*?openCompareView\(\{/);
-  assert.match(app, /function renderCompareTray\([\s\S]*?entries\.slice\(0, 4\)/);
-  const compareTray = app.match(/function renderCompareTray\([\s\S]*?\n\}\n\nfunction renderImageCompareEntry/)?.[0] ?? "";
+  assert.match(comparisonController, /const selection = new Map\(\)/);
+  assert.match(comparisonController, /function toggle\([\s\S]*?selection\.size >= 4/);
+  assert.match(comparisonController, /function compareSelection\([\s\S]*?void openEntries\(entries\)/);
+  assert.match(comparisonController, /async function openEntries\([\s\S]*?openCompareViewFn\(\{/);
+  assert.match(comparisonController, /function renderTray\([\s\S]*?for \(const \[index, entry\] of entries\.entries\(\)\)/);
+  const compareTray = comparisonController.match(/function renderTray\([\s\S]*?(?=\n  function renderEntry)/)?.[0] ?? "";
   assert.match(compareTray, /const title = generationTitle\(entry\.generation\)/);
   assert.doesNotMatch(compareTray, /entry\.generation\?\.description/);
-  assert.match(app, /function renderImageCompareEntry\([\s\S]*?比較する画像がありません[\s\S]*?あと1枚追加すると比較できます/);
-  assert.match(app, /elements\.compareTrayOpenButton\.disabled = entries\.length < 2/);
-  assert.match(app, /elements\.imageCompareStartButton\.classList\.toggle\("hidden", count < 2\)/);
-  assert.match(app, /compareSelection\.clear\(\)/);
+  assert.match(comparisonController, /function renderEntry\([\s\S]*?比較する画像がありません[\s\S]*?あと1枚追加すると比較できます/);
+  assert.match(comparisonController, /elements\.compareTrayOpenButton\.disabled = entries\.length < 2/);
+  assert.match(comparisonController, /elements\.imageCompareStartButton\.classList\.toggle\("hidden", count < 2\)/);
+  assert.match(comparisonController, /selection\.clear\(\)/);
 
-  const card = app.match(/function createHistoryCard\([\s\S]*?\n\}/)?.[0] ?? "";
-  assert.match(card, /card\.addEventListener\("click",[\s\S]*?openImageModal/);
-  assert.match(card, /compare\.addEventListener\("click",[\s\S]*?toggleCompareSelection/);
+  const card = historyController.match(/function createCard\([\s\S]*?(?=\n  async function updateContentRating)/)?.[0] ?? "";
+  assert.match(card, /card\.addEventListener\("click",[\s\S]*?openDetail/);
+  assert.match(card, /compare\.addEventListener\("click",[\s\S]*?onToggleCompare/);
   assert.match(css, /\.navBadge\s*\{/);
   assert.match(css, /\.compareTrayItems\s*\{[\s\S]*?grid-template-columns:\s*repeat\(4/);
 });
@@ -120,6 +123,7 @@ test("画像比較の導線は既存候補Stateと比較表示を再利用する
 test("一般カテゴリの画像保存場所はplan確認後だけ移行を予約できる", async () => {
   const html = await fs.readFile("public/index.html", "utf8");
   const app = await fs.readFile("public/app.js", "utf8");
+  const storage = await fs.readFile("public/features/settings-storage.js", "utf8");
 
   assert.equal((html.match(/id="storageSettingsDetails"/g) ?? []).length, 1);
   for (const id of [
@@ -131,18 +135,40 @@ test("一般カテゴリの画像保存場所はplan確認後だけ移行を予�
   }
   assert.match(html, /id="storageStatus"[^>]*aria-live="polite"/);
   assert.match(html, /id="storagePlanSummary"[^>]*aria-live="polite"/);
-  assert.match(app, /async function loadStorageSettings\(\)/);
-  assert.match(app, /postJson\("\/api\/storage\/plan"/);
-  assert.match(app, /patchJson\("\/api\/storage\/settings"/);
-  assert.match(app, /confirmModal\(\s*"次回サーバー起動時に/);
-  assert.match(app, /storageMigrationPlan = null/);
-  assert.match(app, /入力を変更しました。もう一度「変更内容を確認」してください。/);
-  assert.match(app, /!storageMigrationPlan\?\.valid/);
-  assert.match(app, /settings\.source === "env"/);
-  assert.match(app, /LOCAL_IMAGE_CHAT_OUTPUT_DIRを変更して再起動してください/);
-  assert.match(app, /保存先設定の取得失敗で、他の設定画面の初期化を止めない/);
+  assert.match(app, /import \{ createStorageSettings \} from "\.\/features\/settings-storage\.js"/);
+  assert.match(app, /import \{ createAiShare \} from "\.\/features\/ai-share\.js"/);
+  assert.match(app, /const storageSettings = createStorageSettings\(\{/);
+  assert.match(app, /const aiShare = createAiShare\(\{/);
+  assert.match(app, /const \{ load: loadStorageSettings \} = storageSettings/);
+  assert.match(app, /const controllerInitOrder = \[[\s\S]*?storageSettings[\s\S]*?\];/);
+  assert.doesNotMatch(app, /async function loadStorageSettings\(\)/);
+  assert.doesNotMatch(app, /storageMigrationPlan|planStorageMigration|reserveStorageMigration|cancelStorageMigration/);
+  assert.match(storage, /postJson\("\/api\/storage\/plan"/);
+  assert.match(storage, /patchJson\("\/api\/storage\/settings"/);
+  assert.match(storage, /confirmModal\(\s*"次回サーバー起動時に/);
+  assert.match(storage, /storageMigrationPlan = null/);
+  assert.match(storage, /入力を変更しました。もう一度「変更内容を確認」してください。/);
+  assert.match(storage, /!storageMigrationPlan\?\.valid/);
+  assert.match(storage, /settings\.source === "env"/);
+  assert.match(storage, /LOCAL_IMAGE_CHAT_OUTPUT_DIRを変更して再起動してください/);
+  assert.match(storage, /保存先設定の取得失敗で、他の設定画面の初期化を止めない/);
   assert.match(app, /loadShareState\(\), loadSamplerOptions\(\), loadStorageSettings\(\)/);
-  assert.match(app, /旧保存先は削除せず残します/);
+  assert.match(storage, /旧保存先は削除せず残します/);
+});
+
+test("AI共有とGrokテンプレートは専用controllerへ接続する", async () => {
+  const app = await fs.readFile("public/app.js", "utf8");
+  const loraLibrary = await fs.readFile("public/features/lora-library.js", "utf8");
+  const aiShare = await fs.readFile("public/features/ai-share.js", "utf8");
+  assert.match(app, /createAiShare\(\{[\s\S]*?copyGrokShareButton: elements\.copyGrokShareButton[\s\S]*?grokTemplateStatus: elements\.grokTemplateStatus/);
+  assert.match(app, /getManualTriggerWords: \(\) => Object\.fromEntries\(loraTriggers\)/);
+  assert.match(app, /const \{ loadShareState, loadPromptTemplate, scheduleShareCsvSync \} = aiShare/);
+  assert.match(app, /const controllerInitOrder = \[[\s\S]*?aiShare[\s\S]*?\];/);
+  assert.match(app, /scheduleShare: scheduleShareCsvSync/);
+  assert.match(app, /function publishLoraCatalog\(\)[\s\S]*?scheduleShareCsvSync\(\)/);
+  assert.match(loraLibrary, /controls\.scheduleShare\?\.\(\)/);
+  assert.doesNotMatch(app, /function (?:renderShareStatus|updateShareCsv|copyGrokShare|syncShareCsvQuietly|savePromptTemplate)\(/);
+  assert.match(aiShare, /const SHARE_SYNC_DEBOUNCE = 1500/);
 });
 
 const SAMPLERS = ["DPM++ 2M SDE", "DPM++ 2M", "Euler a", "DDIM", "UniPC"];
@@ -307,9 +333,11 @@ test("ギャラリーの新旧順は取得順を同時刻の安定順として�
 test("ギャラリーは画像を主役にし、詳細・操作・比較を既存処理へ接続する", async () => {
   const html = await fs.readFile("public/index.html", "utf8");
   const app = await fs.readFile("public/app.js", "utf8");
+  const historyController = await fs.readFile("public/features/history-controller.js", "utf8");
+  const comparisonController = await fs.readFile("public/features/comparison-controller.js", "utf8");
   const css = await fs.readFile("public/style.css", "utf8");
   const gallery = html.match(/<section id="viewGallery"[\s\S]*?(?=<section id="viewCompare")/)?.[0] ?? "";
-  const card = app.match(/function createHistoryCard\([\s\S]*?\n\}/)?.[0] ?? "";
+  const card = historyController.match(/function createCard\([\s\S]*?(?=\n  async function updateContentRating)/)?.[0] ?? "";
 
   assert.match(gallery, /class="[^"]*galleryPage/);
   assert.match(gallery, /id="galleryToolbar"|class="galleryToolbar"/);
@@ -328,24 +356,24 @@ test("ギャラリーは画像を主役にし、詳細・操作・比較を既�
   assert.match(css, /@media \(max-width: 420px\)[\s\S]*?\.historyGrid\s*\{\s*grid-template-columns:\s*minmax\(0, 1fr\);?\s*\}/);
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.galleryToolbar\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) minmax\(0, 1fr\)/);
 
-  assert.match(app, /filterGalleryEntries\(allEntries, galleryFilter\)/);
-  assert.match(app, /sortGalleryEntries\(filterGalleryEntries\(allEntries, galleryFilter\), gallerySort\)/);
-  assert.match(app, /collectPromptTags\(entries\)/);
-  assert.match(app, /elements\.galleryFilterDialog\.showModal\(\)/);
-  assert.match(app, /configureThumbnailImage\(preview, image/);
-  assert.match(card, /card\.addEventListener\("click"[\s\S]*?openImageModal/);
+  assert.match(historyController, /filterGalleryEntries\(allEntries, filter\)/);
+  assert.match(historyController, /sortGalleryEntries\(filterGalleryEntries\(allEntries, filter\), sort\)/);
+  assert.match(historyController, /collectPromptTags\(allEntries\)/);
+  assert.match(historyController, /elements\.galleryFilterDialog\.showModal\(\)/);
+  assert.match(historyController, /configureThumbnailImage\(preview, image/);
+  assert.match(card, /card\.addEventListener\("click"[\s\S]*?openDetail/);
   assert.match(card, /historyCardMenu/);
-  assert.match(card, /activateCompositionLock\(generation, image\)/);
-  assert.match(card, /openHistoryDetail\(generation, image\)/);
-  assert.match(card, /deleteHistoryImage\(image, button\)/);
-  assert.match(card, /toggleCompareSelection\(image, generation\)/);
-  const detail = app.match(/function openHistoryDetail\([\s\S]*?\n\}/)?.[0] ?? "";
+  assert.match(card, /onLoadRecipe\(generation, image\)/);
+  assert.match(card, /openDetail\(generation, image\)/);
+  assert.match(card, /deleteImage\(image, button\)/);
+  assert.match(card, /onToggleCompare\(image, generation/);
+  const detail = historyController.match(/function openDetail\([\s\S]*?(?=\n  function createCopyButton)/)?.[0] ?? "";
   assert.match(detail, /className\s*=\s*"detailImage"/);
   assert.match(detail, /detailImage\.src\s*=\s*originalImageUrl\(image\)/);
   assert.match(detail, /detailImage\.alt\s*=\s*generationTitle\(generation\)/);
   assert.match(detail, /openImageModal\(detailImage\.src, detailImage\.alt\)/);
-  assert.match(app, /function setGalleryCompareMode\(active\)/);
-  assert.match(app, /compareSelection\.size/);
+  assert.match(comparisonController, /function setGalleryMode\(active\)/);
+  assert.match(comparisonController, /selection\.size/);
 });
 
 test("絞り込み条件を1行で説明する", () => {
@@ -358,15 +386,18 @@ test("絞り込み条件を1行で説明する", () => {
 test("生成分類UIとギャラリー分類UIはHistory APIへ明示値を接続する", async () => {
   const html = await fs.readFile("public/index.html", "utf8");
   const app = await fs.readFile("public/app.js", "utf8");
+  const historyController = await fs.readFile("public/features/history-controller.js", "utf8");
+  const preferences = await fs.readFile("public/core/preferences.js", "utf8");
   assert.match(html, /id="contentRatingGeneral"[^>]*value="general"[^>]*checked/);
   assert.match(html, /id="contentRatingNsfw"[^>]*value="nsfw"/);
   assert.match(html, /data-gallery-rating="general"/);
   assert.match(html, /data-gallery-rating="nsfw"/);
   assert.match(html, /data-gallery-rating="unrated"/);
   assert.match(app, /contentRating:\s*selectedContentRating\(\)/);
-  assert.match(app, /localImageChat\.contentRating/);
-  assert.match(app, /rating=\$\{encodeURIComponent\(galleryFilter\.rating\)\}/);
-  assert.match(app, /\/content-rating`, \{ contentRating \}/);
+  assert.match(app, /PREFERENCE_KEYS\.contentRating/);
+  assert.match(preferences, /contentRating:\s*"localImageChat\.contentRating"/);
+  assert.match(historyController, /rating=\$\{encodeURIComponent\(filter\.rating\)\}/);
+  assert.match(historyController, /\/content-rating`, \{ contentRating \}/);
 });
 
 test("生成画面はプロンプト・キャンバス・履歴の3カラム構造を持つ", async () => {
@@ -378,7 +409,9 @@ test("生成画面はプロンプト・キャンバス・履歴の3カラム構�
   assert.match(html, /class="panel studioInspector"/);
   assert.match(html, /id="studioRecentList"/);
   assert.match(html, /id="studioMetadataContent"/);
-  assert.match(app, /document\.body\.dataset\.currentView = currentView/);
+  const navigation = await fs.readFile("public/features/navigation.js", "utf8");
+  assert.match(navigation, /body\.dataset\.currentView = currentView/);
+  assert.match(app, /body: document\.body/);
 });
 
 test("v3生成画面へ旧ヘッダー・縦ナビ・生成設定を同時レンダリングしない", async () => {
@@ -416,10 +449,13 @@ test("分割プロンプト7項目とLoRAを左カラムのアコーディオン
   assert.doesNotMatch(generationLoraMarkup, /Civitai URLから追加/);
 
   const app = await fs.readFile("public/app.js", "utf8");
-  assert.match(app, /elements\.addLoraButton\.addEventListener\("click", \(\) => void openLoraPicker\(\)\)/);
-  assert.match(app, /elements\.openLoraManagementButton\.addEventListener\("click"[\s\S]*?activateSettingsCategory\("lora",\s*\{\s*targetId:\s*"settingsLoraDetails",\s*focus:\s*true\s*\}\)/);
-  assert.match(app, /async function openLoraPicker\(\)/);
-  assert.match(app, /resolveThumbnail: loraThumbnail/);
+  const loraLibrary = await fs.readFile("public/features/lora-library.js", "utf8");
+  const settingsNavigation = await fs.readFile("public/features/settings-navigation.js", "utf8");
+  assert.match(app, /listen\(elements\.addLoraButton, "click", \(\) => void loraLibrary\.openPicker\(\)\)/);
+  assert.match(app, /listen\(elements\.openLoraManagementButton, "click"[\s\S]*?settingsNavigation\.activate\("lora",\s*\{\s*targetId:\s*"settingsLoraDetails",\s*focus:\s*true\s*\}\)/);
+  assert.match(settingsNavigation, /function activate\(categoryId/);
+  assert.match(loraLibrary, /async function openPicker\(\)/);
+  assert.match(loraLibrary, /buildLoraCatalog\(items, \{ resolveThumbnail: resolveLoraPreviewUrl \}\)/);
 });
 
 test("生成バーはモバイル固定・safe-area対応で、軽量アニメーションを抑制できる", async () => {
@@ -435,31 +471,33 @@ test("生成バーはモバイル固定・safe-area対応で、軽量アニメ�
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
 });
 
-test("v3生成画面はviewport全幅・中央優先の3カラムを使う", async () => {
+test("Glass生成画面は画像優先の2領域と開閉metadataを使う", async () => {
   const html = await fs.readFile("public/index.html", "utf8");
   const css = await fs.readFile("public/style.css", "utf8");
   const app = await fs.readFile("public/app.js", "utf8");
+  const studio = await fs.readFile("public/features/studio-controller.js", "utf8");
 
   assert.match(css, /\.shell\s*\{[^}]*width:\s*100%;[^}]*max-width:\s*none/);
   assert.match(css, /\.studioWorkspace\s*\{[\s\S]*?minmax\(340px,\s*350px\)[\s\S]*?minmax\(0,\s*1fr\)[\s\S]*?minmax\(280px,\s*300px\)/);
   assert.match(css, /body\s*\{[\s\S]*?font-size:\s*14px/);
   assert.match(css, /\.promptFieldBlock textarea\s*\{[\s\S]*?min-height:\s*84px/);
   assert.match(css, /\.studioRecentCard img\s*\{[\s\S]*?width:\s*76px;[\s\S]*?height:\s*88px/);
-  assert.match(html, /<details class="studioInspectorSection studioMetadataSection" open>/);
+  assert.match(html, /<details class="studioInspectorSection studioMetadataSection">/);
   assert.match(html, /id="studioMetaDetailsTab"[\s\S]*?id="studioMetaParametersTab"[\s\S]*?id="studioMetaPromptTab"/);
-  assert.match(app, /setStudioInspection\(generation, image, \{ showOnCanvas: true \}\)/);
-  assert.match(app, /if \(showOnCanvas\)[\s\S]*?studioMainImage\.src = originalImageUrl\(image\)/);
+  assert.match(studio, /inspect\(generation, image, \{ showOnCanvas: true \}\)/);
+  assert.match(studio, /if \(showOnCanvas\)[\s\S]*?studioMainImage\.src = originalImageUrl\(image\)/);
 });
 
 test("生成画面のメイン画像は残余行を使い、操作・Seed・バリエーションを統合する", async () => {
   const html = await fs.readFile("public/index.html", "utf8");
   const app = await fs.readFile("public/app.js", "utf8");
+  const studio = await fs.readFile("public/features/studio-controller.js", "utf8");
   const css = await fs.readFile("public/style.css", "utf8");
 
   assert.doesNotMatch(html, /studioMainDownload/);
   assert.doesNotMatch(app, /studioMainDownload/);
   assert.match(html, /id="downloadLink" class="downloadButton" download/);
-  assert.match(app, /elements\.downloadLink\.href = originalImageUrl\(finished\)/);
+  assert.match(studio, /elements\.downloadLink\.href = originalImageUrl\(image\)/);
   assert.match(
     html,
     /id="studioMainImage"[\s\S]*?class="studioMainActions"[\s\S]*?id="candidateSection"/
@@ -487,35 +525,37 @@ test("生成画面のメイン画像は残余行を使い、操作・Seed・バ�
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.studioMainActions > \* \{\s*flex:\s*1 1 calc\(50% - 6px\);/);
   assert.doesNotMatch(css, /grid-template-columns:\s*repeat\(7, minmax\(0, 1fr\)/);
   assert.match(css, /block-size:\s*clamp\(128px, 18dvh, 164px\)/);
-  assert.match(app, /function syncStudioOutputStats\([\s\S]*?elements\.studioSeed\.textContent/);
-  assert.match(app, /elements\.finishButton\.title = finishLabel/);
+  assert.match(studio, /function syncOutputStats\([\s\S]*?elements\.studioSeed\.textContent/);
+  assert.match(studio, /elements\.finishButton\.title = finishLabel/);
 });
 
 test("中央メイン画像は既存モーダルをクリック・Enter・Spaceで開く", async () => {
   const html = await fs.readFile("public/index.html", "utf8");
   const app = await fs.readFile("public/app.js", "utf8");
+  const studio = await fs.readFile("public/features/studio-controller.js", "utf8");
+  const imageModal = await fs.readFile("public/features/image-modal.js", "utf8");
   const css = await fs.readFile("public/style.css", "utf8");
 
   assert.match(
     html,
     /<img\s+id="studioMainImage"[\s\S]*?tabindex="0"[\s\S]*?role="button"[\s\S]*?aria-label="選択画像を拡大"/
   );
-  assert.match(app, /elements\.studioMainImage\.addEventListener\("click", openStudioInspectionImage\)/);
-  assert.match(app, /elements\.studioMainImage\.addEventListener\("keydown", handleStudioMainImageKey\)/);
+  assert.match(studio, /\[elements\.studioMainImage, "click", openInspectionImage\]/);
+  assert.match(studio, /\[elements\.studioMainImage, "keydown", handleMainImageKey\]/);
   assert.match(
-    app,
-    /function handleStudioMainImageKey\(event\)\s*\{[\s\S]*?event\.key !== "Enter"[\s\S]*?isSpace[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.repeat[\s\S]*?openStudioInspectionImage\(\)/
+    studio,
+    /function handleMainImageKey\(event\)\s*\{[\s\S]*?event\.key !== "Enter"[\s\S]*?isSpace[\s\S]*?event\.preventDefault\(\)[\s\S]*?!event\.repeat[\s\S]*?openInspectionImage\(\)/
   );
   assert.match(
-    app,
-    /function openStudioInspectionImage\(\)[\s\S]*?originalImageUrl\(image\)[\s\S]*?generationTitle\(generation\)[\s\S]*?openImageModal/
+    studio,
+    /function openInspectionImage\(\)[\s\S]*?openImageModal\(originalImageUrl\(inspection\.image\), generationTitle\(inspection\.generation\)\)/
   );
   assert.doesNotMatch(html, /id="studioMainZoomButton"/);
   assert.doesNotMatch(app, /studioMainZoomButton/);
   assert.doesNotMatch(css, /studioMainZoomButton/);
-  assert.match(app, /overlay\.addEventListener\("click", \(event\) => \{[\s\S]*?event\.target === overlay[\s\S]*?closeImageModal\(\)/);
-  assert.match(app, /function handleImageModalKey\(event\)\s*\{\s*if \(event\.key === "Escape"\) closeImageModal\(\);/);
-  assert.match(app, /image\.addEventListener\("click", \(\) => selectCandidate\(candidate, card\)\)/);
+  assert.match(imageModal, /overlay\.addEventListener\("click", \(event\) => \{[\s\S]*?event\.target === overlay[\s\S]*?close\(\)/);
+  assert.match(imageModal, /function handleKeydown\(event\)\s*\{\s*if \(event\.key === "Escape"\) close\(\);/);
+  assert.match(studio, /image\.addEventListener\("click", \(\) => selectCandidate\(candidate, card\)\)/);
 });
 
 test("右カラムは履歴リストだけをスクロールし、詳細パネルと通常フローで分離する", async () => {
@@ -572,6 +612,7 @@ test("生成設定は左カラムだけで編集し、1行要約と中央ショ�
 test("右Detailsは生成済み画像の実績値を読み取り専用で表示する", async () => {
   const html = await fs.readFile("public/index.html", "utf8");
   const app = await fs.readFile("public/app.js", "utf8");
+  const studio = await fs.readFile("public/features/studio-controller.js", "utf8");
   const detailsPanel = html.match(/data-studio-meta-panel="details"[\s\S]*?<\/section>/)?.[0] ?? "";
   const parametersPanel = html.match(/data-studio-meta-panel="parameters"[\s\S]*?<\/section>/)?.[0] ?? "";
 
@@ -592,12 +633,15 @@ test("右Detailsは生成済み画像の実績値を読み取り専用で表示�
   ]) {
     assert.ok(parametersPanel.includes(`id="${id}"`), `${id} should be a Parameters value`);
   }
-  assert.match(app, /setStudioMetadataValue\(elements\.studioMetaScheduler,\s*settings\.scheduler\)/);
+  assert.match(studio, /setMetadataValue\(elements\.studioMetaScheduler,\s*settings\.scheduler\)/);
 });
 
 test("右Promptは全文を折り返し、既存コピー形式を再利用する", async () => {
   const html = await fs.readFile("public/index.html", "utf8");
-  const app = await fs.readFile("public/app.js", "utf8");
+  const [studio, historyController] = await Promise.all([
+    fs.readFile("public/features/studio-controller.js", "utf8"),
+    fs.readFile("public/features/history-controller.js", "utf8")
+  ]);
   const css = await fs.readFile("public/style.css", "utf8");
   const promptPanel = html.match(/data-studio-meta-panel="prompt"[\s\S]*?<\/section>/)?.[0] ?? "";
 
@@ -606,8 +650,8 @@ test("右Promptは全文を折り返し、既存コピー形式を再利用す�
   assert.match(promptPanel, /id="studioCopyPromptButton"/);
   assert.match(promptPanel, /id="studioCopyNegativeButton"/);
   assert.match(promptPanel, /id="studioCopyMetadataButton"/);
-  assert.match(app, /buildPromptText\(generation\)/);
-  assert.match(app, /buildMetadataText\(generation,\s*image\)/);
+  assert.match(`${studio}\n${historyController}`, /buildPromptText\(generation\)/);
+  assert.match(`${studio}\n${historyController}`, /buildMetadataText\(generation,\s*image\)/);
   assert.match(css, /\.studioPromptReadout p\s*\{[\s\S]*?overflow-wrap:\s*anywhere;[\s\S]*?white-space:\s*pre-wrap/);
   assert.match(css, /\.studioMetadataGrid dd\s*\{[\s\S]*?text-overflow:\s*ellipsis;[\s\S]*?white-space:\s*nowrap/);
 });
@@ -615,14 +659,17 @@ test("右Promptは全文を折り返し、既存コピー形式を再利用す�
 test("生成画面は中央画像・履歴・フィルターで共通Favoriteを使う", async () => {
   const html = await fs.readFile("public/index.html", "utf8");
   const app = await fs.readFile("public/app.js", "utf8");
+  const imageState = await fs.readFile("public/features/image-state.js", "utf8");
+  const studio = await fs.readFile("public/features/studio-controller.js", "utf8");
+  const historyController = await fs.readFile("public/features/history-controller.js", "utf8");
 
   assert.match(html, /id="studioMainFavoriteButton"[\s\S]*?aria-label="お気に入りに追加"/);
   assert.match(html, /id="studioHistoryAllButton"[\s\S]*?id="studioHistoryFavoriteButton"/);
-  assert.match(app, /createFavoriteButton\(image,\s*\{\s*className:\s*"studioRecentFavorite"\s*\}\)/);
-  assert.match(app, /event\.stopPropagation\(\)/);
-  assert.match(app, /button\.setAttribute\("aria-label",\s*accessibleLabel\)/);
-  assert.match(app, /favorites=1/);
-  assert.match(app, /お気に入りの画像はまだありません/);
+  assert.match(studio, /imageState\.createFavoriteButton\(image,\s*\{\s*className:\s*"studioRecentFavorite"\s*\}\)/);
+  assert.match(imageState, /event\.stopPropagation\(\)/);
+  assert.match(imageState, /button\.setAttribute\("aria-label",\s*accessibleLabel\)/);
+  assert.match(historyController, /favorites=1/);
+  assert.match(studio, /お気に入りの画像はまだありません/);
 });
 
 test("LoRAの基本Triggerと衣装プリセットを分離し、衣装は明示選択だけで送る", async () => {
@@ -643,7 +690,7 @@ test("LoRAの基本Triggerと衣装プリセットを分離し、衣装は明示
   assert.match(app, /targetField:\s*profile\?\.category === "direction" \? undefined : "character"/);
   assert.match(app, /appendTriggersToRawPrompt\(elements\.prompt\.value,\s*automaticRawLoraTriggers\(\)\)/);
   assert.match(app, /buildFinalPrompt\(readStructuredSections\(\),\s*activeAppliedTriggerWords\(\)\)/);
-  assert.match(app, /enabled:\s*!disabledLoras\.has\(name\)/);
+  assert.match(app, /enabled:\s*!promptLoraCoordinator\.isDisabled\(name\)/);
   assert.match(app, /characterTriggerWords:\s*resolveLoraBaseTriggerWords/);
   assert.match(app, /outfitChoiceId/);
   assert.match(app, /outfitTriggerWords/);
@@ -662,6 +709,7 @@ test("AI出力Importは編集中の内容を背景操作で閉じない", async 
 test("設定画面は既存設定をカテゴリ別の2カラムへ整理する", async () => {
   const html = await fs.readFile("public/index.html", "utf8");
   const app = await fs.readFile("public/app.js", "utf8");
+  const settingsNavigation = await fs.readFile("public/features/settings-navigation.js", "utf8");
   const css = await fs.readFile("public/style.css", "utf8");
 
   assert.match(css, /\.settingsLayout\s*\{[\s\S]*?grid-template-columns:\s*220px minmax\(0, 1fr\)[\s\S]*?min-width:\s*0/);
@@ -694,13 +742,16 @@ test("設定画面は既存設定をカテゴリ別の2カラムへ整理する"
   assert.match(loraPanel, /id="settingsLoraDetails"/);
   assert.match(loraPanel, /id="civitaiDetails"/);
 
-  assert.match(app, /function activateSettingsCategory\(categoryId[\s\S]*?panel\.hidden = !selected/);
-  assert.match(app, /settingsCategoryNav\.addEventListener\("click"[\s\S]*?activateSettingsCategory/);
-  assert.match(app, /settingsCategorySelect\.addEventListener\("change"[\s\S]*?activateSettingsCategory/);
-  assert.match(app, /settingsSearchResults\.addEventListener\("click"[\s\S]*?targetId:\s*button\.dataset\.settingsSearchTarget/);
+  assert.match(app, /createSettingsNavigation\(\{[\s\S]*?settingsCategoryNav: elements\.settingsCategoryNav[\s\S]*?settingsSearchResults: elements\.settingsSearchResults[\s\S]*?document,[\s\S]*?window,[\s\S]*?requestAnimationFrame/);
+  assert.match(app, /const controllerInitOrder = \[[\s\S]*?settingsNavigation[\s\S]*?\];/);
+  assert.match(app, /settingsNavigation\.activate\("lora", \{ targetId: "settingsLoraDetails", focus: true \}\)/);
+  assert.match(settingsNavigation, /function activate\(categoryId[\s\S]*?panel\.hidden = !selected/);
+  assert.match(settingsNavigation, /settingsCategoryNav\.addEventListener\("click", onNavClick\)/);
+  assert.match(settingsNavigation, /settingsCategorySelect\.addEventListener\("change", onSelectChange\)/);
+  assert.match(settingsNavigation, /settingsSearchResults\.addEventListener\("click", onResultsClick\)/);
   assert.match(app, /function renderLoraSyncNotice\(messages\)[\s\S]*?elements\.loraSyncNotice[\s\S]*?elements\.settingsLoraSyncNotice/);
-  assert.match(app, /SETTINGS_SEARCH_INDEX[\s\S]*?Checkpoint[\s\S]*?Webhook[\s\S]*?Tailscale[\s\S]*?衣装/);
-  assert.match(app, /一致する設定がありません/);
+  assert.match(settingsNavigation, /SETTINGS_SEARCH_INDEX[\s\S]*?Checkpoint[\s\S]*?衣装[\s\S]*?Webhook[\s\S]*?Tailscale/);
+  assert.match(settingsNavigation, /一致する設定がありません/);
   assert.match(app, /elements\.studioGenerationSettingsMount\.append\(elements\.promptPartsDetails\)/);
 
   for (const id of [
@@ -716,17 +767,23 @@ test("設定画面は既存設定をカテゴリ別の2カラムへ整理する"
 
 test("設定画面はTask 04/05の保存方式と既存イベントを維持する", async () => {
   const app = await fs.readFile("public/app.js", "utf8");
+  const preferences = await fs.readFile("public/core/preferences.js", "utf8");
+  const settingsNavigation = await fs.readFile("public/features/settings-navigation.js", "utf8");
+  const settingsDiscord = await fs.readFile("public/features/settings-discord.js", "utf8");
   const html = await fs.readFile("public/index.html", "utf8");
 
-  assert.match(app, /localStorage\.getItem\(TITLE_STORAGE_KEYS\.mode/);
-  assert.match(app, /localStorage\.setItem\(TITLE_STORAGE_KEYS\.mode/);
-  assert.match(app, /localStorage\.setItem\(TITLE_STORAGE_KEYS\.template/);
-  assert.match(app, /getJson\("\/api\/discord\/settings"\)/);
-  assert.match(app, /patchJson\("\/api\/discord\/settings"/);
-  assert.match(app, /postJson\("\/api\/discord\/test"/);
-  assert.match(app, /elements\.saveDiscordSettingsButton\.addEventListener\("click", saveDiscordSettings\)/);
-  assert.match(app, /elements\.sendDiscordTestButton\.addEventListener\("click", sendDiscordTestNotification\)/);
-  assert.match(app, /activateSettingsCategory\("lora",\s*\{\s*targetId:\s*"settingsLoraDetails"/);
+  assert.match(app, /preferences\.readTitleSettings\(\)/);
+  assert.match(app, /preferences\.writeTitleSettings\(mode, template\)/);
+  assert.match(preferences, /titleGenerationMode:\s*"localImageChat\.titleGenerationMode"/);
+  assert.match(preferences, /titleTemplate:\s*"localImageChat\.titleTemplate"/);
+  assert.match(settingsDiscord, /getJson\("\/api\/discord\/settings"\)/);
+  assert.match(settingsDiscord, /patchJson\("\/api\/discord\/settings"/);
+  assert.match(settingsDiscord, /postJson\("\/api\/discord\/test"/);
+  assert.match(settingsDiscord, /elements\.saveDiscordSettingsButton\.addEventListener\("click", onSaveClick\)/);
+  assert.match(settingsDiscord, /elements\.sendDiscordTestButton\.addEventListener\("click", onTestClick\)/);
+  assert.match(app, /createDiscordSettings\(\{[\s\S]*?discordAutoSend: elements\.discordAutoSend[\s\S]*?discordSettingsStatus: elements\.discordSettingsStatus[\s\S]*?onSummaryChanged: syncSettingsConnectionSummary/);
+  assert.match(app, /settingsNavigation\.activate\("lora",\s*\{\s*targetId:\s*"settingsLoraDetails"/);
+  assert.match(settingsNavigation, /SETTINGS_CATEGORIES/);
   assert.match(html, /id="discordDetails"[\s\S]*?id="discordGenerationAutoSend"[\s\S]*?id="saveDiscordSettingsButton"/);
   assert.match(html, /id="titleGenerationDetails"[\s\S]*?id="titleGenerationMode"[\s\S]*?id="titleTemplate"/);
 });
@@ -734,6 +791,7 @@ test("設定画面はTask 04/05の保存方式と既存イベントを維持す�
 test("Task25のLoRAブラウザーは共有ツリー・相対場所・狭幅導線を持つ", async () => {
   const html = await fs.readFile("public/index.html", "utf8");
   const app = await fs.readFile("public/app.js", "utf8");
+  const loraLibrary = await fs.readFile("public/features/lora-library.js", "utf8");
   const css = await fs.readFile("public/style.css", "utf8");
   const catalog = await fs.readFile("public/preset-catalog.js", "utf8");
 
@@ -746,11 +804,11 @@ test("Task25のLoRAブラウザーは共有ツリー・相対場所・狭幅導�
   assert.match(catalog, /export function buildLoraFolderTree\(items = \[\]\)/);
   assert.match(catalog, /export function filterItemsByFolder\(items = \[\], selectedFolder = ""\)/);
   assert.match(catalog, /export function formatLoraRelativeLocation\(item\)/);
-  assert.match(app, /function renderLoraFolderTree\(container, items/);
-  assert.match(app, /filterItemsByFolder\(installedLoras, selectedLoraFolder\)/);
-  assert.match(app, /formatLoraRelativeLocation\(lora\)/);
-  assert.match(app, /folderBrowser:\s*true/);
-  assert.match(app, /function shouldUseLoraDetailModal\(\)/);
+  assert.match(app, /function renderLoraFolderTree\(container, items, options\)[\s\S]*?loraLibrary\.renderFolderTree/);
+  assert.match(loraLibrary, /filterItemsByFolder\(items, selectedFolder\)/);
+  assert.match(loraLibrary, /formatLoraRelativeLocation\(lora\)/);
+  assert.match(loraLibrary, /folderBrowser:\s*true/);
+  assert.match(loraLibrary, /matchMedia\?\.\("\(max-width: 1099px\)"\)/);
   assert.match(css, /\.loraWorkspace\s*\{[\s\S]*?minmax\(180px, 220px\)[\s\S]*?minmax\(280px, 1fr\)[\s\S]*?minmax\(280px, 1fr\)/);
   assert.match(css, /\.loraPickerBody \.pickerThumb img\s*\{\s*object-fit:\s*contain/);
   assert.match(css, /@media \(max-width: 1099px\)[\s\S]*?\.loraFolderPane,[\s\S]*?\.loraPreview\s*\{\s*display:\s*none/);

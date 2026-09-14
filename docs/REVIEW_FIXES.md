@@ -1,3 +1,33 @@
+# Task 27 Attention Lab README再現コマンド修正
+
+更新日: 2026-09-06
+状態: **修正完了／監督確認済み**
+
+対象:
+
+```text
+C:\AI\Labs\Forge-Neo-gfx1031-Attention-Lab\README-LAB.md
+```
+
+監督レビューで、PowerShellとして記載された再現コマンドに次の不整合を確認した。
+
+1. `\.venv\Scripts\python.exe`はcurrent drive rootを指し、Lab直下のvenvを実行しない。PowerShellなら`& .\.venv\Scripts\python.exe`とする。
+2. `call`は`cmd.exe`のbuilt-inであり、PowerShellコードブロックへ直接書いても実行できない。
+3. `vcvars64.bat`で初期化した環境をpipへ引き継ぐには、既存wrapperを使うか、`cmd.exe /d /s /c`の同一子プロセス内で`call vcvars64.bat && ...python.exe -m pip ...`を実行する必要がある。
+
+修正条件:
+
+- Lab READMEだけを修正する。
+- 実際に使用したwrapper/scriptを優先して参照し、未検証のone-linerを新規に断定しない。
+- PowerShell用とcmd用のコマンドを混在させない。
+- 既存ログ、probe、venv、Build Tools、Forgeソース、LIC docsを変更しない。
+- コマンドのsyntaxをread-onlyで確認する。再install、再probe、Forge起動はしない。
+- 修正後に対象箇所、確認方法、Lab git diff/statusを報告する。
+
+性能判定`NO-GO`、Task 27の完了状態、本番非変更の結論は変えない。
+
+---
+
 # Task 22 実機Profile activation失敗
 
 更新日: 2026-08-15

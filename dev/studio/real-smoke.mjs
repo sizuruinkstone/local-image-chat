@@ -1,0 +1,65 @@
+import { createRequire } from "node:module";
+import os from "node:os";
+import path from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+import assert from "node:assert/strict";
+const require = createRequire(import.meta.url);
+const {chromium}=require(process.env.LIC_PLAYWRIGHT_MODULE || path.join(os.homedir(),".cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright"));
+const output=path.resolve("workbench/r3");await mkdir(output,{recursive:true});
+const browser=await chromium.launch({channel:"chrome",headless:true});
+const page=await browser.newPage({viewport:{width:1440,height:900}});
+const errors=[],requests=[],jobs=[];
+page.on("pageerror",e=>errors.push(e.message));page.on("console",m=>{if(m.type()==="error")errors.push(m.text());});
+page.on("request",r=>{if(r.method()==="POST" && new URL(r.url()).pathname==="/api/jobs")requests.push(r.postDataJSON());});
+page.on("response",async r=>{if(new URL(r.url()).pathname.startsWith("/api/jobs") && r.ok()){const data=await r.json().catch(()=>null);if(data?.job)jobs.push({id:data.job.id,status:data.job.status,progress:data.job.progress});}});
+try{
+ await page.goto("http://127.0.0.1:41972/studio-next/");
+ await page.getByRole("button",{name:"Structured · 編集",exact:true}).waitFor();
+ await page.waitForFunction(()=>!document.querySelector(".prompt-open").disabled);
+ await page.getByRole("button",{name:"Structured · 編集",exact:true}).click();
+ const values={"キャラクター":"a small ceramic teapot and a single orange","容姿・衣装":"ivory glaze, matte texture","ポーズ・構図":"still life, eye level, balanced composition","シチュエーション・背景":"wooden table by a window, soft afternoon light","画風・品質":"warm editorial photography, detailed","追加プロンプト":"quiet atmosphere"};
+ for(const [name,value]of Object.entries(values))await page.getByRole("textbox",{name,exact:true}).fill(value);
+ await page.getByRole("textbox",{name:"Negative Prompt",exact:true}).fill("text, watermark, blur");
+ const final=await page.getByRole("textbox",{name:"Final Positive Prompt",exact:true}).inputValue();
+ await page.getByRole("button",{name:"Canvasへ戻る",exact:true}).click();
+ await page.locator(".resolution-summary").click();
+ await page.getByText("Custom dimensions",{exact:true}).click();
+ await page.getByRole("spinbutton",{name:"Width",exact:true}).fill("768");await page.getByRole("spinbutton",{name:"Width",exact:true}).press("Tab");
+ await page.getByRole("spinbutton",{name:"Height",exact:true}).fill("768");await page.getByRole("spinbutton",{name:"Height",exact:true}).press("Tab");
+ await page.getByRole("spinbutton",{name:"Seed",exact:true}).fill("314159");await page.getByRole("spinbutton",{name:"Seed",exact:true}).press("Tab");
+ await page.getByRole("dialog",{name:"制作設定",exact:true}).getByRole("button",{name:"閉じる",exact:true}).click();
+ if(page.viewportSize().width<=900) await page.getByRole("button",{name:"制作設定",exact:true}).click();
+ await page.getByRole("spinbutton",{name:"Steps",exact:true}).fill("16");await page.getByRole("spinbutton",{name:"Steps",exact:true}).press("Tab");
+ await page.keyboard.press("Escape");
+ await page.screenshot({animations:"disabled",path:path.join(output,"real-before-1440.png")});
+ await page.getByRole("button",{name:"Generate",exact:true}).click();
+ await page.waitForFunction(()=>["generating","queued"].includes(document.querySelector(".canvas-stage").dataset.state));
+ console.log("Real generation submitted");
+ assert.equal(requests[0].prompt,final);assert.equal(requests[0].negativePrompt,"text, watermark, blur");
+ await page.screenshot({animations:"disabled",path:path.join(output,"real-generating-1440.png")});
+ await page.waitForFunction(()=>["completed","error"].includes(document.querySelector(".canvas-stage").dataset.state),null,{timeout:300000});
+ assert.equal(await page.locator(".canvas-stage").getAttribute("data-state"),"completed",await page.locator(".canvas-error").textContent());
+ await page.waitForFunction(()=>{const i=document.querySelector(".artwork");return i.complete&&i.naturalWidth>0;});
+ await page.screenshot({animations:"disabled",path:path.join(output,"real-completed-1440.png")});
+ console.log("First real image displayed");
+ for(const [width,height]of [[1920,1080],[390,844],[430,932]]){
+  await page.setViewportSize({width,height});await page.screenshot({animations:"disabled",path:path.join(output,`real-completed-${width}.png`)});
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+ }
+ await page.setViewportSize({width:1440,height:900});
+ await page.locator(".seed-summary").click();await page.getByRole("spinbutton",{name:"Seed",exact:true}).fill("314160");await page.getByRole("spinbutton",{name:"Seed",exact:true}).press("Tab");
+ await page.getByRole("dialog",{name:"制作設定",exact:true}).getByRole("button",{name:"閉じる",exact:true}).click();
+ await page.getByRole("button",{name:"Generate",exact:true}).click();
+ await page.waitForFunction(()=>document.querySelector(".canvas-stage").dataset.state==="completed",null,{timeout:300000});
+ assert.equal(requests[1].settings.seed,314160);
+ console.log("Second real image displayed with changed seed");
+ await page.getByRole("button",{name:"Generate",exact:true}).click();
+ await page.getByRole("button",{name:"Cancel",exact:true}).click();
+ await page.waitForFunction(()=>document.querySelector(".canvas-stage").dataset.state==="cancelled",null,{timeout:120000});
+ const cancelled=(await (await page.request.get(`http://127.0.0.1:41972/api/jobs/${jobs.at(-1).id}`)).json()).job;
+ assert.equal(cancelled.status,"cancelled");jobs.push({id:cancelled.id,status:cancelled.status,progress:cancelled.progress});
+ console.log("Real cancel confirmed");
+ assert.deepEqual(errors,[]);
+ await writeFile(path.join(output,"real-report.json"),JSON.stringify({result:"PASS",runtime:requests[0].runtimeId,model:requests[0].settings.checkpoint,jobs,requests:requests.map(r=>({prompt:r.prompt,negativePrompt:r.negativePrompt,settings:r.settings})),errors},null,2));
+}catch(error){await page.screenshot({path:path.join(output,"real-failure.png")});await writeFile(path.join(output,"real-report.json"),JSON.stringify({result:"FAIL",error:error.message,errors,jobs},null,2));throw error;}
+finally{await browser.close();}

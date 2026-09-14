@@ -150,10 +150,12 @@ test("Task 10の履歴正規化はIP-Adapterの安全な参照メタデータだ
 });
 
 test("Task 10のUI契約は中央画像操作をIP-Adapter stateへ分離する", async () => {
-  const [html, app, style] = await Promise.all([
+  const [html, app, studio, style, ipAdapter] = await Promise.all([
     fs.readFile("public/index.html", "utf8"),
     fs.readFile("public/app.js", "utf8"),
-    fs.readFile("public/style.css", "utf8")
+    fs.readFile("public/features/studio-controller.js", "utf8"),
+    fs.readFile("public/style.css", "utf8"),
+    fs.readFile("public/features/ip-adapter-controller.js", "utf8")
   ]);
   assert.match(html, /id="studioMainIpAdapterButton"[\s\S]*title="この画像をIP-Adapter参照に使用"/);
   assert.match(html, /id="studioMainIpAdapterButton"[\s\S]*aria-label="この画像をIP-Adapter参照に使用"/);
@@ -161,18 +163,20 @@ test("Task 10のUI契約は中央画像操作をIP-Adapter stateへ分離する"
   assert.match(html, /id="finalIpAdapterButton"[\s\S]*aria-label="この画像をIP-Adapter参照に使用"/);
   assert.match(html, /accept="image\/png,image\/jpeg,image\/webp"/);
   assert.match(html, /id="ipAdapterStatus"[\s\S]*aria-live="polite"/);
-  assert.match(app, /function setIpAdapterReference\(/);
-  assert.match(app, /function setCurrentImageAsIpAdapterReference\(/);
-  assert.match(app, /referenceImageId: image\.id/);
-  assert.match(app, /event\.stopPropagation\(\)/);
-  assert.match(app, /function readIpAdapterPayload\(/);
+  assert.match(app, /createIpAdapterController\(\{/);
+  assert.match(ipAdapter, /function setReference\(/);
+  assert.match(ipAdapter, /function setCurrentImageAsReference\(/);
+  assert.match(ipAdapter, /referenceImageId: image\.id/);
+  assert.match(studio, /event\.stopPropagation\(\)/);
+  assert.match(app, /return ipAdapterController\.readPayload\(\)/);
   assert.match(app, /initImageReference/);
-  assert.match(app, /URL\.revokeObjectURL/);
-  const centralHandler = app.slice(app.indexOf("elements.studioMainIpAdapterButton.addEventListener"), app.indexOf("elements.studioMainCompareButton.addEventListener"));
+  assert.match(ipAdapter, /revokeObjectUrl\(url\)/);
+  assert.match(app, /onUseAsReference:\s*\(\.\.\.args\) => ipAdapterController\.setCurrentImageAsReference/);
+  const centralHandler = studio.slice(studio.indexOf("function useInspectionAsReference"), studio.indexOf("function compareInspection"));
   assert.doesNotMatch(centralHandler, /fetch\(|FileReader|fileToDataUrl|toDataURL/);
-  const hiresHandler = app.slice(app.indexOf("elements.finalIpAdapterButton.addEventListener"), app.indexOf("elements.sendFinalToImg2ImgButton.addEventListener"));
-  assert.match(centralHandler, /setCurrentImageAsIpAdapterReference\(studioInspection\?\.image/);
-  assert.match(hiresHandler, /setCurrentImageAsIpAdapterReference\(finalImage/);
+  const hiresHandler = studio.slice(studio.indexOf("function useFinalAsReference"), studio.indexOf("function useFinalAsImg2Img"));
+  assert.match(centralHandler, /onUseAsReference\(inspection\?\.image/);
+  assert.match(hiresHandler, /onUseAsReference\(finalImage/);
   assert.match(hiresHandler, /event\.stopPropagation\(\)/);
   assert.doesNotMatch(hiresHandler, /fetch\(|FileReader|fileToDataUrl|toDataURL/);
   assert.match(style, /\.ipAdapterSection/);

@@ -584,6 +584,16 @@ test("API v1のipAdapterは実Generation Runtime、参照解決、History保存�
   assert.equal(harness.requests.at(-1).ipAdapter.referenceBase64, ONE_PIXEL_PNG);
 });
 
+test('Scenesの明示weight 0は旧Job/API v1のProvider requestと履歴まで保持する',async t=>{
+  const harness=await createRuntimeHarness(t,{listLoras:async()=>[{name:'alpha'}]});
+  const legacy=harness.service.createLegacyJob({prompt:'scene',loras:[{name:'alpha',weight:0,enabled:true}],settings:{width:512,height:512,steps:5,candidateCount:1}},{kind:'generation'});
+  await waitUntil(()=>harness.jobs.get(legacy.id).status==='done');
+  assert.match(harness.requests[0].prompt,/<lora:alpha:0>/);assert.equal(harness.history.records[0].loras[0].weight,0);
+  const modern=await harness.service.createV1Job({mode:'txt2img',prompt:{structured:{situation:'scene'},rawOverride:null,negative:''},settings:{checkpoint:'checkpoint-x',width:512,height:512,steps:5,candidateCount:1},loras:[{name:'alpha',weight:0,enabled:true}]});
+  await waitUntil(()=>harness.jobs.get(modern.id).status==='done');
+  assert.match(harness.requests[1].prompt,/<lora:alpha:0>/);assert.equal(harness.history.records[1].loras[0].weight,0);
+});
+
 test("旧Job経路のGeneration RuntimeはconfigのLoRA上限と既定Weightを使う", async (t) => {
   const harness = await createRuntimeHarness(t, {
     lora: { maxSelected: 2, defaultWeight: 0.85 }

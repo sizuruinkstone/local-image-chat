@@ -59,11 +59,11 @@ codex mcp add local_image_chat `
   -- node <repo>\src\mcp\server.js
 ```
 
-登録後は `codex mcp get local_image_chat` と `codex mcp list` で、stdio、`node`、`src/mcp/server.js`、`LOCAL_IMAGE_CHAT_URL`、enabled状態を確認します。登録済みMCPは既存のCodex sessionへ自動反映される前提にせず、Hostを再読込して新規chat／新規CLI sessionでTool一覧を確認してください。実AI Hostでは、9 Toolの認識後に自然言語の要求から環境確認、非同期生成、履歴確認、画像確認、必要な場合の派生生成の順に呼び出します。
+登録後は `codex mcp get local_image_chat` と `codex mcp list` で、stdio、`node`、`src/mcp/server.js`、`LOCAL_IMAGE_CHAT_URL`、enabled状態を確認します。登録済みMCPは既存のCodex sessionへ自動反映される前提にせず、Hostを再読込して新規chat／新規CLI sessionでTool一覧を確認してください。実AI Hostでは、13 Toolの認識後に自然言語の要求から環境確認、非同期生成、履歴確認、画像確認、必要な場合の派生生成の順に呼び出します。
 
 ## Tools
 
-登録するToolは次の9つです。
+登録するToolは既存9つと部分プロファイル4つの計13個です。
 
 - `get_capabilities`: Checkpoint、Sampler、Scheduler、LoRA、既定設定を取得します。生成前の公開identifier確認に使用します。
 - `generate_image`: txt2imgの非同期Jobを受付し、`id`と`queued`を返します。生成完了まで待ちません。requestには `metadata.client = "mcp"` が付与されます。既存画像を視覚参照に使う場合は公開`imageId`を`ipAdapter.referenceImageId`へ指定できます。
@@ -171,3 +171,23 @@ GET  /api/images/:imageId/original
 ```
 
 `regenerate_image`もtxt2img履歴だけを対象とします。img2img、inpaint、画像アップロード、MCP Resource、Prompt template、MCP Task API、Streamable HTTP／SSE、任意URL fetchは対象外です。
+
+
+## 部分プロファイル（Studio共有）
+
+- `list_section_profiles {}`: sampleを含むID/field/name/text/contentRating一覧。
+- `create_section_profile {field,name,text,contentRating?}`: 新規登録。`contentRating`は`general`または`nsfw`、省略時は`general`。再送前は一覧確認。
+- `update_section_profile {id,field,name,text,contentRating?}`: 一覧で確認したIDを更新。省略時は既存分類を維持する。
+- `delete_section_profile {id}`: 削除。同じIDへの再実行は安全。
+
+fieldは`character`（キャラクター）、`appearance`（容姿・衣装）、`composition`（ポーズ・構図）、`situation`（背景）。名前1〜100文字、Prompt1〜12000文字、保存上限300件。登録例:
+
+```json
+{"field":"situation","name":"神社・夕暮れ","text":"shrine grounds, sunset, warm evening light"}
+```
+
+API: `/api/v1/section-profiles` GET/POST、`/:id` PATCH/DELETE。サーバーdata directoryの`section-profiles.json`へ保存する。MCP自身はfilesystemへ直接保存しない。Studioは起動時と「呼び出し」を開くときに共有一覧を取得する。適用中snapshotと過去履歴は保存元更新/削除で変更されない。
+
+旧localStorageの自作catalogとsample非表示設定は、対応サーバーへ接続したStudioから`/import`で移行する。取り込み済IDをサーバーへ記録し、再読込時に更新を上書きしたり削除済profileを復活させたりしない。ブラウザの元データは消さない。移行失敗時は「呼び出し」でエラー表示し、次回開いたときに再試行する。旧サーバー/dev fixtureは従来のlocal catalogを保持。
+
+反映にはWeb Server再起動とMCP Hostでの接続再読込が必要。更新前のMCP processや既存chatがツール一覧を自動更新するとは限らない。

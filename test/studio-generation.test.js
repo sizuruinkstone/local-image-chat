@@ -1,0 +1,35 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import {generationView} from "../public/frontend/app/generation-view.js";
+import {createStudioDevServer} from "../dev/studio/server.mjs";
+import http from "node:http";
+import {once} from "node:events";
+const base=()=>({ready:true,generation:{phase:"idle",busy:false,job:null},runtime:{activeRuntime:{available:true}},prompt:{prompt:"teapot"},completed:null,currentImage:null});
+test("R3 projects real lifecycle without inventing progress and preserves previous candidates",()=>{
+ const s=base();assert.equal(generationView(s).phase,"ready");
+ s.generation={busy:true,phase:"preparing"};assert.equal(generationView(s).phase,"submitting");assert.equal(generationView(s).progress,undefined);
+ s.generation.activeJobId="a";s.generation.job={status:"queued",progress:0};assert.equal(generationView(s).phase,"queued");
+ s.generation.job={status:"running",progress:42};assert.equal(generationView(s).phase,"generating");assert.equal(generationView(s).progress,42);
+ s.generation.cancelRequested=true;assert.equal(generationView(s).phase,"cancelling");assert.equal(generationView(s).canCancel,false);
+ s.currentImage={id:"old",seed:7};s.completed={images:[s.currentImage]};s.generation={busy:false,phase:"cancelled"};
+ assert.equal(generationView(s).phase,"cancelled");assert.equal(generationView(s).image.id,"old");
+ s.generation.phase="failed";assert.equal(generationView(s).phase,"error");
+ s.generation.phase="succeeded";assert.equal(generationView(s).phase,"completed");
+ s.runtime.activeRuntime.available=false;assert.equal(generationView(s).canGenerate,false);
+});
+test("R3 development proxy forwards authorized local job traffic and preserves normal entry isolation",async t=>{
+ const seen=[];
+ const backend=http.createServer((req,res)=>{seen.push([req.method,req.url]);res.setHeader("content-type","application/json");res.end('{"ok":true}');});backend.listen(0,"127.0.0.1");await once(backend,"listening");
+ const server=createStudioDevServer({backendUrl:`http://127.0.0.1:${backend.address().port}`});server.listen(0,"127.0.0.1");await once(server,"listening");
+ t.after(()=>{server.closeAllConnections();backend.closeAllConnections();server.close();backend.close();});
+ const origin=`http://127.0.0.1:${server.address().port}`;
+ assert.equal((await fetch(origin+"/api/jobs",{method:"POST",headers:{"content-type":"application/json",origin},body:"{}"})).status,200);
+ assert.equal((await fetch(origin+"/api/jobs/a",{method:"DELETE",headers:{origin}})).status,200);
+ assert.equal((await fetch(origin+"/api/loras/registry/ensure",{method:"POST",headers:{origin},body:"{}"})).status,200);
+ assert.equal((await fetch(origin+"/api/loras/uid",{method:"PATCH",headers:{origin},body:'{"favorite":true}'})).status,200);
+ assert.equal((await fetch(origin+"/api/loras/uid",{method:"PATCH",headers:{origin:"https://untrusted.invalid"},body:"{}"})).status,403);
+ assert.equal((await fetch(origin+"/api/jobs",{method:"POST",headers:{origin:"https://untrusted.invalid"},body:"{}"})).status,403);
+ assert.equal((await fetch(origin+"/api/settings",{method:"POST",body:"{}"})).status,405);
+ assert.deepEqual(seen,[["POST","/api/jobs"],["DELETE","/api/jobs/a"],["POST","/api/loras/registry/ensure"],["PATCH","/api/loras/uid"]]);
+ assert.throws(()=>createStudioDevServer({backendUrl:"https://example.com"}),/local HTTP/);
+});

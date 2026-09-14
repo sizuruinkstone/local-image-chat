@@ -1,0 +1,19 @@
+import {createRequire} from 'node:module';
+import {once} from 'node:events';
+import os from 'node:os';import path from 'node:path';import {writeFile,mkdir} from 'node:fs/promises';import assert from 'node:assert/strict';import {createStudioDevServer} from './server.mjs';
+const require=createRequire(import.meta.url),{chromium}=require(path.join(os.homedir(),'.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright'));
+const server=createStudioDevServer({backendUrl:'http://127.0.0.1:3030'});server.listen(0,'127.0.0.1');await once(server,'listening');const origin=`http://127.0.0.1:${server.address().port}`;
+const browser=await chromium.launch({channel:'chrome',headless:true}),page=await browser.newPage({viewport:{width:1440,height:900}}),errors=[];page.on('pageerror',e=>errors.push(e.message));await mkdir('workbench/r6',{recursive:true});
+const edit=async(name,value)=>{const input=page.getByRole('spinbutton',{name,exact:true});await input.fill(String(value));await input.press('Tab');};
+try {
+ const jobs=(await (await page.request.get(origin+'/api/jobs')).json()).jobs??[];assert.equal(jobs.filter(j=>['queued','running'].includes(j.status)).length,0);
+ await page.goto(origin+'/studio-next/');await page.waitForFunction(()=>!document.querySelector('.prompt-open').disabled);
+ await page.getByRole('button',{name:'Structured · 編集',exact:true}).click();await page.getByRole('textbox',{name:'キャラクター',exact:true}).fill('a small ceramic teapot on a wooden table, warm still life illustration');await page.keyboard.press('Escape');
+ await page.locator('.resolution-summary').click();await page.getByText('Custom dimensions',{exact:true}).click();await edit('Width',512);await edit('Height',512);await edit('Seed',515000);await page.keyboard.press('Escape');
+ await page.getByRole('button',{name:'Tools',exact:true}).click();await page.getByRole('navigation',{name:'Creation tools tabs'}).getByRole('button',{name:'Experiments',exact:true}).click();
+ await page.getByRole('textbox',{name:'Experiment name',exact:true}).fill('New Studio R6 real steps study');await page.getByRole('combobox',{name:'Experiment parameter',exact:true}).selectOption('steps');await page.getByRole('textbox',{name:'Experiment values',exact:true}).fill('8,10');
+ const response=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/experiments'&&r.request().method()==='POST');await page.getByRole('button',{name:'Experimentを開始',exact:true}).click();const created=await (await response).json();assert.ok(created.experiment,JSON.stringify(created));const id=created.experiment.id;console.log('Real experiment started',id);
+ await page.waitForFunction(id=>{const rows=[...document.querySelectorAll('.experiment-row')];return rows.some(r=>r.textContent.includes('New Studio R6 real steps study')&&r.textContent.includes('done'));},id,{timeout:300000});
+ const result=(await (await page.request.get(origin+'/api/experiments')).json()).experiments.find(e=>e.id===id);assert.equal(result.status,'done');
+ const row=page.locator('.experiment-row').filter({hasText:'New Studio R6 real steps study'}).first();await row.getByRole('button',{name:'画像を見る',exact:true}).click();await page.locator('.recent-image-grid .library-image').first().waitFor();assert.equal(await page.locator('.recent-image-grid .library-image').count(),2);await page.locator('.recent-image-grid .library-image').first().click();await page.waitForFunction(()=>{const i=document.querySelector('.viewer-image');return i.complete&&i.naturalWidth===512;});await page.screenshot({path:'workbench/r6/real-experiment.png',animations:'disabled'});assert.deepEqual(errors,[]);await writeFile('workbench/r6/real-experiment.json',JSON.stringify({result:'PASS',experiment:result,errors},null,2));console.log('R6 real provider experiment PASS');
+} finally {await browser.close();await new Promise(done=>server.close(done));}
